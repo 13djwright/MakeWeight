@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS printers (
 CREATE TABLE IF NOT EXISTS filaments (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, material TEXT, density REAL NOT NULL,
   flow REAL NOT NULL DEFAULT 1.0, color TEXT, cost_per_kg REAL, notes TEXT,
-  correction_json TEXT DEFAULT '{}', builtin INTEGER DEFAULT 0);
+  correction_json TEXT DEFAULT '{}', builtin INTEGER DEFAULT 0, max_vol_speed REAL);
 
 CREATE TABLE IF NOT EXISTS profiles (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, printer_id INTEGER, nozzle REAL NOT NULL DEFAULT 0.4,
@@ -104,6 +104,7 @@ class DB:
             "slice_jobs": {"print_time_s": "REAL", "priority": "INTEGER DEFAULT 5", "profile_json": "TEXT"},
             "runs": {"status": "TEXT DEFAULT 'done'", "name": "TEXT"},
             "robots": {"nozzle": "REAL DEFAULT 0.4", "class_name": "TEXT"},
+            "filaments": {"max_vol_speed": "REAL"},
         }
         for table, cols in wanted.items():
             have = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}

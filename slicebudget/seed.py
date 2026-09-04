@@ -10,22 +10,26 @@ from . import profiles
 from .db import DB, now
 
 FILAMENTS = [
-    ("Bambu PLA Basic", "PLA", 1.26, 0.98, "#3b82c4", 24.99),
-    ("Generic PLA", "PLA", 1.24, 1.00, "#7aa0c4", 20.0),
-    ("Bambu PLA Matte", "PLA", 1.31, 0.98, "#6b8fb3", 24.99),
-    ("Bambu PLA-CF", "PLA-CF", 1.26, 0.98, "#444444", 39.99),
-    ("Bambu PETG HF", "PETG", 1.27, 0.95, "#4aa3a3", 24.99),
-    ("Generic PETG", "PETG", 1.27, 1.00, "#5cb8b8", 22.0),
-    ("Bambu PETG-CF", "PETG-CF", 1.29, 0.95, "#3d6b6b", 39.99),
-    ("Generic ABS", "ABS", 1.04, 1.00, "#8d6e63", 22.0),
-    ("Bambu ABS", "ABS", 1.04, 1.00, "#a1887f", 24.99),
-    ("Generic ASA", "ASA", 1.07, 1.00, "#c9a227", 25.0),
-    ("Bambu ASA", "ASA", 1.05, 1.00, "#d4b04a", 29.99),
-    ("Bambu TPU 95A HF", "TPU", 1.22, 1.00, "#5e9c76", 39.99),
-    ("Generic TPU", "TPU", 1.21, 1.00, "#7fb894", 30.0),
-    ("Bambu PA6-CF", "PA-CF", 1.19, 1.00, "#333333", 79.99),
-    ("Bambu PAHT-CF", "PA-CF", 1.24, 1.00, "#2d2d2d", 79.99),
-    ("Bambu PC", "PC", 1.20, 1.00, "#9aa5b1", 39.99),
+    # name, material, density g/cm3, flow ratio, colour, $/kg, max volumetric speed mm3/s  (Bambu Studio 2.08 system profiles, 0.4 nozzle)
+    ("Bambu PLA Basic", "PLA", 1.26, 0.98, "#3b82c4", 24.99, 21),
+    ("Generic PLA", "PLA", 1.24, 0.98, "#7aa0c4", 20.0, 12),
+    ("Bambu PLA Matte", "PLA", 1.32, 0.98, "#6b8fb3", 24.99, 22),
+    ("Bambu PLA Tough", "PLA", 1.26, 0.98, "#4f77a8", 29.99, 21),
+    ("Bambu PLA-CF", "PLA-CF", 1.22, 0.98, "#444444", 39.99, 15),
+    ("Bambu PETG HF", "PETG", 1.28, 0.95, "#4aa3a3", 24.99, 21),
+    ("Bambu PETG Basic", "PETG", 1.25, 0.95, "#3f8f8f", 24.99, 15),
+    ("Generic PETG", "PETG", 1.27, 0.95, "#5cb8b8", 22.0, 12),
+    ("Bambu PET-CF", "PET-CF", 1.29, 0.9555, "#3d6b6b", 49.99, 5),
+    ("Generic ABS", "ABS", 1.04, 0.95, "#8d6e63", 22.0, 15),
+    ("Bambu ABS", "ABS", 1.04, 0.95, "#a1887f", 24.99, 16),
+    ("Generic ASA", "ASA", 1.04, 0.95, "#c9a227", 25.0, 12),
+    ("Bambu ASA", "ASA", 1.05, 0.95, "#d4b04a", 29.99, 18),
+    ("Bambu TPU 95A HF", "TPU", 1.22, 1.00, "#5e9c76", 39.99, 12),
+    ("Bambu TPU 95A", "TPU", 1.22, 1.00, "#6fae86", 34.99, 3.6),
+    ("Generic TPU", "TPU", 1.24, 1.00, "#7fb894", 30.0, 3.2),
+    ("Bambu PA6-CF", "PA-CF", 1.10, 0.96, "#333333", 79.99, 8),
+    ("Bambu PAHT-CF", "PA-CF", 1.06, 0.96, "#2d2d2d", 79.99, 8),
+    ("Bambu PC", "PC", 1.185, 0.94, "#9aa5b1", 39.99, 18),
 ]
 
 PRINTERS = [("Bambu Lab H2D", [0.4, 0.6], {"x": 350, "y": 320, "z": 325}), ("Bambu Lab P1S", [0.4, 0.6], {"x": 256, "y": 256, "z": 256})]
@@ -53,16 +57,38 @@ def parse_profile_note(note: str | None) -> dict | None:
     return p or None
 
 
+def refresh_builtin_filaments(db: DB) -> int:
+    """One-time upgrade of built-in filament rows to Bambu Studio 2.08's density / flow / max volumetric speed.
+    Adds filaments that did not exist before. Keeps corrections, colours and costs. Returns rows changed."""
+    if (db.setting("filaments_v") or 1) >= 2:
+        return 0
+    n = 0
+    with db.transaction():
+        for name, mat, dens, flow, color, cost, mvs in FILAMENTS:
+            row = db.one("SELECT * FROM filaments WHERE name=?", [name])
+            if row is None:
+                db.insert("filaments", {"name": name, "material": mat, "density": dens, "flow": flow, "color": color,
+                                        "cost_per_kg": cost, "max_vol_speed": mvs, "correction_json": "{}", "builtin": 1}); n += 1
+            elif row.get("builtin"):
+                if (row["density"], row["flow"], row.get("max_vol_speed")) != (dens, flow, mvs):
+                    db.update("filaments", row["id"], {"density": dens, "flow": flow, "max_vol_speed": mvs}); n += 1
+        db.x("UPDATE filaments SET max_vol_speed=12 WHERE max_vol_speed IS NULL")
+        db.set_setting("filaments_v", 2)
+    return n
+
+
 def ensure_seed(db: DB) -> None:
     if db.setting("seeded_v1"):
+        refresh_builtin_filaments(db)
         return
     with db.transaction():
         for name, nozzles, bed in PRINTERS:
             db.insert("printers", {"name": name, "nozzles_json": json.dumps(nozzles), "bed_json": json.dumps(bed), "builtin": 1})
         fil_ids = {}
-        for name, mat, dens, flow, color, cost in FILAMENTS:
+        for name, mat, dens, flow, color, cost, mvs in FILAMENTS:
             fil_ids[name] = db.insert("filaments", {"name": name, "material": mat, "density": dens, "flow": flow, "color": color,
-                                                     "cost_per_kg": cost, "correction_json": "{}", "builtin": 1})
+                                                     "cost_per_kg": cost, "max_vol_speed": mvs, "correction_json": "{}", "builtin": 1})
+        db.set_setting("filaments_v", 2)
         prof_ids = {}
         for nozzle in (0.4, 0.6):
             params = profiles.default_params(nozzle)

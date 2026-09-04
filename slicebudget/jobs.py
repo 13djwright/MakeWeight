@@ -68,7 +68,11 @@ def modifier_settings(md: dict) -> dict:
 
 
 def cache_key(mesh_sha: str, okey: str, phash: str, slicer_version: str) -> str:
-    return hashlib.sha1(f"{mesh_sha}|{okey}|{phash}|{slicer_version}".encode()).hexdigest()
+    return hashlib.sha1(f"{mesh_sha}|{okey}|{phash}|{slicer_version}|{profiles.MAPPING_VERSION}".encode()).hexdigest()
+
+
+def filament_key(filament: dict, machine: str) -> str:
+    return f"{filament['density']}|{filament.get('flow', 1)}|{filament.get('max_vol_speed') or 12}|{machine}"
 
 
 class JobManager:
@@ -119,6 +123,17 @@ class JobManager:
             self._wake.notify_all()
 
     # ---- public API
+    def machine_for_part(self, part: dict) -> str:
+        """P1S / H2D speed set for the robot's printer (falls back to the first printer, then P1S)."""
+        try:
+            robot = self.db.get("robots", part["robot_id"]) if part.get("robot_id") else None
+            pr = self.db.get("printers", robot["printer_id"]) if robot and robot.get("printer_id") else None
+            if pr is None:
+                pr = self.db.one("SELECT * FROM printers ORDER BY builtin DESC, id LIMIT 1")
+            return profiles.machine_key(pr["name"] if pr else None)
+        except Exception:  # noqa
+            return "P1S"
+
     def ensure_slice(self, part: dict, params: dict, filament: dict, purpose: str = "current",
                      priority: int = 5, run_id: int | None = None) -> dict:
         """Return an existing done/queued job for this exact configuration or queue a new one."""
@@ -131,6 +146,8 @@ class JobManager:
         phash = profiles.profile_hash(params, filament)
         ver = self.slicer_version or "none"
         ck = cache_key(mesh["sha256"], okey, phash, ver)
+        machine = self.machine_for_part(part)
+        fkey = filament_key(filament, machine)
         existing = self.db.one("SELECT * FROM slice_jobs WHERE cache_key=? AND status IN ('done','queued','running') ORDER BY status='done' DESC, id DESC LIMIT 1", [ck])
         if existing:
             if existing["status"] != "done" and priority < (existing.get("priority") or 5):
@@ -140,7 +157,7 @@ class JobManager:
                 jid = self.db.insert("slice_jobs", {
                     "part_id": part["id"], "cache_key": ck, "mesh_sha": mesh["sha256"], "orient_key": okey,
                     "profile_hash": phash, "profile_json": json.dumps(profiles.normalize(params)),
-                    "filament_key": f"{filament['density']}|{filament.get('flow', 1)}", "slicer_version": ver,
+                    "filament_key": fkey, "slicer_version": ver,
                     "status": "done", "purpose": purpose, "run_id": run_id, "created": now(), "started": existing["started"],
                     "finished": existing["finished"], "grams": existing["grams"], "cm3": existing["cm3"],
                     "time_s": 0.0, "print_time_s": existing.get("print_time_s"), "priority": priority})
@@ -149,7 +166,7 @@ class JobManager:
         jid = self.db.insert("slice_jobs", {
             "part_id": part["id"], "cache_key": ck, "mesh_sha": mesh["sha256"], "orient_key": okey,
             "profile_hash": phash, "profile_json": json.dumps(profiles.normalize(params)),
-            "filament_key": f"{filament['density']}|{filament.get('flow', 1)}", "slicer_version": ver,
+            "filament_key": fkey, "slicer_version": ver,
             "status": "queued", "purpose": purpose, "run_id": run_id, "created": now(), "priority": priority})
         job = self.db.get("slice_jobs", jid)
         self.events.emit("job", {"job": job})
@@ -248,8 +265,10 @@ class JobManager:
         if not mesh:
             raise RuntimeError("mesh missing")
         params = loads(job["profile_json"], {})
-        dens, flow = job["filament_key"].split("|")
-        ini = profiles.to_prusa_ini(params, {"density": float(dens), "flow": float(flow)}, self.slicer_version)
+        fk = (job["filament_key"] or "1.24|1").split("|") + [None, None]
+        dens, flow, mvs, machine = fk[0], fk[1], fk[2], fk[3]
+        ini = profiles.to_prusa_ini(params, {"density": float(dens), "flow": float(flow), "max_vol_speed": float(mvs) if mvs else None},
+                                    self.slicer_version, machine=machine or "P1S")
         stl = self.oriented_stl(part, mesh)
         keep = bool(self.db.setting("keep_gcode", False))
         jobdir = self.work_dir / "jobs" / str(job["id"])

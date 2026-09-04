@@ -533,16 +533,16 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 1 and m == "POST":
                 b = self._jbody()
                 fid = db.insert("filaments", {"name": b["name"], "material": b.get("material"), "density": float(b["density"]), "flow": float(b.get("flow") or 1.0),
-                                              "color": b.get("color"), "cost_per_kg": b.get("cost_per_kg"), "notes": b.get("notes"), "correction_json": "{}", "builtin": 0})
+                                              "color": b.get("color"), "cost_per_kg": b.get("cost_per_kg"), "notes": b.get("notes"), "max_vol_speed": b.get("max_vol_speed") or 12, "correction_json": "{}", "builtin": 0})
                 return self._json(app._filament_view(db.get("filaments", fid)))
             fid = r(1)
             if m == "PUT":
                 b = self._jbody()
-                upd = {k: v for k, v in b.items() if k in ("name", "material", "density", "flow", "color", "cost_per_kg", "notes")}
+                upd = {k: v for k, v in b.items() if k in ("name", "material", "density", "flow", "color", "cost_per_kg", "notes", "max_vol_speed")}
                 if b.get("reset_correction"):
                     upd["correction_json"] = "{}"
                 db.update("filaments", fid, upd)
-                if "density" in b or "flow" in b:
+                if "density" in b or "flow" in b or "max_vol_speed" in b:
                     for p in db.q("SELECT id FROM printed_parts WHERE filament_id=?", [fid]):
                         app.current_slice_for_part(p["id"])
                 return self._json(app._filament_view(db.get("filaments", fid)))
@@ -576,7 +576,8 @@ class Handler(BaseHTTPRequestHandler):
                 db.delete("profiles", pid); return self._json({"ok": True})
             if len(parts) == 3 and parts[2] == "prusa.ini":
                 prof = db.get("profiles", pid); fil = db.get("filaments", int(qs.get("filament") or (db.setting("default_filament_id") or 1)))
-                return self._bytes(profiles.to_prusa_ini(loads(prof["params_json"], {}), fil, app.jobs.slicer_version).encode(), "text/plain", f"{prof['name']}.ini")
+                pr = db.get("printers", prof["printer_id"]) if prof.get("printer_id") else db.one("SELECT * FROM printers ORDER BY builtin DESC, id LIMIT 1")
+                return self._bytes(profiles.to_prusa_ini(loads(prof["params_json"], {}), fil, app.jobs.slicer_version, machine=profiles.machine_key(pr["name"] if pr else None)).encode(), "text/plain", f"{prof['name']}.ini")
             if len(parts) == 3 and parts[2] == "bambu.json":
                 prof = db.get("profiles", pid); pr = db.get("printers", prof["printer_id"]) if prof.get("printer_id") else None
                 data = profiles.to_bambu_preset(loads(prof["params_json"], {}), prof["name"], pr["name"] if pr else "Bambu Lab P1S")
