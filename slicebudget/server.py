@@ -1,0 +1,927 @@
+"""HTTP API + static UI. Standard library only."""
+from __future__ import annotations
+
+import json
+import mimetypes
+import os
+import re
+import shutil
+import threading
+import time
+import traceback
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from . import exports, meshio, optimizer, orient, profiles, slicer_engine
+from .db import DB, loads, now
+from .jobs import Events, JobManager
+
+STATIC = Path(__file__).parent / "static"
+
+
+class App:
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.data_dir = self.root / "data"
+        self.mesh_dir = self.data_dir / "meshes"
+        self.mesh_dir.mkdir(parents=True, exist_ok=True)
+        self.db = DB(self.data_dir / "slicebudget.db")
+        self.events = Events()
+        cores = os.cpu_count() or 2
+        workers = self.db.setting("workers") or max(1, cores // 2)
+        self.jobs = JobManager(self.db, self.events, self.data_dir, workers=workers)
+        from . import seed
+        seed.ensure_seed(self.db)
+        self.jobs.start()
+        self.install_state = {"status": "idle", "message": "", "progress": 0.0}
+        threading.Thread(target=self._backup_loop, daemon=True).start()
+
+    # ------------------------------------------------------------ helpers
+    def robot_detail(self, rid: int) -> dict:
+        robot = self.db.get("robots", rid)
+        if not robot:
+            raise KeyError("robot")
+        sections = self.db.q("SELECT * FROM sections WHERE robot_id=? ORDER BY ord, id", [rid])
+        items = self.db.q("SELECT li.* FROM line_items li JOIN sections s ON s.id=li.section_id WHERE s.robot_id=? ORDER BY li.ord, li.id", [rid])
+        weigh = self.db.q("SELECT w.* FROM weigh_ins w JOIN line_items li ON li.id=w.line_item_id JOIN sections s ON s.id=li.section_id WHERE s.robot_id=? ORDER BY w.date, w.id", [rid])
+        parts = self.db.q("SELECT * FROM printed_parts WHERE robot_id=?", [rid])
+        by_item: dict[int, list] = {}
+        for w in weigh:
+            by_item.setdefault(w["line_item_id"], []).append(w)
+        parts_by_item = {p["line_item_id"]: p for p in parts if p.get("line_item_id")}
+        sec_map = {s["id"]: s for s in sections}
+        for s in sections:
+            s["counts"] = bool(s["counts"]); s["items"] = []; s["subtotal"] = 0.0; s["subtotal_est"] = 0.0
+        total = est_total = measured_mass = 0.0
+        flags = 0
+        for it in items:
+            ws = by_item.get(it["id"], [])
+            it["weigh_ins"] = ws
+            latest = ws[-1]["grams"] if ws else None
+            it["measured_grams"] = latest
+            it["best_grams"] = latest if latest is not None else (it["est_grams"] or 0.0)
+            it["total_grams"] = (it["qty"] or 0) * it["best_grams"]
+            it["total_est"] = (it["qty"] or 0) * (it["est_grams"] or 0.0)
+            p = parts_by_item.get(it["id"])
+            if p:
+                it["part"] = self._part_view(p)
+            s = sec_map.get(it["section_id"])
+            if s is None:
+                continue
+            s["items"].append(it)
+            s["subtotal"] += it["total_grams"]; s["subtotal_est"] += it["total_est"]
+            it["counted"] = bool(it.get("counted", 1))
+            if s["counts"] and it["counted"]:
+                total += it["total_grams"]; est_total += it["total_est"]
+                if latest is not None:
+                    measured_mass += it["total_grams"]
+                if it["needs_reweigh"]:
+                    flags += 1
+        printed = sum(it["total_grams"] for s in sections if s["counts"] for it in s["items"] if it.get("part") and it["counted"])
+        robot["sections"] = sections
+        robot["totals"] = {
+            "best_known": total, "estimated_only": est_total, "measured_fraction": (measured_mass / total) if total else 0.0,
+            "over_under": total - robot["weight_class_g"], "over_under_margin": total + (robot["margin_g"] or 0) - robot["weight_class_g"],
+            "printed": printed, "flags": flags, "printed_budget": robot["weight_class_g"] - (robot["margin_g"] or 0) - (total - printed),
+        }
+        robot["queue"] = self.db.one("SELECT COUNT(*) n FROM slice_jobs j JOIN printed_parts p ON p.id=j.part_id WHERE p.robot_id=? AND j.status IN ('queued','running')", [rid])["n"]
+        return robot
+
+    def _part_view(self, p: dict) -> dict:
+        p = dict(p)
+        p["orient"] = loads(p.pop("orient_json", None), {"mode": "auto", "quat": [0, 0, 0, 1]})
+        p["constraints"] = loads(p.pop("constraints_json", None), {})
+        p["locked"] = bool(p["locked"]); p["mirror"] = bool(p.get("mirror"))
+        mesh = self.db.get("meshes", p["mesh_id"]) if p.get("mesh_id") else None
+        if mesh:
+            mesh = dict(mesh); mesh["bbox"] = loads(mesh.pop("bbox_json", None), None); mesh.pop("path", None)
+        p["mesh"] = mesh
+        prof = self.db.get("profiles", p["profile_id"]) if p.get("profile_id") else None
+        fil = self.db.get("filaments", p["filament_id"]) if p.get("filament_id") else None
+        p["profile"] = self._profile_view(prof) if prof else None
+        p["filament"] = self._filament_view(fil) if fil else None
+        job = None
+        if mesh and prof and fil:
+            job = self.jobs.cached_result(p | {"orient_json": json.dumps(p["orient"])}, loads(prof["params_json"], {}), fil)
+            if not job:
+                job = self.db.one("SELECT * FROM slice_jobs WHERE part_id=? AND purpose='current' AND status IN ('queued','running','error') ORDER BY id DESC LIMIT 1", [p["id"]])
+        p["slice"] = job
+        if job and job.get("grams") is not None and fil:
+            p["corrected_grams"] = job["grams"] * (loads(fil.get("correction_json"), {}).get("factor") or 1.0)
+        return p
+
+    def _profile_view(self, prof: dict) -> dict:
+        prof = dict(prof)
+        prof["params"] = profiles.normalize(loads(prof.pop("params_json", None), {}))
+        prof["string"] = profiles.profile_string(prof["params"])
+        prof["effective_shells"] = profiles.effective_shell_layers(prof["params"])
+        prof["builtin"] = bool(prof.get("builtin"))
+        return prof
+
+    def _filament_view(self, f: dict) -> dict:
+        f = dict(f)
+        f["correction"] = loads(f.pop("correction_json", None), {})
+        f["builtin"] = bool(f.get("builtin"))
+        return f
+
+    def current_slice_for_part(self, part_id: int, priority: int = 3):
+        p = self.db.get("printed_parts", part_id)
+        if not p or not p.get("mesh_id") or not p.get("profile_id") or not p.get("filament_id"):
+            return None
+        prof = self.db.get("profiles", p["profile_id"]); fil = self.db.get("filaments", p["filament_id"])
+        try:
+            job = self.jobs.ensure_slice(p, loads(prof["params_json"], {}), fil, purpose="current", priority=priority)
+        except Exception as e:
+            return {"error": str(e)}
+        if job["status"] == "done":
+            self.jobs._after(job)
+        return job
+
+    def recalc_filament_correction(self, filament_id: int):
+        """Median of measured/sliced ratios over all parts using this filament."""
+        rows = self.db.q("""SELECT p.id, p.line_item_id FROM printed_parts p WHERE p.filament_id=?""", [filament_id])
+        ratios = []
+        for r in rows:
+            p = self.db.get("printed_parts", r["id"])
+            pv = self._part_view(p)
+            job = pv.get("slice")
+            ws = self.db.q("SELECT grams FROM weigh_ins WHERE line_item_id=? ORDER BY date DESC, id DESC LIMIT 1", [r["line_item_id"]]) if r["line_item_id"] else []
+            if job and job.get("status") == "done" and job.get("grams") and ws and not self.db.get("line_items", r["line_item_id"])["needs_reweigh"]:
+                ratios.append(ws[0]["grams"] / job["grams"])
+        ratios.sort()
+        corr = {"n": len(ratios)}
+        if ratios:
+            mid = len(ratios) // 2
+            med = ratios[mid] if len(ratios) % 2 else (ratios[mid - 1] + ratios[mid]) / 2
+            corr["factor"] = med
+            corr["spread"] = (max(ratios) - min(ratios)) / 2 if len(ratios) > 1 else 0.0
+            corr["ratios"] = ratios
+        self.db.update("filaments", filament_id, {"correction_json": json.dumps(corr)})
+        return corr
+
+    def _backup_loop(self):
+        while True:
+            try:
+                last = self.db.setting("last_backup", 0)
+                if time.time() - last > 86400:
+                    self.backup()
+            except Exception:
+                traceback.print_exc()
+            time.sleep(3600)
+
+    def backup(self) -> str:
+        bdir = self.data_dir / "backups"
+        bdir.mkdir(exist_ok=True)
+        name = time.strftime("slicebudget-%Y%m%d-%H%M%S")
+        tmp = bdir / (name + "-db")
+        tmp.mkdir(exist_ok=True)
+        import sqlite3
+        dst = sqlite3.connect(str(tmp / "slicebudget.db"))
+        self.db._conn.backup(dst); dst.close()
+        shutil.copytree(self.mesh_dir, tmp / "meshes", dirs_exist_ok=True)
+        out = shutil.make_archive(str(bdir / name), "zip", tmp)
+        shutil.rmtree(tmp)
+        for old in sorted(bdir.glob("slicebudget-*.zip"))[:-30]:
+            old.unlink()
+        self.db.set_setting("last_backup", time.time())
+        return out
+
+    def install_slicer_async(self):
+        if self.install_state["status"] == "running":
+            return
+        self.install_state = {"status": "running", "message": "Starting", "progress": 0.0}
+
+        def prog(msg, frac):
+            self.install_state.update({"message": msg, "progress": frac})
+            self.events.emit("install", self.install_state)
+
+        def run():
+            try:
+                cmd = slicer_engine.install(prog)
+                self.jobs.refresh_slicer()
+                self.install_state.update({"status": "done", "message": "Installed PrusaSlicer " + (self.jobs.slicer_version or ""), "progress": 1.0})
+            except Exception as e:
+                self.install_state.update({"status": "error", "message": str(e)})
+            self.events.emit("install", self.install_state)
+            self.events.emit("queue", self.jobs.queue_state())
+        threading.Thread(target=run, daemon=True).start()
+
+
+# ---------------------------------------------------------------- router
+class Handler(BaseHTTPRequestHandler):
+    app: App = None  # set at startup
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):  # quiet
+        if os.environ.get("SLICEBUDGET_DEBUG"):
+            super().log_message(fmt, *args)
+
+    # -- plumbing
+    def _json(self, obj, status=200):
+        body = json.dumps(obj, default=str).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _bytes(self, data: bytes, ctype: str, filename: str | None = None, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _body(self) -> bytes:
+        n = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(n) if n else b""
+
+    def _jbody(self) -> dict:
+        b = self._body()
+        return json.loads(b.decode()) if b else {}
+
+    def do_GET(self):
+        self._dispatch("GET")
+
+    def do_POST(self):
+        self._dispatch("POST")
+
+    def do_PUT(self):
+        self._dispatch("PUT")
+
+    def do_DELETE(self):
+        self._dispatch("DELETE")
+
+    def _dispatch(self, method):
+        try:
+            url = urllib.parse.urlparse(self.path)
+            path = url.path
+            qs = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+            if path.startswith("/api/"):
+                return self._api(method, path[5:].rstrip("/"), qs)
+            return self._static(path)
+        except KeyError as e:
+            self._json({"error": f"not found: {e}"}, 404)
+        except (ValueError, RuntimeError) as e:
+            self._json({"error": str(e)}, 400)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:  # noqa
+            traceback.print_exc()
+            try:
+                self._json({"error": str(e), "trace": traceback.format_exc()[-2000:]}, 500)
+            except Exception:
+                pass
+
+    def _static(self, path):
+        if path in ("/", ""):
+            path = "/index.html"
+        rel = path.lstrip("/")
+        if rel.startswith("static/"):
+            rel = rel[7:]
+        f = (STATIC / rel).resolve()
+        if not str(f).startswith(str(STATIC.resolve())) or not f.is_file():
+            self._json({"error": "not found"}, 404); return
+        ctype = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
+        data = f.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text/") or "javascript" in ctype else ""))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
+
+    # -- API
+    def _api(self, m, path, qs):
+        app = self.app; db = app.db
+        parts = path.split("/")
+        r = lambda i: int(parts[i])  # noqa
+
+        if path == "stream" and m == "GET":
+            return self._sse()
+
+        if path == "state":
+            return self._json({
+                "slicer": app.jobs.queue_state(), "install": app.install_state,
+                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "default_printer_id", "default_filament_id", "default_profile_id")},
+                "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
+                "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
+                "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
+                "robots": self._robot_list(), "version": "0.1.0", "root": str(app.root),
+                "classes": CLASSES,
+            })
+        if path == "settings" and m == "PUT":
+            body = self._jbody()
+            for k, v in body.items():
+                db.set_setting(k, v)
+            if "workers" in body:
+                app.jobs.set_workers(int(body["workers"]))
+            if "slicer_path" in body:
+                app.jobs.refresh_slicer()
+            return self._json({"ok": True, "slicer": app.jobs.queue_state()})
+        if path == "slicer/install" and m == "POST":
+            app.install_slicer_async(); return self._json(app.install_state)
+        if path == "slicer/refresh" and m == "POST":
+            return self._json(app.jobs.refresh_slicer())
+        if path == "import/archive" and m == "POST":
+            return self._json(exports.import_archive(self, self._body()))
+        if path == "backup" and m == "POST":
+            return self._json({"file": app.backup()})
+
+        # ---- robots
+        if path == "robots" and m == "GET":
+            return self._json(self._robot_list())
+        if path == "robots" and m == "POST":
+            b = self._jbody()
+            rid = db.insert("robots", {"name": b.get("name") or "New robot", "weight_class_g": float(b.get("weight_class_g") or 453.592),
+                                       "class_name": b.get("class_name"), "margin_g": float(b.get("margin_g") if b.get("margin_g") is not None else round(float(b.get("weight_class_g") or 453.592) * 0.01, 1)),
+                                       "printer_id": b.get("printer_id") or db.setting("default_printer_id"), "nozzle": b.get("nozzle") or 0.4,
+                                       "status": "active", "notes": b.get("notes"), "created": now(), "updated": now()})
+            for i, name in enumerate(b.get("sections") or ["Drive", "Electrical", "Weapon", "Misc Hardware", "Printed Parts", "Spares"]):
+                db.insert("sections", {"robot_id": rid, "name": name, "ord": i, "counts": 0 if name.lower().startswith("spare") else 1})
+            return self._json(app.robot_detail(rid))
+        if parts[0] == "robots" and len(parts) >= 2:
+            rid = r(1)
+            if len(parts) == 2:
+                if m == "GET":
+                    return self._json(app.robot_detail(rid))
+                if m == "PUT":
+                    b = self._jbody(); allowed = {"name", "weight_class_g", "class_name", "margin_g", "printer_id", "nozzle", "status", "notes"}
+                    db.update("robots", rid, {k: v for k, v in b.items() if k in allowed} | {"updated": now()})
+                    return self._json(app.robot_detail(rid))
+                if m == "DELETE":
+                    self._delete_robot(rid); return self._json({"ok": True})
+            sub = parts[2]
+            if sub == "duplicate" and m == "POST":
+                return self._json(app.robot_detail(self._duplicate_robot(rid, self._jbody().get("name"))))
+            if sub == "sections" and m == "POST":
+                b = self._jbody()
+                n = db.one("SELECT COALESCE(MAX(ord),-1)+1 o FROM sections WHERE robot_id=?", [rid])["o"]
+                sid = db.insert("sections", {"robot_id": rid, "name": b.get("name") or "Section", "ord": n, "counts": 1 if b.get("counts", True) else 0})
+                return self._json(db.get("sections", sid))
+            if sub == "weighin" and m == "POST":
+                b = self._jbody(); det = app.robot_detail(rid)
+                run_id = db.insert("runs", {"robot_id": rid, "kind": "weigh-in", "date": now(), "name": "Whole-robot weigh-in",
+                                            "inputs_json": json.dumps({"grams": b["grams"], "note": b.get("note")}),
+                                            "results_json": json.dumps({"sheet_total": det["totals"]["best_known"], "drift": det["totals"]["best_known"] - float(b["grams"])})})
+                return self._json(db.get("runs", run_id))
+            if sub == "events":
+                if m == "GET":
+                    return self._json(db.q("SELECT * FROM events WHERE robot_id=? ORDER BY date DESC, id DESC", [rid]))
+                b = self._jbody(); det = app.robot_detail(rid)
+                eid = db.insert("events", {"robot_id": rid, "date": b.get("date") or time.strftime("%Y-%m-%d"), "title": b.get("title"),
+                                           "placing": b.get("placing"), "notes": b.get("notes"), "total_snapshot_g": b.get("total_snapshot_g", det["totals"]["best_known"])})
+                return self._json(db.get("events", eid))
+            if sub == "parts" and m == "POST":
+                return self._json(self._create_part(rid, self._jbody()))
+            if sub == "runs" and m == "GET":
+                rows = db.q("SELECT * FROM runs WHERE robot_id=? ORDER BY date DESC", [rid])
+                for x in rows:
+                    x["inputs"] = loads(x.pop("inputs_json"), {}); x["results"] = loads(x.pop("results_json"), {})
+                return self._json(rows)
+            if sub == "optimize" and m == "POST":
+                b = self._jbody()
+                run_id = optimizer.start_optimization(app, rid, b)
+                return self._json(db.get("runs", run_id))
+            if sub == "slice_all" and m == "POST":
+                ps = db.q("SELECT id FROM printed_parts WHERE robot_id=?", [rid])
+                out = [app.current_slice_for_part(p["id"]) for p in ps]
+                return self._json({"queued": len([o for o in out if o])})
+            if sub == "export":
+                return self._export(rid, parts[3] if len(parts) > 3 else "csv", qs)
+
+        # ---- sections / items / weigh-ins / events
+        if parts[0] == "sections" and len(parts) == 2:
+            sid = r(1)
+            if m == "PUT":
+                b = self._jbody(); db.update("sections", sid, {k: (int(bool(v)) if k == "counts" else v) for k, v in b.items() if k in ("name", "ord", "counts")})
+                return self._json(db.get("sections", sid))
+            if m == "DELETE":
+                items = db.q("SELECT id FROM line_items WHERE section_id=?", [sid])
+                for it in items:
+                    self._delete_item(it["id"])
+                db.delete("sections", sid); return self._json({"ok": True})
+        if parts[0] == "sections" and len(parts) == 3 and parts[2] == "items" and m == "POST":
+            sid = r(1); b = self._jbody()
+            return self._json(self._create_item(sid, b))
+        if parts[0] == "items":
+            iid = r(1)
+            if len(parts) == 2:
+                if m == "PUT":
+                    return self._json(self._update_item(iid, self._jbody()))
+                if m == "DELETE":
+                    self._delete_item(iid); return self._json({"ok": True})
+            if parts[2] == "weighins" and m == "POST":
+                b = self._jbody(); it = db.get("line_items", iid)
+                if not it:
+                    raise KeyError("item")
+                pstr = None
+                pp = db.one("SELECT * FROM printed_parts WHERE line_item_id=?", [iid])
+                if pp and pp.get("profile_id"):
+                    prof = db.get("profiles", pp["profile_id"])
+                    pstr = profiles.profile_string(loads(prof["params_json"], {})) if prof else None
+                wid = db.insert("weigh_ins", {"line_item_id": iid, "grams": float(b["grams"]), "date": b.get("date") or time.strftime("%Y-%m-%d"), "note": b.get("note"), "profile_string": pstr})
+                db.update("line_items", iid, {"needs_reweigh": 0})
+                if it.get("component_id") and b.get("update_library"):
+                    db.update("components", it["component_id"], {"grams": float(b["grams"]), "grams_source": "measured", "updated": now()})
+                    db.insert("component_weighins", {"component_id": it["component_id"], "grams": float(b["grams"]), "date": b.get("date") or time.strftime("%Y-%m-%d")})
+                if pp and pp.get("filament_id"):
+                    app.recalc_filament_correction(pp["filament_id"])
+                return self._json(db.get("weigh_ins", wid))
+            if parts[2] == "move" and m == "POST":
+                b = self._jbody(); db.update("line_items", iid, {"section_id": int(b["section_id"])}); return self._json({"ok": True})
+        if parts[0] == "weighins" and m == "DELETE":
+            w = db.get("weigh_ins", r(1))
+            db.delete("weigh_ins", r(1))
+            if w:
+                pp = db.one("SELECT filament_id FROM printed_parts WHERE line_item_id=?", [w["line_item_id"]])
+                if pp and pp.get("filament_id"):
+                    app.recalc_filament_correction(pp["filament_id"])
+            return self._json({"ok": True})
+        if parts[0] == "events" and len(parts) == 2:
+            eid = r(1)
+            if m == "PUT":
+                b = self._jbody(); db.update("events", eid, {k: v for k, v in b.items() if k in ("date", "title", "placing", "notes", "total_snapshot_g")}); return self._json(db.get("events", eid))
+            if m == "DELETE":
+                db.delete("events", eid); return self._json({"ok": True})
+
+        # ---- library
+        if parts[0] == "components":
+            if len(parts) == 1:
+                if m == "GET":
+                    rows = db.q("SELECT c.*, (SELECT COUNT(*) FROM line_items li WHERE li.component_id=c.id) uses FROM components c ORDER BY category, name")
+                    return self._json(rows)
+                b = self._jbody()
+                cid = db.insert("components", {k: b.get(k) for k in ("name", "category", "vendor", "link", "price", "dimensions", "grams", "grams_source", "notes")} | {"created": now(), "updated": now()})
+                return self._json(db.get("components", cid))
+            cid = r(1)
+            if len(parts) == 2 and m == "PUT":
+                b = self._jbody()
+                db.update("components", cid, {k: v for k, v in b.items() if k in ("name", "category", "vendor", "link", "price", "dimensions", "grams", "grams_source", "notes")} | {"updated": now()})
+                if b.get("propagate") and b.get("grams") is not None:
+                    db.x("UPDATE line_items SET est_grams=?, est_source='library' WHERE component_id=?", [float(b["grams"]), cid])
+                return self._json(db.get("components", cid))
+            if len(parts) == 2 and m == "DELETE":
+                db.x("UPDATE line_items SET component_id=NULL WHERE component_id=?", [cid]); db.delete("components", cid); return self._json({"ok": True})
+            if parts[2] == "weighins":
+                if m == "GET":
+                    return self._json(db.q("SELECT * FROM component_weighins WHERE component_id=? ORDER BY date DESC", [cid]))
+                b = self._jbody()
+                db.insert("component_weighins", {"component_id": cid, "grams": float(b["grams"]), "date": b.get("date") or time.strftime("%Y-%m-%d"), "note": b.get("note")})
+                db.update("components", cid, {"grams": float(b["grams"]), "grams_source": "measured", "updated": now()})
+                if b.get("propagate", True):
+                    db.x("UPDATE line_items SET est_grams=?, est_source='library' WHERE component_id=?", [float(b["grams"]), cid])
+                return self._json(db.get("components", cid))
+        if parts[0] == "filaments":
+            if len(parts) == 1 and m == "POST":
+                b = self._jbody()
+                fid = db.insert("filaments", {"name": b["name"], "material": b.get("material"), "density": float(b["density"]), "flow": float(b.get("flow") or 1.0),
+                                              "color": b.get("color"), "cost_per_kg": b.get("cost_per_kg"), "notes": b.get("notes"), "correction_json": "{}", "builtin": 0})
+                return self._json(app._filament_view(db.get("filaments", fid)))
+            fid = r(1)
+            if m == "PUT":
+                b = self._jbody()
+                upd = {k: v for k, v in b.items() if k in ("name", "material", "density", "flow", "color", "cost_per_kg", "notes")}
+                if b.get("reset_correction"):
+                    upd["correction_json"] = "{}"
+                db.update("filaments", fid, upd)
+                if "density" in b or "flow" in b:
+                    for p in db.q("SELECT id FROM printed_parts WHERE filament_id=?", [fid]):
+                        app.current_slice_for_part(p["id"])
+                return self._json(app._filament_view(db.get("filaments", fid)))
+            if m == "DELETE":
+                if db.one("SELECT 1 FROM printed_parts WHERE filament_id=?", [fid]):
+                    raise ValueError("Filament is in use by printed parts")
+                db.delete("filaments", fid); return self._json({"ok": True})
+            if len(parts) == 3 and parts[2] == "recalc" and m == "POST":
+                return self._json(app.recalc_filament_correction(fid))
+        if parts[0] == "profiles":
+            if len(parts) == 1 and m == "POST":
+                b = self._jbody()
+                pid = db.insert("profiles", {"name": b.get("name") or "Profile", "printer_id": b.get("printer_id"), "nozzle": float(b.get("nozzle") or (b.get("params") or {}).get("nozzle") or 0.4),
+                                             "params_json": json.dumps(profiles.normalize(b.get("params") or {})), "builtin": 0, "notes": b.get("notes")})
+                return self._json(app._profile_view(db.get("profiles", pid)))
+            pid = r(1)
+            if len(parts) == 2 and m == "GET":
+                return self._json(app._profile_view(db.get("profiles", pid)))
+            if len(parts) == 2 and m == "PUT":
+                b = self._jbody(); upd = {k: v for k, v in b.items() if k in ("name", "printer_id", "nozzle", "notes")}
+                if "params" in b:
+                    upd["params_json"] = json.dumps(profiles.normalize(b["params"]))
+                db.update("profiles", pid, upd)
+                if "params" in b:
+                    for p in db.q("SELECT id FROM printed_parts WHERE profile_id=?", [pid]):
+                        self._flag_reweigh_for_part(p["id"]); app.current_slice_for_part(p["id"])
+                return self._json(app._profile_view(db.get("profiles", pid)))
+            if len(parts) == 2 and m == "DELETE":
+                if db.one("SELECT 1 FROM printed_parts WHERE profile_id=?", [pid]):
+                    raise ValueError("Profile is in use by printed parts")
+                db.delete("profiles", pid); return self._json({"ok": True})
+            if len(parts) == 3 and parts[2] == "prusa.ini":
+                prof = db.get("profiles", pid); fil = db.get("filaments", int(qs.get("filament") or (db.setting("default_filament_id") or 1)))
+                return self._bytes(profiles.to_prusa_ini(loads(prof["params_json"], {}), fil, app.jobs.slicer_version).encode(), "text/plain", f"{prof['name']}.ini")
+            if len(parts) == 3 and parts[2] == "bambu.json":
+                prof = db.get("profiles", pid); pr = db.get("printers", prof["printer_id"]) if prof.get("printer_id") else None
+                data = profiles.to_bambu_preset(loads(prof["params_json"], {}), prof["name"], pr["name"] if pr else "Bambu Lab P1S")
+                return self._bytes(json.dumps(data, indent=2).encode(), "application/json", f"{prof['name']}.json")
+        if parts[0] == "printers":
+            if len(parts) == 1 and m == "POST":
+                b = self._jbody()
+                pid = db.insert("printers", {"name": b["name"], "nozzles_json": json.dumps(b.get("nozzles") or [0.4]), "bed_json": json.dumps(b.get("bed") or {"x": 256, "y": 256, "z": 256})})
+                return self._json(db.get("printers", pid))
+            pid = r(1)
+            if m == "PUT":
+                b = self._jbody(); upd = {}
+                if "name" in b: upd["name"] = b["name"]
+                if "nozzles" in b: upd["nozzles_json"] = json.dumps(b["nozzles"])
+                if "bed" in b: upd["bed_json"] = json.dumps(b["bed"])
+                db.update("printers", pid, upd); return self._json(db.get("printers", pid))
+            if m == "DELETE":
+                db.delete("printers", pid); return self._json({"ok": True})
+
+        # ---- meshes
+        if path == "meshes" and m == "POST":
+            fname = urllib.parse.unquote(self.headers.get("X-Filename") or "part.stl")
+            data = self._body()
+            return self._json(self._store_mesh(fname, data, split=qs.get("split") == "1"))
+        if parts[0] == "meshes" and len(parts) == 3:
+            mesh = db.get("meshes", r(1))
+            if not mesh:
+                raise KeyError("mesh")
+            if parts[2] == "stl":
+                tri = meshio.load_mesh(Path(mesh["path"]))
+                if qs.get("part"):
+                    p = db.get("printed_parts", int(qs["part"]))
+                    tri = orient.apply_orientation(tri, loads(p["orient_json"], {}), float(p.get("scale") or 1.0), bool(p.get("mirror")))
+                return self._bytes(meshio.to_binary_stl_bytes(tri), "model/stl")
+
+        # ---- parts
+        if parts[0] == "parts":
+            pid = r(1)
+            p = db.get("printed_parts", pid)
+            if not p:
+                raise KeyError("part")
+            if len(parts) == 2:
+                if m == "GET":
+                    v = app._part_view(p)
+                    v["jobs"] = db.q("SELECT * FROM slice_jobs WHERE part_id=? ORDER BY id DESC LIMIT 200", [pid])
+                    return self._json(v)
+                if m == "PUT":
+                    return self._json(self._update_part(pid, self._jbody()))
+                if m == "DELETE":
+                    if p.get("line_item_id"):
+                        self._delete_item(p["line_item_id"])
+                    else:
+                        db.delete("printed_parts", pid)
+                    return self._json({"ok": True})
+            sub = parts[2]
+            if sub == "slice" and m == "POST":
+                b = self._jbody()
+                fil = db.get("filaments", b.get("filament_id") or p["filament_id"])
+                params = b.get("params") or loads(db.get("profiles", b.get("profile_id") or p["profile_id"])["params_json"], {})
+                job = app.jobs.ensure_slice(p, params, fil, purpose=b.get("purpose") or "sweep", priority=int(b.get("priority") or 5))
+                return self._json(job)
+            if sub == "auto_orient" and m == "POST":
+                mesh = db.get("meshes", p["mesh_id"])
+                tri = meshio.load_mesh(Path(mesh["path"]))
+                if p.get("mirror"):
+                    tri = meshio.transform(tri, None, 1.0, True)
+                cands = orient.auto_orient(tri)
+                if self._jbody().get("apply", True) and cands:
+                    self._update_part(pid, {"orient": {"mode": "auto", "quat": cands[0]["quat"], "label": cands[0]["label"]}})
+                return self._json({"candidates": cands[:12], "part": app._part_view(db.get("printed_parts", pid))})
+            if sub == "lay_on_face" and m == "POST":
+                b = self._jbody()
+                R = orient.rotation_face_down(b["normal"])
+                # compose with current orientation: normal is given in the currently displayed (oriented) frame
+                import numpy as np
+                cur = meshio.quat_to_mat(loads(p["orient_json"], {}).get("quat", [0, 0, 0, 1]))
+                q = meshio.mat_to_quat(R @ cur)
+                return self._json(self._update_part(pid, {"orient": {"mode": "manual", "quat": q, "label": "face down"}}))
+            if sub == "rotate" and m == "POST":
+                b = self._jbody()
+                import numpy as np
+                ax = {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}[b["axis"]]
+                R = meshio.axis_angle(ax, float(b["degrees"]) * np.pi / 180)
+                cur = meshio.quat_to_mat(loads(p["orient_json"], {}).get("quat", [0, 0, 0, 1]))
+                return self._json(self._update_part(pid, {"orient": {"mode": "manual", "quat": meshio.mat_to_quat(R @ cur), "label": "manual"}}))
+            if sub == "preset" and m == "POST":
+                b = self._jbody()
+                if b["name"] == "imported":
+                    q = [0, 0, 0, 1]
+                else:
+                    q = orient.quat_for_preset(b["name"])
+                return self._json(self._update_part(pid, {"orient": {"mode": "preset", "quat": q, "label": b["name"]}}))
+            if sub == "orientation_sweep" and m == "POST":
+                mesh = db.get("meshes", p["mesh_id"]); tri = meshio.load_mesh(Path(mesh["path"]))
+                if p.get("mirror"):
+                    tri = meshio.transform(tri, None, 1.0, True)
+                cands = orient.auto_orient(tri)[:6]
+                prof = db.get("profiles", p["profile_id"]); fil = db.get("filaments", p["filament_id"])
+                out = []
+                for c in cands:
+                    fake = dict(p); fake["orient_json"] = json.dumps({"quat": c["quat"]})
+                    job = app.jobs.ensure_slice(fake, loads(prof["params_json"], {}), fil, purpose="orient", priority=6)
+                    out.append({"candidate": c, "job": job})
+                return self._json(out)
+            if sub == "jobs" and m == "GET":
+                return self._json(db.q("SELECT * FROM slice_jobs WHERE part_id=? ORDER BY id DESC LIMIT 300", [pid]))
+            if sub == "mirror_copy" and m == "POST":
+                return self._json(self._mirror_copy(pid, self._jbody().get("name")))
+
+        # ---- jobs
+        if path == "jobs" and m == "GET":
+            st = qs.get("status")
+            if st:
+                rows = db.q("SELECT j.*, p.robot_id, li.description part_name FROM slice_jobs j LEFT JOIN printed_parts p ON p.id=j.part_id LEFT JOIN line_items li ON li.id=p.line_item_id WHERE j.status=? ORDER BY j.priority, j.id DESC LIMIT 200", [st])
+            else:
+                rows = db.q("SELECT j.*, p.robot_id, li.description part_name FROM slice_jobs j LEFT JOIN printed_parts p ON p.id=j.part_id LEFT JOIN line_items li ON li.id=p.line_item_id WHERE j.status IN ('queued','running') OR j.id IN (SELECT id FROM slice_jobs ORDER BY id DESC LIMIT 40) ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, j.priority, j.id DESC LIMIT 120")
+            stats = db.one("SELECT COUNT(*) n, COALESCE(SUM(time_s),0) t FROM slice_jobs WHERE status='done'")
+            return self._json({"jobs": rows, "state": app.jobs.queue_state(), "cache": {"done": stats["n"], "time_s": stats["t"]}})
+        if path == "jobs/cancel" and m == "POST":
+            b = self._jbody(); app.jobs.cancel_queued(b.get("run_id"), b.get("part_id")); return self._json({"ok": True})
+        if path == "jobs/clear_cache" and m == "POST":
+            db.x("DELETE FROM slice_jobs WHERE status IN ('done','error','cancelled')"); return self._json({"ok": True})
+        if path == "jobs/retry_errors" and m == "POST":
+            db.x("UPDATE slice_jobs SET status='queued', error=NULL WHERE status='error'"); app.jobs.start(); return self._json({"ok": True})
+
+        # ---- runs
+        if parts[0] == "runs":
+            run_id = r(1)
+            run = db.get("runs", run_id)
+            if not run:
+                raise KeyError("run")
+            if len(parts) == 2 and m == "GET":
+                run["inputs"] = loads(run.pop("inputs_json"), {}); run["results"] = loads(run.pop("results_json"), {})
+                return self._json(run)
+            if len(parts) == 2 and m == "DELETE":
+                app.jobs.cancel_queued(run_id=run_id); db.delete("runs", run_id); return self._json({"ok": True})
+            if len(parts) == 3 and parts[2] == "apply" and m == "POST":
+                b = self._jbody()
+                return self._json(optimizer.apply_plan(app, run_id, int(b.get("plan", 0))))
+            if len(parts) == 3 and parts[2] == "cancel" and m == "POST":
+                optimizer.cancel(app, run_id); return self._json({"ok": True})
+
+        raise KeyError(path)
+
+    # ------------------------------------------------------------ SSE
+    def _sse(self):
+        q = self.app.events.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self.wfile.write(b": hello\n\n"); self.wfile.flush()
+            last = time.time()
+            while True:
+                try:
+                    msg = q.get(timeout=15)
+                    self.wfile.write(f"data: {msg}\n\n".encode()); self.wfile.flush()
+                except Exception:
+                    if time.time() - last > 15:
+                        self.wfile.write(b": ping\n\n"); self.wfile.flush(); last = time.time()
+        except Exception:
+            pass
+        finally:
+            self.app.events.unsubscribe(q)
+
+    # ------------------------------------------------------------ mutations
+    def _robot_list(self):
+        rows = self.app.db.q("SELECT * FROM robots ORDER BY status='active' DESC, updated DESC")
+        out = []
+        for rb in rows:
+            det = self.app.robot_detail(rb["id"])
+            n_parts = sum(1 for s in det["sections"] for it in s["items"] if it.get("part"))
+            out.append({k: rb[k] for k in rb} | {"totals": det["totals"], "printed_parts": n_parts})
+        return out
+
+    def _create_item(self, sid: int, b: dict) -> dict:
+        db = self.app.db
+        n = db.one("SELECT COALESCE(MAX(ord),-1)+1 o FROM line_items WHERE section_id=?", [sid])["o"]
+        row = {"section_id": sid, "ord": n, "qty": float(b.get("qty") or 1), "description": b.get("description") or "",
+               "purpose": b.get("purpose"), "link": b.get("link"), "dimensions": b.get("dimensions"), "price": b.get("price"),
+               "est_grams": b.get("est_grams"), "est_source": b.get("est_source") or "manual", "component_id": b.get("component_id"),
+               "status": b.get("status"), "notes": b.get("notes"), "to_buy": 1 if b.get("to_buy") else 0, "counted": 0 if b.get("counted") is False else 1}
+        if b.get("component_id"):
+            c = db.get("components", int(b["component_id"]))
+            if c:
+                row.setdefault("description", c["name"]); row["description"] = row["description"] or c["name"]
+                if row["est_grams"] is None:
+                    row["est_grams"] = c["grams"]; row["est_source"] = "library"
+                row["link"] = row["link"] or c["link"]; row["price"] = row["price"] if row["price"] is not None else c["price"]
+                row["dimensions"] = row["dimensions"] or c["dimensions"]
+        iid = db.insert("line_items", row)
+        if b.get("measured_grams") is not None:
+            db.insert("weigh_ins", {"line_item_id": iid, "grams": float(b["measured_grams"]), "date": time.strftime("%Y-%m-%d")})
+        sec = db.get("sections", sid); db.update("robots", sec["robot_id"], {"updated": now()})
+        return db.get("line_items", iid)
+
+    def _update_item(self, iid: int, b: dict) -> dict:
+        db = self.app.db
+        allowed = {"qty", "description", "purpose", "link", "dimensions", "price", "est_grams", "est_source", "component_id", "status", "notes", "needs_reweigh", "to_buy", "counted", "ord", "section_id"}
+        upd = {k: v for k, v in b.items() if k in allowed}
+        if "est_grams" in upd and "est_source" not in upd:
+            upd["est_source"] = "manual"
+        for k in ("needs_reweigh", "to_buy", "counted"):
+            if k in upd:
+                upd[k] = 1 if upd[k] else 0
+        db.update("line_items", iid, upd)
+        return db.get("line_items", iid)
+
+    def _delete_item(self, iid: int):
+        db = self.app.db
+        db.x("DELETE FROM weigh_ins WHERE line_item_id=?", [iid])
+        pp = db.one("SELECT id FROM printed_parts WHERE line_item_id=?", [iid])
+        if pp:
+            self.app.jobs.cancel_queued(part_id=pp["id"])
+            db.delete("printed_parts", pp["id"])
+        db.delete("line_items", iid)
+
+    def _delete_robot(self, rid: int):
+        db = self.app.db
+        for s in db.q("SELECT id FROM sections WHERE robot_id=?", [rid]):
+            for it in db.q("SELECT id FROM line_items WHERE section_id=?", [s["id"]]):
+                self._delete_item(it["id"])
+            db.delete("sections", s["id"])
+        db.x("DELETE FROM printed_parts WHERE robot_id=?", [rid])
+        db.x("DELETE FROM runs WHERE robot_id=?", [rid]); db.x("DELETE FROM events WHERE robot_id=?", [rid])
+        db.delete("robots", rid)
+
+    def _duplicate_robot(self, rid: int, name: str | None) -> int:
+        db = self.app.db
+        src = db.get("robots", rid)
+        new = {k: src[k] for k in src if k != "id"} | {"name": name or (src["name"] + " copy"), "created": now(), "updated": now(), "status": "active"}
+        nid = db.insert("robots", new)
+        for s in db.q("SELECT * FROM sections WHERE robot_id=? ORDER BY ord", [rid]):
+            nsid = db.insert("sections", {"robot_id": nid, "name": s["name"], "ord": s["ord"], "counts": s["counts"]})
+            for it in db.q("SELECT * FROM line_items WHERE section_id=? ORDER BY ord", [s["id"]]):
+                row = {k: it[k] for k in it if k != "id"} | {"section_id": nsid}
+                niid = db.insert("line_items", row)
+                for w in db.q("SELECT * FROM weigh_ins WHERE line_item_id=?", [it["id"]]):
+                    db.insert("weigh_ins", {k: w[k] for k in w if k != "id"} | {"line_item_id": niid})
+                pp = db.one("SELECT * FROM printed_parts WHERE line_item_id=?", [it["id"]])
+                if pp:
+                    db.insert("printed_parts", {k: pp[k] for k in pp if k != "id"} | {"robot_id": nid, "line_item_id": niid})
+        for e in db.q("SELECT * FROM events WHERE robot_id=?", [rid]):
+            db.insert("events", {k: e[k] for k in e if k != "id"} | {"robot_id": nid})
+        return nid
+
+    def _store_mesh(self, fname: str, data: bytes, split: bool = False) -> dict:
+        db = self.app.db
+        tri = meshio.load_mesh(fname, data)
+        bodies = [tri]
+        if split and len(tri) < 400000:
+            bodies = meshio.split_bodies(tri)
+            bodies = [b for b in bodies if meshio.volume_mm3(b) > 1.0] or [tri]
+        out = []
+        for i, b in enumerate(bodies):
+            blob = meshio.to_binary_stl_bytes(b) if (len(bodies) > 1 or not fname.lower().endswith(".stl")) else data
+            sha = meshio.sha256_of(blob)
+            ex = db.one("SELECT * FROM meshes WHERE sha256=?", [sha])
+            if ex:
+                out.append(ex | {"bbox": loads(ex["bbox_json"], None)}); continue
+            name = fname if len(bodies) == 1 else f"{Path(fname).stem}_body{i + 1}.stl"
+            path = self.app.mesh_dir / f"{sha[:16]}_{re.sub(r'[^A-Za-z0-9._-]+', '_', name)}"
+            if not path.suffix.lower() == ".stl":
+                path = path.with_suffix(".stl")
+            path.write_bytes(blob)
+            a = meshio.analyze(b)
+            mid = db.insert("meshes", {"sha256": sha, "filename": name, "path": str(path), "triangles": a["triangles"], "volume_mm3": a["volume_mm3"],
+                                       "bbox_json": json.dumps(a["bbox"]), "watertight": 1 if a["watertight"] else 0, "bodies": a["bodies"], "created": now()})
+            row = db.get("meshes", mid); row["bbox"] = a["bbox"]; row["units_scale_guess"] = a["units_scale_guess"]; row["area_mm2"] = a["area_mm2"]
+            out.append(row)
+        return {"meshes": out}
+
+    def _create_part(self, rid: int, b: dict) -> dict:
+        db = self.app.db
+        sec_id = b.get("section_id")
+        if not sec_id:
+            sec = db.one("SELECT id FROM sections WHERE robot_id=? AND lower(name) LIKE 'printed%' ORDER BY ord LIMIT 1", [rid])
+            if not sec:
+                n = db.one("SELECT COALESCE(MAX(ord),-1)+1 o FROM sections WHERE robot_id=?", [rid])["o"]
+                sec_id = db.insert("sections", {"robot_id": rid, "name": "Printed Parts", "ord": n, "counts": 1})
+            else:
+                sec_id = sec["id"]
+        item_id = b.get("line_item_id")
+        if not item_id:
+            item = self._create_item(sec_id, {"description": b.get("name") or "Printed part", "qty": b.get("qty") or 1, "est_source": "slicer", "status": b.get("status")})
+            item_id = item["id"]
+        robot = db.get("robots", rid)
+        profile_id = b.get("profile_id") or db.setting("default_profile_id") or (db.one("SELECT id FROM profiles WHERE builtin=1 AND nozzle=? ORDER BY id LIMIT 1", [robot.get("nozzle") or 0.4]) or {}).get("id")
+        filament_id = b.get("filament_id") or db.setting("default_filament_id") or (db.one("SELECT id FROM filaments ORDER BY builtin DESC, id LIMIT 1") or {}).get("id")
+        orient_json = json.dumps(b.get("orient") or {"mode": "auto", "quat": [0, 0, 0, 1]})
+        pid = db.insert("printed_parts", {"robot_id": rid, "line_item_id": item_id, "mesh_id": b.get("mesh_id"), "orient_json": orient_json,
+                                          "scale": float(b.get("scale") or 1.0), "filament_id": filament_id, "profile_id": profile_id,
+                                          "role": b.get("role") or "structure", "locked": 0, "constraints_json": json.dumps(b.get("constraints") or {}),
+                                          "mirror": 1 if b.get("mirror") else 0})
+        if b.get("mesh_id") and (b.get("orient") is None or b.get("auto_orient", True)):
+            try:
+                mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(Path(mesh["path"]))
+                if b.get("mirror"):
+                    tri = meshio.transform(tri, None, 1.0, True)
+                cands = orient.auto_orient(tri)
+                if cands:
+                    db.update("printed_parts", pid, {"orient_json": json.dumps({"mode": "auto", "quat": cands[0]["quat"], "label": cands[0]["label"]})})
+            except Exception:
+                traceback.print_exc()
+        self.app.current_slice_for_part(pid)
+        db.update("robots", rid, {"updated": now()})
+        return self.app._part_view(db.get("printed_parts", pid))
+
+    def _flag_reweigh_for_part(self, pid: int):
+        db = self.app.db
+        p = db.get("printed_parts", pid)
+        if p and p.get("line_item_id") and db.one("SELECT 1 FROM weigh_ins WHERE line_item_id=?", [p["line_item_id"]]):
+            db.update("line_items", p["line_item_id"], {"needs_reweigh": 1})
+
+    def _update_part(self, pid: int, b: dict) -> dict:
+        db = self.app.db
+        p = db.get("printed_parts", pid)
+        upd = {}
+        geometry_changed = False
+        if "orient" in b:
+            upd["orient_json"] = json.dumps(b["orient"]); geometry_changed = True
+        for k in ("scale", "mirror", "mesh_id"):
+            if k in b:
+                upd[k] = (1 if b[k] else 0) if k == "mirror" else b[k]; geometry_changed = True
+        for k in ("filament_id", "profile_id", "role", "notes"):
+            if k in b:
+                upd[k] = b[k]
+        if "locked" in b:
+            upd["locked"] = 1 if b["locked"] else 0
+        if "constraints" in b:
+            upd["constraints_json"] = json.dumps(b["constraints"])
+        if p["locked"] and not b.get("force") and any(k in upd for k in ("orient_json", "filament_id", "profile_id", "scale", "mirror")) and not ("locked" in b and not b["locked"]):
+            raise ValueError("Part is locked: unlock it to change profile, orientation or filament")
+        db.update("printed_parts", pid, upd)
+        if "mesh_id" in b and b.get("mesh_id") and "orient" not in b and loads(p["orient_json"], {}).get("mode", "auto") == "auto":
+            try:
+                mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(Path(mesh["path"]))
+                if upd.get("mirror", p.get("mirror")):
+                    tri = meshio.transform(tri, None, 1.0, True)
+                cands = orient.auto_orient(tri)
+                if cands:
+                    db.update("printed_parts", pid, {"orient_json": json.dumps({"mode": "auto", "quat": cands[0]["quat"], "label": cands[0]["label"]})})
+            except Exception:
+                traceback.print_exc()
+        if geometry_changed or "profile_id" in b or "filament_id" in b:
+            self._flag_reweigh_for_part(pid)
+            self.app.current_slice_for_part(pid)
+        if "profile_id" in b and p.get("line_item_id"):
+            pass
+        db.update("robots", p["robot_id"], {"updated": now()})
+        return self.app._part_view(db.get("printed_parts", pid))
+
+    def _mirror_copy(self, pid: int, name: str | None) -> dict:
+        db = self.app.db
+        p = db.get("printed_parts", pid)
+        li = db.get("line_items", p["line_item_id"]) if p.get("line_item_id") else None
+        b = {"name": name or ((li["description"] if li else "Part") + " (mirror)"), "mesh_id": p["mesh_id"], "mirror": not p.get("mirror"),
+             "filament_id": p["filament_id"], "profile_id": p["profile_id"], "role": p["role"], "scale": p["scale"],
+             "orient": loads(p["orient_json"], {}), "auto_orient": False, "section_id": li["section_id"] if li else None,
+             "constraints": loads(p["constraints_json"], {})}
+        # mirroring about X flips the orientation quaternion's x-axis components
+        q = b["orient"].get("quat", [0, 0, 0, 1])
+        b["orient"] = dict(b["orient"], quat=[q[0], -q[1], -q[2], q[3]])
+        return self._create_part(p["robot_id"], b)
+
+    def _export(self, rid: int, kind: str, qs: dict):
+        app = self.app
+        det = app.robot_detail(rid)
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", det["name"])
+        if kind == "csv":
+            return self._bytes(exports.sheet_csv(det).encode("utf-8-sig"), "text/csv", f"{safe}-weight-budget.csv")
+        if kind == "xlsx":
+            return self._bytes(exports.sheet_xlsx(app, det), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{safe}.xlsx")
+        if kind == "printsheet":
+            return self._bytes(exports.print_sheet_html(app, det).encode(), "text/html; charset=utf-8")
+        if kind == "purchase":
+            return self._bytes(exports.purchase_csv(det).encode("utf-8-sig"), "text/csv", f"{safe}-to-purchase.csv")
+        if kind == "archive":
+            return self._bytes(exports.robot_archive(app, rid), "application/zip", f"{safe}.slicebudget.zip")
+        if kind == "bambu3mf":
+            return self._bytes(exports.bambu_3mf(app, det), "application/vnd.ms-package.3dmanufacturing-3dmodel+xml", f"{safe}.3mf")
+        if kind == "presets":
+            return self._bytes(exports.bambu_presets_zip(app, det), "application/zip", f"{safe}-bambu-presets.zip")
+        raise KeyError(kind)
+
+
+CLASSES = [
+    {"name": "150 g (UK Antweight)", "grams": 150.0}, {"name": "1 lb Antweight", "grams": 453.592},
+    {"name": "1 lb Plastic Antweight", "grams": 453.592}, {"name": "3 lb Beetleweight", "grams": 1360.777},
+    {"name": "6 lb Mantis", "grams": 2721.55}, {"name": "12 lb Hobbyweight", "grams": 5443.108}, {"name": "30 lb Featherweight", "grams": 13607.77},
+]
+
+
+def serve(root: Path, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+    app = App(root)
+    Handler.app = app
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd.daemon_threads = True
+    return httpd
