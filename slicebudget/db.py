@@ -99,7 +99,7 @@ class DB:
     def _migrate(self):
         # additive migrations: add columns that older databases lack
         wanted = {
-            "printed_parts": {"mirror": "INTEGER DEFAULT 0"},
+            "printed_parts": {"mirror": "INTEGER DEFAULT 0", "modifiers_json": "TEXT DEFAULT '[]'"},
             "line_items": {"to_buy": "INTEGER DEFAULT 0", "counted": "INTEGER DEFAULT 1"},
             "slice_jobs": {"print_time_s": "REAL", "priority": "INTEGER DEFAULT 5", "profile_json": "TEXT"},
             "runs": {"status": "TEXT DEFAULT 'done'", "name": "TEXT"},

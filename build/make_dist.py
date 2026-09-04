@@ -117,6 +117,9 @@ README = """SliceBudget {version}
    portable build (~100 MB) into the slicer/ folder here. Nothing is installed elsewhere on your computer.
    Linux: PrusaSlicer comes from Flathub or your distribution; the Setup page explains.
 4. Your data lives in data/ (SQLite database, mesh files, nightly backups). Back that folder up.
+5. Tips: drop a Bambu Studio / PrusaSlicer .3mf project onto Printed parts to import every object with its
+   settings; "Modifier regions" on a part slice a box with its own walls/infill for real; the Optimizer only
+   shows plans it has re-sliced; Calculators hold the belt / tip-speed / drive / battery formulas.
 
 Upgrading: unzip the new version next to the old one and move the data/ and slicer/ folders across.
 """

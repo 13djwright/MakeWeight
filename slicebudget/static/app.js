@@ -162,7 +162,7 @@
       nav.append(item('sheet', 'Weight sheet', r.totals.flags || null, 'warn'), item('parts', 'Printed parts', nParts), item('part', 'Part detail'), item('optimizer', 'Optimizer'), item('runs', 'Runs'), item('events', 'Event log'));
     }
     nav.append(h('div', { class: 'sec' }, 'Library'), item('library', 'Components'), item('filaments', 'Filaments & profiles'));
-    nav.append(h('div', { class: 'sec' }, 'Tool'), item('jobs', 'Jobs & setup', st.slicer.slicer ? null : '!', 'warn'));
+    nav.append(h('div', { class: 'sec' }, 'Tool'), item('calc', 'Calculators'), item('jobs', 'Jobs & setup', st.slicer.slicer ? null : '!', 'warn'));
     const q = st.slicer;
     nav.append(h('div', { class: 'foot' }, q.slicer ? h('span', null, h('b', null, 'PrusaSlicer ' + q.slicer.split('+')[0]), h('br'), `${q.workers} worker${q.workers > 1 ? 's' : ''} · ${q.running} running · ${q.queued} queued`) : h('span', null, h('b', { style: { color: 'var(--warn)' } }, 'PrusaSlicer not installed'), h('br'), 'Open Jobs & setup')));
   }
@@ -428,18 +428,20 @@
     const st = S.state;
     const parts = r.sections.flatMap(s => s.items.filter(i => i.part).map(i => ({ it: i, p: i.part, s })));
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Printed parts'), h('p', null, 'Every printed line on the sheet with its mesh, profile and slicer result. Drop STL/OBJ/3MF files anywhere on this page to add parts.')),
-      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => pickFiles() }, '＋ Add STLs'),
+      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => pickFiles() }, '＋ Add STLs / 3MF'),
         h('button', { class: 'btn', onClick: () => applyProfileModal(parts) }, 'Apply profile to all ▾'),
         h('button', { class: 'btn', onClick: async () => { await api('POST', `robots/${r.id}/slice_all`); toast('Re-slicing all parts'); await refreshRobot(); } }, 'Re-slice all'),
         h('button', { class: 'btn primary', onClick: () => go('optimizer') }, 'Optimize →'))));
-    const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ, 3MF or PLY files here — one part per file (multi-body files are split)');
+    const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ or PLY files here — one part per file (multi-body files are split). Drop a Bambu Studio or PrusaSlicer .3mf project to import every object with its own walls/infill settings.');
     m.append(drop); setupDrop(m, drop);
-    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', null, 'Status'), h('th'))));
+    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Cost'), h('th', null, 'Status'), h('th'))));
     const tb = h('tbody'); tbl.append(tb);
-    let tot = 0, totC = 0, totBest = 0;
+    let tot = 0, totC = 0, totBest = 0, totTime = 0, totCost = 0;
     for (const { it, p } of parts) {
       const j = p.slice; const g = j && j.status === 'done' ? j.grams : null;
       if (g != null) { tot += g * it.qty; totC += (p.corrected_grams ?? g) * it.qty; } totBest += it.total_grams;
+      const ptime = j && j.status === 'done' && j.print_time_s ? j.print_time_s * it.qty : null; if (ptime) totTime += ptime;
+      const cost = g != null && p.filament && p.filament.cost_per_kg ? g / 1000 * p.filament.cost_per_kg * it.qty : null; if (cost) totCost += cost;
       const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(refreshRobot).catch(fail);
       tb.append(h('tr', { class: p.locked ? 'locked' : '' },
         h('td', null, h('a', { href: '#/part/' + p.id, style: { color: 'inherit', fontWeight: 600, textDecoration: 'none' } }, it.description), h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.mesh.bbox ? p.mesh.bbox.size.map(v => v.toFixed(0)).join('×') + ' mm' : ''} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³` : h('span', { style: { color: 'var(--warn)' } }, 'no mesh attached'))),
@@ -452,10 +454,12 @@
         h('td', { class: 'num' }, g != null ? fmt(p.corrected_grams ?? g) : ''),
         h('td', { class: 'num' }, it.measured_grams != null ? fmt(it.measured_grams) : '—'),
         h('td', { class: 'num', style: { fontWeight: 600 } }, fmt(it.total_grams)),
+        h('td', { class: 'num' }, ptime ? hms(ptime) : ''),
+        h('td', { class: 'num' }, cost ? '$' + cost.toFixed(2) : ''),
         h('td', null, jobPill(j, p)),
         h('td', null, h('button', { class: 'btn icon', onClick: e => partMenu(e.currentTarget, it, p) }, '⋯'))));
     }
-    tb.append(h('tr', { class: 'sum' }, h('td', null, 'Printed total'), h('td', { class: 'num' }, parts.reduce((a, x) => a + x.it.qty, 0)), h('td', { colspan: 4 }), h('td', { class: 'num' }, fmt(tot)), h('td', { class: 'num' }, fmt(totC)), h('td'), h('td', { class: 'num' }, fmt(totBest)), h('td', { colspan: 2 })));
+    tb.append(h('tr', { class: 'sum' }, h('td', null, 'Printed total'), h('td', { class: 'num' }, parts.reduce((a, x) => a + x.it.qty, 0)), h('td', { colspan: 4 }), h('td', { class: 'num' }, fmt(tot)), h('td', { class: 'num' }, fmt(totC)), h('td'), h('td', { class: 'num' }, fmt(totBest)), h('td', { class: 'num' }, totTime ? hms(totTime) : ''), h('td', { class: 'num' }, totCost ? '$' + totCost.toFixed(2) : ''), h('td', { colspan: 2 })));
     m.append(h('div', { class: 'tw' }, tbl));
     if (!parts.length) m.append(h('p', { class: 'empty' }, 'No printed parts yet. Drop STL files above.'));
     m.append(h('p', { class: 'hint' }, '“× corr.” is the slicer figure times this filament’s scale-derived correction. “Total” uses your measured weight where you have one, otherwise the corrected slicer estimate.'));
@@ -501,6 +505,11 @@
     for (const f of files) {
       try {
         toast(`Uploading ${f.name}…`);
+        if (/\.3mf$/i.test(f.name)) {
+          const r = await api('POST', `robots/${S.robotId}/import3mf`, await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } });
+          toast(`${f.name}: ${r.created} part${r.created === 1 ? '' : 's'} imported with their slicer settings`);
+          continue;
+        }
         const res = await api('POST', 'meshes?split=1', await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } });
         for (const mesh of res.meshes) {
           const name = res.meshes.length > 1 ? mesh.filename.replace(/\.stl$/i, '') : f.name.replace(/\.(stl|obj|3mf|ply)$/i, '');
@@ -542,17 +551,32 @@
     const pickBtn = h('button', { class: 'btn small', 'aria-pressed': 'false', onClick: () => { const on = pickBtn.getAttribute('aria-pressed') !== 'true'; pickBtn.setAttribute('aria-pressed', String(on)); viewer.setPickMode(on); pickBtn.textContent = on ? 'Picking: click a face' : 'Pick a face'; } }, 'Pick a face');
     const presets = h('div', { class: 'seg' }, ...[['auto', 'Auto'], ['imported', 'As imported'], ['Z+', 'Z+ down'], ['Z-', 'Z− down'], ['X+', 'X+ down'], ['X-', 'X− down'], ['Y+', 'Y+ down'], ['Y-', 'Y− down']].map(([k, l]) => h('button', { 'aria-pressed': String((p.orient.mode === 'auto' && k === 'auto') || p.orient.label === k), disabled: p.locked, onClick: async () => { try { if (k === 'auto') await api('POST', `parts/${p.id}/auto_orient`, { apply: true }); else await api('POST', `parts/${p.id}/preset`, { name: k }); await refreshRobot(); render(); } catch (e) { fail(e); } } }, l)));
     const rot = (axis, deg) => h('button', { class: 'btn small', disabled: p.locked, onClick: async () => { try { await api('POST', `parts/${p.id}/rotate`, { axis, degrees: deg }); await refreshRobot(); render(); } catch (e) { fail(e); } } }, `${axis.toUpperCase()} ${deg > 0 ? '+' : ''}${deg}°`);
-    left.append(h('div', { class: 'card' }, h('h3', null, 'Preview · orientation', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => viewer && viewer.resetView() }, 'Reset view'))),
+    const previewCard = h('div', { class: 'card' }, h('h3', null, 'Preview · orientation', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => viewer && viewer.resetView() }, 'Reset view'))),
       canvas,
       h('div', { class: 'tb', style: { marginTop: '10px' } }, presets),
       h('div', { class: 'tb', style: { marginTop: '8px' } }, rot('x', 90), rot('x', -90), rot('y', 90), rot('y', -90), rot('z', 90), rot('z', 45), h('span', { style: { flex: 1 } }), pickBtn, layBtn),
       h('div', { class: 'legend' }, h('span', null, h('i', { style: { background: '#59a56b' } }), 'face on the bed'), h('span', null, h('i', { style: { background: '#ed7f33' } }), 'selected face'), selInfo),
-      h('p', { class: 'hint' }, `Orientation: ${p.orient.mode || 'auto'}${p.orient.label ? ' · ' + p.orient.label : ''}. Drag to orbit, wheel to zoom, right-drag to pan. Changing orientation re-slices the part.`)));
+      h('p', { class: 'hint' }, `Orientation: ${p.orient.mode || 'auto'}${p.orient.label ? ' · ' + p.orient.label : ''}. Drag to orbit, wheel to zoom, right-drag to pan. Changing orientation re-slices the part.`));
+    // layer view (model classification)
+    const layerImg = h('img', { style: { display: 'block', maxWidth: '100%', maxHeight: '340px', margin: '0 auto', border: '1px solid var(--rule)', borderRadius: '6px', background: 'var(--panel2)', imageRendering: 'pixelated' }, alt: 'layer classification' });
+    const layerSlider = h('input', { type: 'range', min: 0, max: 1, value: 0, class: 'slider' });
+    const layerLbl = h('div', { class: 'hint', style: { display: 'flex', justifyContent: 'space-between', margin: 0 } });
+    const layerCard = h('div', { class: 'card' }, h('h3', null, 'Layer view · model classification'), layerImg, layerSlider, layerLbl,
+      h('div', { class: 'legend' }, h('span', null, h('i', { style: { background: '#d95f1b' } }), 'walls'), h('span', null, h('i', { style: { background: '#35526e' } }), 'top/bottom shell'), h('span', null, h('i', { style: { background: '#c5d2de' } }), 'sparse infill'), h('span', null, h('i', { style: { background: '#788ca0' } }), 'too thin for infill'), h('span', { class: 'rng' }, 'geometry model, for orientation sanity — weights come from the slicer')));
+    if (p.mesh && p.profile) {
+      api('GET', `parts/${p.id}/layers`).then(info => {
+        layerSlider.max = info.n_layers - 1; let cur = Math.floor(info.n_layers / 2); layerSlider.value = cur;
+        const show = () => { layerImg.src = `/api/parts/${p.id}/layers?i=${cur}&t=${p.slice ? p.slice.id : 0}`; layerLbl.textContent = ''; layerLbl.append(h('span', null, 'layer 1'), h('span', null, `layer ${cur + 1} of ${info.n_layers} · z = ${((cur + 0.5) * info.layer_height).toFixed(2)} mm · ${info.walls} walls · ${info.top}T/${info.bottom}B effective`), h('span', null, String(info.n_layers))); };
+        let tmr = null; layerSlider.addEventListener('input', () => { cur = +layerSlider.value; clearTimeout(tmr); tmr = setTimeout(show, 60); }); show();
+      }).catch(() => { layerCard.hidden = true; });
+      layerImg.alt = ''; layerLbl.textContent = 'building the layer model (a few seconds the first time)…';
+    } else layerCard.hidden = true;
+    left.append(h('div', { class: 'grid2' }, previewCard, layerCard));
     if (p.mesh) {
       setTimeout(async () => {
         viewer = new STLViewer(canvas, { onSelect: s => { selInfo.textContent = `selected face: ${s.area.toFixed(0)} mm² · ${s.triangles} triangles`; layBtn.disabled = false; } });
         const buf = await (await fetch(`/api/meshes/${p.mesh.id}/stl?part=${p.id}&t=${Date.now()}`)).arrayBuffer();
-        viewer.load(buf);
+        viewer.load(buf); viewer.setBoxes(p.modifiers || []);
       }, 0);
     } else canvas.replaceWith(h('div', { class: 'drop' }, 'Attach a mesh to preview and slice this part'));
 
@@ -601,10 +625,49 @@
       field('Lock', h('div', { class: 'seg' }, h('button', { 'aria-pressed': String(!p.locked), onClick: () => upd({ locked: false }) }, 'Free'), h('button', { 'aria-pressed': String(p.locked), onClick: () => upd({ locked: true }) }, 'Locked'))),
       field('Walls', rng('walls', 2, 5, '1')), field('Top layers', rng('top', 3, 5, '1')), field('Bottom layers', rng('bottom', 3, 5, '1')), field('Infill %', rng('infill', 8, 40, '1')),
       h('p', { class: 'hint' }, 'Locked freezes profile, orientation and filament; the optimizer treats the part as fixed weight. Ranges bound what the optimizer may choose.')));
+    // modifier regions
+    const modsCard = h('div', { class: 'card' }, h('h3', null, 'Modifier regions', h('div', { class: 'tb' }, h('button', { class: 'btn small', disabled: p.locked || !p.mesh, onClick: () => modifierModal(p, null) }, '＋ Box'))));
+    if ((p.modifiers || []).length) {
+      const tb = h('tbody');
+      for (const [i, md] of p.modifiers.entries()) {
+        const ov = Object.entries(md.params || {}).filter(([k, v]) => v !== null && v !== '').map(([k, v]) => `${k} ${v}${k === 'infill' ? '%' : ''}`).join(' · ');
+        tb.append(h('tr', null, h('td', null, md.name || `box ${i + 1}`, h('span', { class: 'sub' }, `x ${md.min[0]}…${md.max[0]} · y ${md.min[1]}…${md.max[1]} · z ${md.min[2]}…${md.max[2]} mm`)), h('td', { class: 'prof' }, ov || '—'),
+          h('td', null, h('button', { class: 'btn icon', disabled: p.locked, onClick: () => modifierModal(p, i) }, '✎'), h('button', { class: 'btn icon', disabled: p.locked, onClick: () => { const mods = p.modifiers.filter((_, j) => j !== i); upd({ modifiers: mods }).then(render); } }, '✕'))));
+      }
+      modsCard.append(h('div', { class: 'tw' }, h('table', null, tb)));
+    }
+    modsCard.append(h('p', { class: 'hint' }, 'A box region with its own walls/infill (e.g. 100% around the weapon bolt pattern). Sliced for real as a PrusaSlicer modifier mesh. Coordinates are in the preview frame: x/y centred on the part, z from the bed.'));
+    right.append(modsCard);
     right.append(h('div', { class: 'card' }, h('h3', null, 'Weigh-ins', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => weighInModal(it) }, '＋ Add'))),
       it.weigh_ins.length ? h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...[...it.weigh_ins].reverse().slice(0, 6).map(w => h('tr', null, h('td', { class: 'mono' }, w.date || ''), h('td', { class: 'num' }, fmt(w.grams, 2) + ' g'), h('td', { class: 'prof' }, w.profile_string || '')))))) : h('p', { class: 'hint' }, 'No weigh-ins yet. Enter the scale reading after printing; it calibrates this filament.'),
       it.needs_reweigh && h('p', { class: 'hint', style: { color: 'var(--warn)' } }, 'Profile, orientation or mesh changed since the last weigh-in.')));
   };
+  function modifierModal(p, idx) {
+    const md = idx != null ? p.modifiers[idx] : null;
+    const bb = p.mesh && p.mesh.bbox ? p.mesh.bbox.size : [50, 50, 20];
+    const half = [bb[0] / 2, bb[1] / 2];
+    const name = input({ value: md ? md.name : 'dense zone' });
+    const mk = v => input({ type: 'number', value: v, step: '0.5', style: { width: '80px' } });
+    const x0 = mk(md ? md.min[0] : -half[0]), x1 = mk(md ? md.max[0] : half[0]), y0 = mk(md ? md.min[1] : -half[1]), y1 = mk(md ? md.max[1] : half[1]), z0 = mk(md ? md.min[2] : 0), z1 = mk(md ? md.max[2] : bb[2]);
+    const pr = md && md.params || {};
+    const walls = input({ type: 'number', value: pr.walls ?? '', placeholder: 'keep', style: { width: '80px' } }), infill = input({ type: 'number', value: pr.infill ?? 100, placeholder: 'keep', style: { width: '80px' } }), top = input({ type: 'number', value: pr.top ?? '', placeholder: 'keep', style: { width: '80px' } }), bottom = input({ type: 'number', value: pr.bottom ?? '', placeholder: 'keep', style: { width: '80px' } });
+    const pattern = select([['', '(keep)'], ...PATTERNS], pr.pattern || '', { style: { width: '140px' } });
+    const preview = () => { if (viewer) { const boxes = (p.modifiers || []).map((m, i) => Object.assign({}, m, { selected: i === idx })); const cur = { min: [+x0.value, +y0.value, +z0.value], max: [+x1.value, +y1.value, +z1.value], selected: true }; if (idx != null) boxes[idx] = cur; else boxes.push(cur); viewer.setBoxes(boxes); } };
+    [x0, x1, y0, y1, z0, z1].forEach(i => i.addEventListener('input', preview)); preview();
+    modal(md ? 'Edit modifier region' : 'New modifier region', h('div', null, field('Name', name),
+      field('X from – to', h('div', { class: 'tb' }, x0, '–', x1, h('span', { class: 'rng' }, `part spans ${(-half[0]).toFixed(1)} … ${half[0].toFixed(1)}`))),
+      field('Y from – to', h('div', { class: 'tb' }, y0, '–', y1, h('span', { class: 'rng' }, `${(-half[1]).toFixed(1)} … ${half[1].toFixed(1)}`))),
+      field('Z from – to', h('div', { class: 'tb' }, z0, '–', z1, h('span', { class: 'rng' }, `0 … ${bb[2].toFixed(1)}`))),
+      h('p', { class: 'hint' }, 'Overrides inside the box (blank = keep the part profile):'),
+      field('Walls', walls), field('Infill %', infill), field('Pattern', pattern), field('Top layers', top), field('Bottom layers', bottom)),
+      [{ label: 'Cancel', onClick: () => { if (viewer) viewer.setBoxes(p.modifiers || []); } }, { label: 'Save', cls: 'primary', onClick: async () => {
+        const params = {}; if (walls.value !== '') params.walls = +walls.value; if (infill.value !== '') params.infill = +infill.value; if (top.value !== '') params.top = +top.value; if (bottom.value !== '') params.bottom = +bottom.value; if (pattern.value) params.pattern = pattern.value;
+        const nm = { name: name.value || 'modifier', min: [+x0.value, +y0.value, +z0.value].map(v => Math.round(v * 100) / 100), max: [+x1.value, +y1.value, +z1.value].map(v => Math.round(v * 100) / 100), params };
+        for (let k = 0; k < 3; k++) if (nm.max[k] <= nm.min[k]) { toast('Each max must be greater than its min', true); return false; }
+        const mods = [...(p.modifiers || [])]; if (idx != null) mods[idx] = nm; else mods.push(nm);
+        await api('PUT', `parts/${p.id}`, { modifiers: mods }); await refreshRobot(); render();
+      } }], { onClose: () => { if (viewer) viewer.setBoxes(p.modifiers || []); } });
+  }
   function profString(pr) { const inf = pr.infill >= 100 ? '100%' : `${pr.infill}% ${pr.pattern}`; return `${pr.walls}W · ${pr.top}T/${pr.bottom}B · ${inf} · ${pr.layer_height}${pr.nozzle && pr.nozzle !== 0.4 ? ' · ' + pr.nozzle : ''}`; }
   async function applyParamsAsProfile(p, pr) {
     const st = S.state, existing = st.profiles.find(x => x.string === profString(pr) && JSON.stringify(x.params) === JSON.stringify(Object.assign({}, x.params, pr)));
@@ -777,19 +840,41 @@
   V.runs = async function (m) {
     const r = S.robot; if (!r) return needRobot(m);
     const runs = await api('GET', `robots/${r.id}/runs`);
-    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Runs'), h('p', null, 'Optimizations and weigh-ins with their inputs and results.'))));
+    const sel = new Set();
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Runs'), h('p', null, 'Optimizations and weigh-ins with their inputs and results. Tick two optimizer runs to compare them part by part.')),
+      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => { const ids = [...sel]; if (ids.length !== 2) return toast('Tick exactly two runs'); diffRuns(runs.find(x => x.id === ids[0]), runs.find(x => x.id === ids[1])); } }, 'Compare selected'))));
     if (!runs.length) return m.append(h('p', { class: 'empty' }, 'No runs yet.'));
     const tb = h('tbody');
     for (const x of runs) {
       const res = x.results || {};
-      let total = res.plans && res.plans[0] ? res.plans[0].total_g : (x.kind === 'weigh-in' ? x.inputs.grams : null);
-      tb.append(h('tr', null, h('td', null, x.name || x.kind), h('td', { class: 'mono' }, new Date(x.date * 1000).toLocaleString()), h('td', null, h('span', { class: 'pill auto' }, x.kind), x.status === 'running' && h('span', { class: 'pill warn', style: { marginLeft: '4px' } }, 'running')),
+      let total = res.plans && res.plans[0] ? res.plans[res.applied_plan ?? 0].total_g : (x.kind === 'weigh-in' ? x.inputs.grams : null);
+      tb.append(h('tr', null, h('td', null, h('input', { type: 'checkbox', onChange: e => { if (e.target.checked) sel.add(x.id); else sel.delete(x.id); } }), ' ', x.name || x.kind), h('td', { class: 'mono' }, new Date(x.date * 1000).toLocaleString()), h('td', null, h('span', { class: 'pill auto' }, x.kind), x.status === 'running' && h('span', { class: 'pill warn', style: { marginLeft: '4px' } }, 'running')),
         h('td', { class: 'num' }, total != null ? fmt(total) : '—'),
         h('td', null, x.kind === 'weigh-in' ? `sheet ${fmt(res.sheet_total)} g · drift ${signed(res.drift)} g` : (res.status_text || '')),
         h('td', null, x.kind === 'optimize' && h('button', { class: 'btn small', onClick: () => go('optimizer', x.id) }, 'Open'), ' ', h('button', { class: 'btn icon', onClick: () => confirmModal('Delete this run?', async () => { await api('DELETE', `runs/${x.id}`); render(); }) }, '✕'))));
     }
     m.append(h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Run'), h('th', null, 'Date'), h('th', null, 'Kind'), h('th', { class: 'num' }, 'Total g'), h('th', null, 'Notes'), h('th'))), tb)));
   };
+
+  function runAssignments(run) {
+    const res = run.results || {};
+    if (run.kind === 'optimize' && res.plans && res.plans.length) {
+      const pl = res.plans[res.applied_plan ?? 0];
+      return { label: `run #${run.id} · plan ${(pl.name || '').split(' ')[0]}`, rows: Object.fromEntries((pl.assignments || []).map(a => [a.name, { profile: a.profile_string, grams: a.grams, qty: a.qty }])), total: pl.total_g };
+    }
+    return { label: run.name || run.kind, rows: {}, total: run.kind === 'weigh-in' ? run.inputs.grams : null };
+  }
+  function diffRuns(a, b) {
+    const A = runAssignments(a), B = runAssignments(b);
+    const names = [...new Set([...Object.keys(A.rows), ...Object.keys(B.rows)])];
+    const tb = h('tbody');
+    for (const n of names) {
+      const x = A.rows[n], y = B.rows[n]; const d = x && y && x.grams != null && y.grams != null ? (y.grams - x.grams) * (y.qty || 1) : null;
+      tb.append(h('tr', null, h('td', null, n), h('td', { class: 'prof' }, x ? x.profile : '—'), h('td', { class: 'num' }, x && x.grams != null ? fmt(x.grams) : '—'), h('td', { class: 'prof' }, y ? y.profile : '—'), h('td', { class: 'num' }, y && y.grams != null ? fmt(y.grams) : '—'), h('td', { class: 'num', style: { color: d == null ? '' : d > 0 ? 'var(--bad)' : 'var(--good)' } }, d == null ? '' : signed(d))));
+    }
+    tb.append(h('tr', { class: 'sum' }, h('td', null, 'Total'), h('td'), h('td', { class: 'num' }, A.total != null ? fmt(A.total) : '—'), h('td'), h('td', { class: 'num' }, B.total != null ? fmt(B.total) : '—'), h('td', { class: 'num' }, A.total != null && B.total != null ? signed(B.total - A.total) : '')));
+    modal('Compare runs', h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', null, A.label), h('th', { class: 'num' }, 'g'), h('th', null, B.label), h('th', { class: 'num' }, 'g'), h('th', { class: 'num' }, 'Δ total'))), tb)), [{ label: 'Close' }], { width: '860px' });
+  }
 
   // ---------------------------------------------------------------- events
   V.events = async function (m) {
@@ -873,6 +958,42 @@
     modal(f ? 'Edit filament' : 'New filament', h('div', null, field('Name', x.name), field('Material', x.material), field('Density g/cm³', x.density), field('Flow ratio', x.flow), field('Colour', x.color), field('Cost $/kg', x.cost), field('Notes', x.notes), f && h('p', { class: 'hint' }, 'Changing density or flow re-slices parts that use this filament.')),
       [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { const body = { name: x.name.value, material: x.material.value, density: parseFloat(x.density.value), flow: parseFloat(x.flow.value), color: x.color.value, cost_per_kg: x.cost.value === '' ? null : parseFloat(x.cost.value), notes: x.notes.value || null }; if (f) await api('PUT', `filaments/${f.id}`, body); else await api('POST', 'filaments', body); await loadState(); render(); } }]);
   }
+
+  // ---------------------------------------------------------------- calculators
+  V.calc = function (m) {
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Calculators'), h('p', null, 'The formulas from your “Calculations and doodles” and Bot-ulator sheets. Inputs are remembered in this browser.'))));
+    let saved = {}; try { saved = JSON.parse(localStorage.getItem('sb.calc') || '{}'); } catch { }
+    const persist = () => { try { localStorage.setItem('sb.calc', JSON.stringify(saved)); } catch { } };
+    const num = (key, def, attrs) => { const i = input(Object.assign({ type: 'number', value: saved[key] ?? def, step: 'any', style: { width: '110px' } }, attrs)); i.addEventListener('input', () => { saved[key] = parseFloat(i.value); persist(); recalcAll(); }); return i; };
+    const val = i => parseFloat(i.value) || 0;
+    const outs = [];
+    const out = (label) => { const dd = h('dd', { class: 'mono' }, '—'); outs.push(dd); return { row: h('div', { class: 'field' }, h('label', null, label), dd), dd }; };
+    const calcs = [];
+    // belt
+    const cd = num('belt.cd', 79), p1 = num('belt.p1', 18), p2 = num('belt.p2', 18), stretch = num('belt.stretch', 0), pitch = num('belt.pitch', 3);
+    const bl = out('Belt length (mm)'), bt = out('Teeth at this pitch');
+    calcs.push(() => { const C = val(cd), D1 = val(p1), D2 = val(p2); const L = (2 * C + Math.PI / 2 * (D1 + D2) + (D2 - D1) ** 2 / (4 * C)) / (1 + val(stretch)); bl.dd.textContent = L.toFixed(1); bt.dd.textContent = val(pitch) ? (L / val(pitch)).toFixed(1) + ' T' : '—'; });
+    // weapon tip speed
+    const wc = num('w.cells', 4), wv = num('w.volt', 3.85), wkv = num('w.kv', 1700), wmp = num('w.mp', 1), wwp = num('w.wp', 1), wd = num('w.dia', 63.5), wmass = num('w.mass', 170), wr = num('w.radius', 25);
+    const wrpm = out('Weapon RPM'), wtip = out('Tip speed'), wenergy = out('Stored energy (approx, disk)');
+    calcs.push(() => { const rpm = val(wc) * val(wv) * val(wkv) * val(wmp) / Math.max(1e-9, val(wwp)); const tip = Math.PI * val(wd) / 1000 * rpm / 60; wrpm.dd.textContent = rpm.toFixed(0); wtip.dd.textContent = `${tip.toFixed(1)} m/s · ${(tip * 2.23694).toFixed(1)} mph · ${(tip * 3.28084).toFixed(0)} ft/s`;
+      const I = 0.5 * (val(wmass) / 1000) * (val(wr) / 1000) ** 2; const w = rpm * 2 * Math.PI / 60; wenergy.dd.textContent = `${(0.5 * I * w * w).toFixed(0)} J (I = ${(I * 1e6).toFixed(0)} g·cm²)`; });
+    // drive speed
+    const dc = num('d.cells', 4), dv = num('d.volt', 3.85), dkv = num('d.kv', 2500), dgear = num('d.gear', 27), dip = num('d.ip', 1), dop = num('d.op', 1), dwheel = num('d.wheel', 50.8);
+    const drpm = out('Wheel RPM'), dspeed = out('Ground speed');
+    calcs.push(() => { const ratio = val(dgear) * val(dop) / Math.max(1e-9, val(dip)); const rpm = val(dc) * val(dv) * val(dkv) / Math.max(1e-9, ratio); const v = Math.PI * val(dwheel) / 1000 * rpm / 60; drpm.dd.textContent = rpm.toFixed(0); dspeed.dd.textContent = `${v.toFixed(2)} m/s · ${(v * 2.23694).toFixed(1)} mph · ${(v * 3.28084).toFixed(1)} ft/s`; });
+    // battery
+    const bmah = num('b.mah', 550), bweap = num('b.weap', 7), bdrive = num('b.drive', 3), bpeak = num('b.peak', 25), bc = num('b.c', 60), buse = num('b.use', 80);
+    const blife = out('Run time at that draw'), bmin = out('Minimum mAh for peak current'), bcont = out('Continuous current this pack allows');
+    calcs.push(() => { const A = val(bweap) + val(bdrive); const mins = A ? (val(bmah) / 1000 * val(buse) / 100) / A * 60 : 0; blife.dd.textContent = A ? `${mins.toFixed(1)} min` : '—'; bmin.dd.textContent = val(bc) ? `${(val(bpeak) / val(bc) * 1000).toFixed(0)} mAh` : '—'; bcont.dd.textContent = `${(val(bmah) / 1000 * val(bc)).toFixed(1)} A`; });
+    function recalcAll() { calcs.forEach(f => f()); }
+    m.append(h('div', { class: 'grid2' },
+      h('div', { class: 'card' }, h('h3', null, 'Drive belt length'), field('Center distance (mm)', cd), field('Pulley 1 pitch Ø (mm)', p1), field('Pulley 2 pitch Ø (mm)', p2), field('Stretch factor', stretch), field('Belt pitch (mm)', pitch), bl.row, bt.row, h('p', { class: 'hint' }, 'L = (2C + π/2·(D₁+D₂) + (D₂−D₁)²/(4C)) / (1 + stretch). GT2 pitch 2, S3M/HTD 3.')),
+      h('div', { class: 'card' }, h('h3', null, 'Weapon tip speed & energy'), field('Cells', wc), field('Volts per cell', wv), field('Motor KV', wkv), field('Motor pulley teeth', wmp), field('Weapon pulley teeth', wwp), field('Weapon Ø (mm)', wd), field('Weapon mass (g)', wmass), field('Mass radius (mm)', wr), wrpm.row, wtip.row, wenergy.row, h('p', { class: 'hint' }, 'RPM = cells × V × KV × motor teeth / weapon teeth (no-load). Energy treats the weapon as a solid disk of that mass and radius; real MOI is usually lower.')),
+      h('div', { class: 'card' }, h('h3', null, 'Drive speed'), field('Cells', dc), field('Volts per cell', dv), field('Motor KV', dkv), field('Gearbox ratio', dgear), field('Motor pulley teeth', dip), field('Wheel pulley teeth', dop), field('Wheel Ø (mm)', dwheel), drpm.row, dspeed.row, h('p', { class: 'hint' }, 'No-load speed; expect 70–85% of this under load.')),
+      h('div', { class: 'card' }, h('h3', null, 'Battery'), field('Capacity (mAh)', bmah), field('Avg weapon draw (A)', bweap), field('Avg drive draw (A)', bdrive), field('Peak current (A)', bpeak), field('C rating', bc), field('Usable capacity (%)', buse), blife.row, bmin.row, bcont.row, h('p', { class: 'hint' }, 'Run time = usable Ah ÷ average amps. A 3-minute match with 1 minute of pit time is the usual target.'))));
+    recalcAll();
+  };
 
   // ---------------------------------------------------------------- jobs & setup
   V.jobs = async function (m) {

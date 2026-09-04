@@ -35,7 +35,22 @@ class App:
         seed.ensure_seed(self.db)
         self.jobs.start()
         self.install_state = {"status": "idle", "message": "", "progress": 0.0}
+        self._rm_cache: dict = {}
         threading.Thread(target=self._backup_loop, daemon=True).start()
+
+    def region_model(self, part: dict, params: dict):
+        """RegionModel for a part's current geometry (cached, a few entries)."""
+        from . import estimator
+        from .jobs import orient_key
+        mesh = self.db.get("meshes", part["mesh_id"])
+        key = (mesh["sha256"], orient_key(loads(part["orient_json"], {}), part.get("scale") or 1.0, bool(part.get("mirror"))), params["layer_height"], json.dumps(params["line_widths"], sort_keys=True))
+        if key not in self._rm_cache:
+            tri = meshio.load_mesh(Path(mesh["path"]))
+            t = orient.apply_orientation(tri, loads(part["orient_json"], {}), float(part.get("scale") or 1.0), bool(part.get("mirror")))
+            if len(self._rm_cache) >= 4:
+                self._rm_cache.pop(next(iter(self._rm_cache)))
+            self._rm_cache[key] = estimator.RegionModel(t, params)
+        return self._rm_cache[key]
 
     # ------------------------------------------------------------ helpers
     def robot_detail(self, rid: int) -> dict:
@@ -92,6 +107,7 @@ class App:
         p = dict(p)
         p["orient"] = loads(p.pop("orient_json", None), {"mode": "auto", "quat": [0, 0, 0, 1]})
         p["constraints"] = loads(p.pop("constraints_json", None), {})
+        p["modifiers"] = loads(p.pop("modifiers_json", None), []) or []
         p["locked"] = bool(p["locked"]); p["mirror"] = bool(p.get("mirror"))
         mesh = self.db.get("meshes", p["mesh_id"]) if p.get("mesh_id") else None
         if mesh:
@@ -103,7 +119,7 @@ class App:
         p["filament"] = self._filament_view(fil) if fil else None
         job = None
         if mesh and prof and fil:
-            job = self.jobs.cached_result(p | {"orient_json": json.dumps(p["orient"])}, loads(prof["params_json"], {}), fil)
+            job = self.jobs.cached_result(p | {"orient_json": json.dumps(p["orient"]), "modifiers_json": json.dumps(p["modifiers"])}, loads(prof["params_json"], {}), fil)
             if not job:
                 job = self.db.one("SELECT * FROM slice_jobs WHERE part_id=? AND purpose='current' AND status IN ('queued','running','error') ORDER BY id DESC LIMIT 1", [p["id"]])
         p["slice"] = job
@@ -378,6 +394,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(db.get("events", eid))
             if sub == "parts" and m == "POST":
                 return self._json(self._create_part(rid, self._jbody()))
+            if sub == "import3mf" and m == "POST":
+                return self._json(self._import_3mf(rid, self._body(), urllib.parse.unquote(self.headers.get("X-Filename") or "project.3mf")))
             if sub == "runs" and m == "GET":
                 rows = db.q("SELECT * FROM runs WHERE robot_id=? ORDER BY date DESC", [rid])
                 for x in rows:
@@ -630,6 +648,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(out)
             if sub == "jobs" and m == "GET":
                 return self._json(db.q("SELECT * FROM slice_jobs WHERE part_id=? ORDER BY id DESC LIMIT 300", [pid]))
+            if sub == "layers" and m == "GET":
+                from . import estimator
+                prof = db.get("profiles", p["profile_id"]); params = profiles.normalize(loads(prof["params_json"], {}))
+                rm = app.region_model(p, params)
+                T, B = profiles.effective_shell_layers(params)
+                info = {"n_layers": rm.n, "layer_height": rm.layer_h, "pitch": rm.pitch, "width_px": rm.masks.shape[2], "height_px": rm.masks.shape[1], "walls": params["walls"], "top": T, "bottom": B}
+                if "i" in qs:
+                    i = max(0, min(rm.n - 1, int(qs["i"])))
+                    cls = estimator.layer_classification(rm, params["walls"], T, B, i)
+                    png = estimator.png_from_classes(cls, {1: (217, 95, 27, 255), 2: (53, 82, 110, 255), 3: (197, 210, 222, 255), 4: (120, 140, 160, 255)})
+                    return self._bytes(png, "image/png")
+                return self._json(info)
             if sub == "mirror_copy" and m == "POST":
                 return self._json(self._mirror_copy(pid, self._jbody().get("name")))
 
@@ -834,6 +864,36 @@ class Handler(BaseHTTPRequestHandler):
         db.update("robots", rid, {"updated": now()})
         return self.app._part_view(db.get("printed_parts", pid))
 
+    def _import_3mf(self, rid: int, data: bytes, fname: str) -> dict:
+        """One printed part per 3MF object; per-object slicer settings become the starting profile."""
+        db = self.app.db
+        objs = meshio.load_3mf_objects(data)
+        if not objs:
+            raise ValueError("No objects found in the 3MF")
+        robot = db.get("robots", rid)
+        base_prof = db.get("profiles", db.setting("default_profile_id") or 1)
+        base_params = profiles.normalize(loads(base_prof["params_json"], {})) if base_prof else profiles.default_params(robot.get("nozzle") or 0.4)
+        created = []; merged = {}
+        for o in objs:
+            blob = meshio.to_binary_stl_bytes(meshio.place_on_bed(o["tri"]))  # placement-independent, so duplicates merge
+            sha = meshio.sha256_of(blob)
+            params = profiles.normalize(base_params | meshio.slicer_settings_to_params(o["settings"], o.get("project_defaults")))
+            ph = profiles.profile_hash(params)
+            key = (sha, ph)
+            if key in merged:  # same geometry + same settings → one line with qty+1
+                it = db.get("line_items", merged[key]["line_item_id"])
+                db.update("line_items", it["id"], {"qty": (it["qty"] or 1) + 1})
+                continue
+            res = self._store_mesh(re.sub(r"[\\/:*?\"<>|]+", "_", o["name"]) + ".stl", blob)
+            mesh = res["meshes"][0]
+            prof = next((r for r in db.q("SELECT * FROM profiles") if profiles.profile_hash(profiles.normalize(loads(r["params_json"], {}))) == ph), None)
+            if not prof:
+                pid = db.insert("profiles", {"name": profiles.profile_string(params), "printer_id": None, "nozzle": params["nozzle"], "params_json": json.dumps(params), "builtin": 0, "notes": f"Imported from {fname}"})
+                prof = db.get("profiles", pid)
+            part = self._create_part(rid, {"name": o["name"], "mesh_id": mesh["id"], "profile_id": prof["id"], "orient": {"mode": "preset", "quat": [0, 0, 0, 1], "label": "imported"}, "auto_orient": False})
+            merged[key] = part; created.append(part)
+        return {"created": len(created), "parts": created}
+
     def _flag_reweigh_for_part(self, pid: int):
         db = self.app.db
         p = db.get("printed_parts", pid)
@@ -857,6 +917,8 @@ class Handler(BaseHTTPRequestHandler):
             upd["locked"] = 1 if b["locked"] else 0
         if "constraints" in b:
             upd["constraints_json"] = json.dumps(b["constraints"])
+        if "modifiers" in b:
+            upd["modifiers_json"] = json.dumps(b["modifiers"] or []); geometry_changed = True
         if p["locked"] and not b.get("force") and any(k in upd for k in ("orient_json", "filament_id", "profile_id", "scale", "mirror")) and not ("locked" in b and not b["locked"]):
             raise ValueError("Part is locked: unlock it to change profile, orientation or filament")
         db.update("printed_parts", pid, upd)
@@ -889,7 +951,13 @@ class Handler(BaseHTTPRequestHandler):
         # mirroring about X flips the orientation quaternion's x-axis components
         q = b["orient"].get("quat", [0, 0, 0, 1])
         b["orient"] = dict(b["orient"], quat=[q[0], -q[1], -q[2], q[3]])
-        return self._create_part(p["robot_id"], b)
+        mods = loads(p.get("modifiers_json"), []) or []
+        new = self._create_part(p["robot_id"], b)
+        if mods:
+            mirrored = [dict(m, min=[-m["max"][0], m["min"][1], m["min"][2]], max=[-m["min"][0], m["max"][1], m["max"][2]]) for m in mods]
+            self._update_part(new["id"], {"modifiers": mirrored})
+            new = self.app._part_view(db.get("printed_parts", new["id"]))
+        return new
 
     def _export(self, rid: int, kind: str, qs: dict):
         app = self.app

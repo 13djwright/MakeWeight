@@ -81,7 +81,7 @@ def sheet_xlsx(app, det: dict) -> bytes:
     ws.freeze_panes = "A5"
     # printed parts detail
     ps = wb.create_sheet("Printed Parts")
-    ps.append(["Part", "Qty", "File", "Filament", "Profile", "Walls", "Top", "Bottom", "Infill %", "Pattern", "Layer", "Orientation", "Slicer g", "Corrected g", "Measured g", "Locked", "Role"])
+    ps.append(["Part", "Qty", "File", "Filament", "Profile", "Walls", "Top", "Bottom", "Infill %", "Pattern", "Layer", "Orientation", "Slicer g", "Corrected g", "Measured g", "Print time (min)", "Cost $", "Locked", "Role"])
     for c in ps[1]:
         c.font = bold; c.fill = head_fill
     for s in det["sections"]:
@@ -93,7 +93,10 @@ def sheet_xlsx(app, det: dict) -> bytes:
             sl = p.get("slice") or {}
             ps.append([it["description"], it["qty"], (p.get("mesh") or {}).get("filename") or "", (p.get("filament") or {}).get("name") or "", (p.get("profile") or {}).get("string") or "",
                        pr.get("walls"), pr.get("top"), pr.get("bottom"), pr.get("infill"), pr.get("pattern"), pr.get("layer_height"),
-                       f"{p['orient'].get('mode', '')} {p['orient'].get('label', '')}".strip(), sl.get("grams"), p.get("corrected_grams"), it.get("measured_grams"), "yes" if p["locked"] else "", p.get("role")])
+                       f"{p['orient'].get('mode', '')} {p['orient'].get('label', '')}".strip(), sl.get("grams"), p.get("corrected_grams"), it.get("measured_grams"),
+                       round(sl["print_time_s"] / 60, 1) if sl.get("print_time_s") else None,
+                       round(sl["grams"] / 1000 * p["filament"]["cost_per_kg"], 2) if sl.get("grams") and (p.get("filament") or {}).get("cost_per_kg") else None,
+                       "yes" if p["locked"] else "", p.get("role")])
     for i, wd in enumerate([30, 5, 36, 20, 30, 6, 5, 7, 8, 10, 6, 18, 9, 11, 11, 7, 10], 1):
         ps.column_dimensions[get_column_letter(i)].width = wd
     # weigh-ins
@@ -139,11 +142,15 @@ def print_sheet_html(app, det: dict) -> str:
                 if pr.get(k) != base.get(k):
                     diffs.append(f"{label}: <b>{pr.get(k)}{'%' if k == 'infill' else ''}</b>")
             sl = p.get("slice") or {}
+            for md in p.get("modifiers") or []:
+                ov = ", ".join(f"{k} {v}{'%' if k == 'infill' else ''}" for k, v in (md.get("params") or {}).items() if v not in (None, ""))
+                diffs.append(f"<i>Modifier “{escape(md.get('name') or 'box')}”</i> x {md['min'][0]}…{md['max'][0]}, y {md['min'][1]}…{md['max'][1]}, z {md['min'][2]}…{md['max'][2]} mm: {escape(ov)}")
             rows.append(f"""<tr><td><b>{escape(it['description'])}</b><br><small>{escape((p.get('mesh') or {}).get('filename') or 'no mesh')}</small></td>
               <td>{it['qty']:g}</td><td>{escape((p.get('filament') or {}).get('name') or '')}</td>
               <td>{escape(p['orient'].get('label') or p['orient'].get('mode') or 'auto')}{' · scale ' + str(p['scale']) if p.get('scale') not in (None, 1, 1.0) else ''}{' · mirrored' if p.get('mirror') else ''}</td>
               <td><code>{escape((p.get('profile') or {}).get('string') or '')}</code><br>{'<br>'.join(diffs) if diffs else '<small>Bambu default</small>'}</td>
               <td class=n>{'' if sl.get('grams') is None else f"{sl['grams']:.1f}"}</td><td class=n>{'' if p.get('corrected_grams') is None else f"{p['corrected_grams']:.1f}"}</td><td class=n>{'' if it.get('measured_grams') is None else f"{it['measured_grams']:.1f}"}</td>
+              <td class=n>{'' if not sl.get('print_time_s') else f"{int(sl['print_time_s'] // 3600)}h {int(sl['print_time_s'] % 3600 // 60):02d}m"}</td>
               <td>{'🔒' if p['locked'] else ''}</td></tr>""")
     t = det["totals"]
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>Print sheet · {escape(det['name'])}</title>
@@ -152,7 +159,7 @@ def print_sheet_html(app, det: dict) -> str:
 <h1>{escape(det['name'])} · print sheet</h1>
 <p>{escape(det.get('class_name') or '')} · limit {det['weight_class_g']:.1f} g · sheet best-known {t['best_known']:.1f} g ({t['over_under']:+.1f} g) · printed parts {t['printed']:.1f} g · generated {time.strftime('%Y-%m-%d %H:%M')}</p>
 <p>In Bambu Studio, start from the <b>0.20mm Standard</b> process for the printer/nozzle and change only the fields listed per part. Supports, brim and skirt are yours to add; weights here exclude them.</p>
-<table><thead><tr><th>Part</th><th>Qty</th><th>Filament</th><th>Orientation</th><th>Profile · changes from Bambu default</th><th>Slicer g</th><th>Corrected g</th><th>Measured g</th><th></th></tr></thead><tbody>{''.join(rows)}</tbody></table>
+<table><thead><tr><th>Part</th><th>Qty</th><th>Filament</th><th>Orientation</th><th>Profile · changes from Bambu default</th><th>Slicer g</th><th>Corrected g</th><th>Measured g</th><th>Print time</th><th></th></tr></thead><tbody>{''.join(rows)}</tbody></table>
 </body></html>"""
 
 
@@ -189,7 +196,7 @@ def robot_archive(app, rid: int) -> bytes:
             item["weigh_ins"] = [{k: w.get(k) for k in ("grams", "date", "note", "profile_string")} for w in it.get("weigh_ins", [])]
             p = it.get("part")
             if p:
-                part = {k: p.get(k) for k in ("orient", "scale", "role", "locked", "constraints", "mirror", "notes")}
+                part = {k: p.get(k) for k in ("orient", "scale", "role", "locked", "constraints", "mirror", "notes", "modifiers")}
                 if p.get("profile"):
                     part["profile"] = p["profile"]["name"]; data["profiles"][p["profile"]["name"]] = p["profile"]["params"]
                 if p.get("filament"):
@@ -244,7 +251,7 @@ def import_archive(handler, data: bytes) -> dict:
             if p:
                 db.insert("printed_parts", {"robot_id": rid, "line_item_id": iid, "mesh_id": mesh_ids.get(p.get("mesh")), "orient_json": json.dumps(p.get("orient") or {"mode": "auto", "quat": [0, 0, 0, 1]}),
                                             "scale": p.get("scale") or 1.0, "filament_id": fil_ids.get(p.get("filament")) or db.setting("default_filament_id"), "profile_id": prof_ids.get(p.get("profile")) or db.setting("default_profile_id"),
-                                            "role": p.get("role") or "structure", "locked": 1 if p.get("locked") else 0, "constraints_json": json.dumps(p.get("constraints") or {}), "mirror": 1 if p.get("mirror") else 0, "notes": p.get("notes")})
+                                            "role": p.get("role") or "structure", "locked": 1 if p.get("locked") else 0, "constraints_json": json.dumps(p.get("constraints") or {}), "mirror": 1 if p.get("mirror") else 0, "notes": p.get("notes"), "modifiers_json": json.dumps(p.get("modifiers") or [])})
     for e in meta.get("events", []):
         db.insert("events", {"robot_id": rid, **{k: e.get(k) for k in ("date", "title", "placing", "notes", "total_snapshot_g")}})
     for p in db.q("SELECT id FROM printed_parts WHERE robot_id=?", [rid]):

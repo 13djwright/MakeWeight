@@ -42,9 +42,29 @@ class Events:
                 pass
 
 
-def orient_key(orient_json: dict, scale: float, mirror: bool) -> str:
+def orient_key(orient_json: dict, scale: float, mirror: bool, modifiers=None) -> str:
     q = orient_json.get("quat", [0, 0, 0, 1])
-    return "q" + ",".join(f"{float(x):.4f}" for x in q) + f"|s{float(scale):.4f}|m{1 if mirror else 0}"
+    key = "q" + ",".join(f"{float(x):.4f}" for x in q) + f"|s{float(scale):.4f}|m{1 if mirror else 0}"
+    if modifiers:
+        key += "|mods" + hashlib.sha1(json.dumps(modifiers, sort_keys=True).encode()).hexdigest()[:10]
+    return key
+
+
+def part_okey(part: dict) -> str:
+    return orient_key(loads(part.get("orient_json"), {}), part.get("scale") or 1.0, bool(part.get("mirror")), loads(part.get("modifiers_json"), []))
+
+
+MOD_KEYS = {"walls": "perimeters", "infill": "fill_density", "pattern": "fill_pattern", "top": "top_solid_layers", "bottom": "bottom_solid_layers"}
+
+
+def modifier_settings(md: dict) -> dict:
+    out = {}
+    for k, v in (md.get("params") or {}).items():
+        if k in MOD_KEYS and v not in (None, ""):
+            out[MOD_KEYS[k]] = f"{float(v):g}%" if k == "infill" else str(v)
+    if out.get("fill_density") in ("100%",) and "fill_pattern" not in out:
+        out["fill_pattern"] = "rectilinear"
+    return out
 
 
 def cache_key(mesh_sha: str, okey: str, phash: str, slicer_version: str) -> str:
@@ -107,7 +127,7 @@ class JobManager:
         mesh = self.db.get("meshes", part["mesh_id"]) if part.get("mesh_id") else None
         if not mesh:
             raise ValueError("part has no mesh")
-        okey = orient_key(loads(part.get("orient_json"), {}), part.get("scale") or 1.0, bool(part.get("mirror")))
+        okey = part_okey(part)
         phash = profiles.profile_hash(params, filament)
         ver = self.slicer_version or "none"
         ck = cache_key(mesh["sha256"], okey, phash, ver)
@@ -140,7 +160,7 @@ class JobManager:
         mesh = self.db.get("meshes", part["mesh_id"]) if part.get("mesh_id") else None
         if not mesh or not self.slicer_version:
             return None
-        okey = orient_key(loads(part.get("orient_json"), {}), part.get("scale") or 1.0, bool(part.get("mirror")))
+        okey = part_okey(part)
         ck = cache_key(mesh["sha256"], okey, profiles.profile_hash(params, filament), self.slicer_version)
         return self.db.one("SELECT * FROM slice_jobs WHERE cache_key=? AND status='done' ORDER BY id DESC LIMIT 1", [ck])
 
@@ -198,15 +218,23 @@ class JobManager:
             self.events.emit("queue", self.queue_state())
 
     def oriented_stl(self, part: dict, mesh: dict) -> Path:
-        okey = orient_key(loads(part.get("orient_json"), {}), part.get("scale") or 1.0, bool(part.get("mirror")))
-        name = hashlib.sha1(f"{mesh['sha256']}|{okey}".encode()).hexdigest()[:20] + ".stl"
+        """Oriented geometry for the slicer: an STL, or a PrusaSlicer 3MF when the part has modifier regions."""
+        okey = part_okey(part)
+        mods = loads(part.get("modifiers_json"), []) or []
+        name = hashlib.sha1(f"{mesh['sha256']}|{okey}".encode()).hexdigest()[:20] + (".3mf" if mods else ".stl")
         out = self.work_dir / "oriented" / name
         if not out.exists():
             out.parent.mkdir(parents=True, exist_ok=True)
             tri = meshio.load_mesh(Path(mesh["path"]))
             t = orient.apply_orientation(tri, loads(part.get("orient_json"), {}), float(part.get("scale") or 1.0), bool(part.get("mirror")))
-            t = t + [200.0 - (t[:, :, 0].min() + t[:, :, 0].max()) / 2, 200.0 - (t[:, :, 1].min() + t[:, :, 1].max()) / 2, 0]
-            meshio.write_stl(t, out)
+            shift = [200.0 - (t[:, :, 0].min() + t[:, :, 0].max()) / 2, 200.0 - (t[:, :, 1].min() + t[:, :, 1].max()) / 2, 0.0]
+            t = t + shift
+            if mods:
+                boxes = [{"name": m.get("name") or "modifier", "min": [float(m["min"][i]) + shift[i] for i in range(3)],
+                          "max": [float(m["max"][i]) + shift[i] for i in range(3)], "settings": modifier_settings(m)} for m in mods if m.get("min") and m.get("max")]
+                out.write_bytes(meshio.prusa_3mf_with_modifiers(t, mesh.get("filename") or "part", boxes))
+            else:
+                meshio.write_stl(t, out)
         return out
 
     def _run(self, job: dict) -> dict:
@@ -244,7 +272,7 @@ class JobManager:
         fil = self.db.get("filaments", part["filament_id"]) if part.get("filament_id") else None
         if not prof or not fil:
             return
-        okey = orient_key(loads(part.get("orient_json"), {}), part.get("scale") or 1.0, bool(part.get("mirror")))
+        okey = part_okey(part)
         phash = profiles.profile_hash(loads(prof["params_json"], {}), fil)
         if okey != job["orient_key"] or phash != job["profile_hash"]:
             return

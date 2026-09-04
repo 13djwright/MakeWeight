@@ -146,6 +146,25 @@
     gl.uniform3fv(gl.getUniformLocation(this.prog, 'bed'), [0.35, 0.65, 0.42]);
     this._attr(this.prog, 'p', this.bPos, 3); this._attr(this.prog, 'n', this.bNrm, 3); this._attr(this.prog, 'h', this.bHl, 1);
     gl.drawArrays(gl.TRIANGLES, 0, this.n);
+    if (this.bBox && this.nBoxLines) {
+      gl.useProgram(this.lprog);
+      gl.uniformMatrix4fv(gl.getUniformLocation(this.lprog, 'mvp'), false, mvp);
+      this._attr(this.lprog, 'p', this.bBox, 3); this._attr(this.lprog, 'c', this.bBoxC, 3);
+      gl.disable(gl.DEPTH_TEST); gl.drawArrays(gl.LINES, 0, this.nBoxLines); gl.enable(gl.DEPTH_TEST);
+    }
+  };
+  Viewer.prototype.setBoxes = function (boxes) {
+    const gl = this.gl; const L = [], C = [];
+    (boxes || []).forEach((b, i) => {
+      const [x0, y0, z0] = b.min, [x1, y1, z1] = b.max; const col = b.selected ? [0.85, 0.37, 0.1] : [0.93, 0.5, 0.2];
+      const P = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+      for (const [a, c] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) { L.push(...P[a], ...P[c]); C.push(...col, ...col); }
+    });
+    this.nBoxLines = L.length / 3;
+    if (!this.bBox) { this.bBox = gl.createBuffer(); this.bBoxC = gl.createBuffer(); }
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.bBox); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(L), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.bBoxC); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(C), gl.STATIC_DRAW);
+    this.render();
   };
   Viewer.prototype._attr = function (prog, name, buf, size) {
     const gl = this.gl, loc = gl.getAttribLocation(prog, name);

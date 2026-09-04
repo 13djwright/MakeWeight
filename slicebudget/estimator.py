@@ -225,3 +225,38 @@ class FittedModel:
         if f1 - f0 <= 1e-9:
             return None
         return float((target_g - f0) / (f1 - f0) * 100.0)
+
+
+# ---------------------------------------------------------------- layer view
+def layer_classification(rm: RegionModel, walls: int, top: int, bottom: int, i: int) -> np.ndarray:
+    """uint8 class map for layer i: 0 empty, 1 wall, 2 shell/solid, 3 sparse, 4 gap-fill."""
+    px = rm.band_mm(walls) / rm.pitch
+    k = int(round(px))
+    inner = rm.interior_px(k)[i]
+    m = rm.masks[i]
+    wall = m & ~inner
+    exposed = inner & ~rm.covered(top, bottom)[i]
+    exposed = _dilate(_erode(exposed, 1), 1) & inner
+    sparse = inner & ~exposed
+    g = max(1, int(round(0.5 * rm.lw["infill"] / rm.pitch)))
+    thin = sparse & ~_dilate(_erode(sparse, g), g)
+    out = np.zeros(m.shape, dtype=np.uint8)
+    out[sparse & ~thin] = 3; out[thin] = 4; out[exposed] = 2; out[wall] = 1
+    return out
+
+
+def png_from_classes(cls: np.ndarray, colors: dict[int, tuple]) -> bytes:
+    """Encode a class map as an RGBA PNG (stdlib only). Row 0 is the +Y edge."""
+    import struct, zlib
+    H, W = cls.shape
+    lut = np.zeros((256, 4), dtype=np.uint8)
+    for k, rgba in colors.items():
+        lut[k] = rgba
+    rgba = lut[cls[::-1]]  # flip so +Y is up in the image
+    raw = b"".join(b"\x00" + rgba[r].tobytes() for r in range(H))
+
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
