@@ -36,21 +36,50 @@ class App:
         self.jobs.start()
         self.install_state = {"status": "idle", "message": "", "progress": 0.0}
         self._rm_cache: dict = {}
+        self._rm_lock = threading.Lock(); self._rm_build_lock = threading.Lock(); self._rm_building: dict = {}; self._rm_errors: dict = {}
         threading.Thread(target=self._backup_loop, daemon=True).start()
 
-    def region_model(self, part: dict, params: dict):
-        """RegionModel for a part's current geometry (cached, a few entries)."""
+    def region_model(self, part: dict, params: dict, wait: bool = False):
+        """RegionModel for a part's current geometry (cached, a few entries).
+
+        Built by one background thread at a time so a big mesh in a tall orientation never hogs the request
+        threads. Returns None while the model is still being built (unless wait=True)."""
         from . import estimator
         from .jobs import orient_key
         mesh = self.db.get("meshes", part["mesh_id"])
         key = (mesh["sha256"], orient_key(loads(part["orient_json"], {}), part.get("scale") or 1.0, bool(part.get("mirror"))), params["layer_height"], json.dumps(params["line_widths"], sort_keys=True))
-        if key not in self._rm_cache:
-            tri = meshio.load_mesh(Path(mesh["path"]))
-            t = orient.apply_orientation(tri, loads(part["orient_json"], {}), float(part.get("scale") or 1.0), bool(part.get("mirror")))
-            if len(self._rm_cache) >= 4:
-                self._rm_cache.pop(next(iter(self._rm_cache)))
-            self._rm_cache[key] = estimator.RegionModel(t, params)
-        return self._rm_cache[key]
+        with self._rm_lock:
+            if key in self._rm_cache:
+                return self._rm_cache[key]
+            if key in self._rm_errors:
+                raise RuntimeError(self._rm_errors[key])
+            ev = self._rm_building.get(key)
+            if ev is None:
+                ev = self._rm_building[key] = threading.Event()
+                orient_json, scale, mirror = part["orient_json"], float(part.get("scale") or 1.0), bool(part.get("mirror"))
+
+                def build():
+                    try:
+                        with self._rm_build_lock:  # one heavy build at a time
+                            tri = meshio.load_mesh(Path(mesh["path"]))
+                            t = orient.apply_orientation(tri, loads(orient_json, {}), scale, mirror)
+                            rm = estimator.RegionModel(t, params)
+                        with self._rm_lock:
+                            while len(self._rm_cache) >= 4:
+                                self._rm_cache.pop(next(iter(self._rm_cache)))
+                            self._rm_cache[key] = rm
+                    except Exception as e:  # noqa
+                        with self._rm_lock:
+                            self._rm_errors[key] = f"layer model failed: {e}"
+                    finally:
+                        with self._rm_lock:
+                            self._rm_building.pop(key, None)
+                        ev.set()
+                threading.Thread(target=build, name="region-model", daemon=True).start()
+        if not wait:
+            return None
+        ev.wait()
+        return self.region_model(part, params, wait=False)
 
     # ------------------------------------------------------------ helpers
     def robot_detail(self, rid: int) -> dict:
@@ -119,9 +148,15 @@ class App:
         p["filament"] = self._filament_view(fil) if fil else None
         job = None
         if mesh and prof and fil:
-            job = self.jobs.cached_result(p | {"orient_json": json.dumps(p["orient"]), "modifiers_json": json.dumps(p["modifiers"])}, loads(prof["params_json"], {}), fil)
+            pj = p | {"orient_json": json.dumps(p["orient"]), "modifiers_json": json.dumps(p["modifiers"])}
+            params = loads(prof["params_json"], {})
+            job = self.jobs.cached_result(pj, params, fil)
             if not job:
-                job = self.db.one("SELECT * FROM slice_jobs WHERE part_id=? AND purpose='current' AND status IN ('queued','running','error') ORDER BY id DESC LIMIT 1", [p["id"]])
+                # the newest attempt for exactly this geometry + profile, whatever queued it (so a failed
+                # orientation shows its error, and a fixed orientation never shows a stale one)
+                from .jobs import part_okey
+                job = self.db.one("SELECT * FROM slice_jobs WHERE part_id=? AND orient_key=? AND profile_hash=? AND status IN ('queued','running','error') ORDER BY id DESC LIMIT 1",
+                                  [p["id"], part_okey(pj), profiles.profile_hash(params, fil)])
         p["slice"] = job
         if job and job.get("grams") is not None and fil:
             p["corrected_grams"] = job["grams"] * (loads(fil.get("correction_json"), {}).get("factor") or 1.0)
@@ -651,7 +686,9 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "layers" and m == "GET":
                 from . import estimator
                 prof = db.get("profiles", p["profile_id"]); params = profiles.normalize(loads(prof["params_json"], {}))
-                rm = app.region_model(p, params)
+                rm = app.region_model(p, params, wait=bool(qs.get("wait")))
+                if rm is None:
+                    return self._json({"building": True}, 202)
                 T, B = profiles.effective_shell_layers(params)
                 info = {"n_layers": rm.n, "layer_height": rm.layer_h, "pitch": rm.pitch, "width_px": rm.masks.shape[2], "height_px": rm.masks.shape[1], "walls": params["walls"], "top": T, "bottom": B}
                 if "i" in qs:
@@ -677,7 +714,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "jobs/clear_cache" and m == "POST":
             db.x("DELETE FROM slice_jobs WHERE status IN ('done','error','cancelled')"); return self._json({"ok": True})
         if path == "jobs/retry_errors" and m == "POST":
-            db.x("UPDATE slice_jobs SET status='queued', error=NULL WHERE status='error'"); app.jobs.start(); return self._json({"ok": True})
+            b = self._jbody()
+            if b.get("part_id"):
+                db.x("UPDATE slice_jobs SET status='queued', error=NULL WHERE status='error' AND part_id=?", [b["part_id"]])
+            else:
+                db.x("UPDATE slice_jobs SET status='queued', error=NULL WHERE status='error'")
+            app.jobs.start(); return self._json({"ok": True})
 
         # ---- runs
         if parts[0] == "runs":
@@ -987,9 +1029,19 @@ CLASSES = [
 ]
 
 
+class QuietServer(ThreadingHTTPServer):
+    """Browsers drop keep-alive sockets all the time; don't print a traceback for each one."""
+    def handle_error(self, request, client_address):
+        import sys
+        et, ev = sys.exc_info()[:2]
+        if et and issubclass(et, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(root: Path, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
     app = App(root)
     Handler.app = app
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd = QuietServer((host, port), Handler)
     httpd.daemon_threads = True
     return httpd

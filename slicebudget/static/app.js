@@ -630,13 +630,16 @@
     const layerCard = h('div', { class: 'card' }, h('h3', null, 'Layer view · model classification'), layerImg, layerSlider, layerLbl,
       h('div', { class: 'legend' }, h('span', null, h('i', { style: { background: '#d95f1b' } }), 'walls'), h('span', null, h('i', { style: { background: '#35526e' } }), 'top/bottom shell'), h('span', null, h('i', { style: { background: '#c5d2de' } }), 'sparse infill'), h('span', null, h('i', { style: { background: '#788ca0' } }), 'too thin for infill'), h('span', { class: 'rng' }, 'geometry model, for orientation sanity — weights come from the slicer')));
     if (p.mesh && p.profile) {
-      api('GET', `parts/${p.id}/layers`).then(info => {
+      let gone = false; layerCard.addEventListener('DOMNodeRemoved', () => { gone = true; }, { once: true });
+      const fetchInfo = async () => { for (let n = 0; n < 150; n++) { const info = await api('GET', `parts/${p.id}/layers`); if (!info.building) return info; if (gone || !document.body.contains(layerCard)) throw new Error('gone'); await new Promise(r => setTimeout(r, 1500)); } throw new Error('layer model took too long'); };
+      fetchInfo().then(info => {
         layerSlider.max = info.n_layers - 1; let cur = Math.floor(info.n_layers / 2); layerSlider.value = cur;
         const show = () => { layerImg.src = `/api/parts/${p.id}/layers?i=${cur}&t=${p.slice ? p.slice.id : 0}`; layerLbl.textContent = ''; layerLbl.append(h('span', null, 'layer 1'), h('span', null, `layer ${cur + 1} of ${info.n_layers} · z = ${((cur + 0.5) * info.layer_height).toFixed(2)} mm · ${info.walls} walls · ${info.top}T/${info.bottom}B effective`), h('span', null, String(info.n_layers))); };
         let tmr = null; layerSlider.addEventListener('input', () => { cur = +layerSlider.value; clearTimeout(tmr); tmr = setTimeout(show, 60); }); show();
       }).catch(() => { layerCard.hidden = true; });
       layerImg.alt = ''; layerLbl.textContent = 'building the layer model (a few seconds the first time)…';
     } else layerCard.hidden = true;
+    if (p.slice && p.slice.status === 'error') previewCard.append(h('div', { class: 'callout bad' }, h('b', null, 'This orientation did not slice. '), p.slice.error || 'PrusaSlicer failed.', ' ', h('button', { class: 'btn small', style: { marginLeft: '6px' }, onClick: () => api('POST', 'jobs/retry_errors', { part_id: p.id }).then(() => refreshRobot()).then(render).catch(fail) }, 'Try again')));
     left.append(h('div', { class: 'grid2' }, previewCard, layerCard));
     if (p.mesh) {
       setTimeout(async () => {

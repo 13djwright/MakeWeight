@@ -211,7 +211,10 @@ class JobManager:
                 self.db.update("slice_jobs", job["id"], upd)
             except Exception as e:  # noqa
                 self.db.update("slice_jobs", job["id"], {"status": "error", "finished": now(), "error": str(e)[:1000]})
-                traceback.print_exc()
+                if isinstance(e, RuntimeError):
+                    print(f"slice job {job['id']} failed: {e}", flush=True)
+                else:
+                    traceback.print_exc()
             job = self.db.get("slice_jobs", job["id"])
             self._after(job)
             self.events.emit("job", {"job": job})

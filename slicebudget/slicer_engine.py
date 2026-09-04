@@ -233,6 +233,34 @@ def _find_app(mount_point: str) -> Path | None:
 
 
 # ------------------------------------------------------------------ slicing
+_HINTS = [
+    (re.compile(r"no extrusions in the first layer|empty layers? detected|first layer is empty", re.I),
+     "Nothing solid touches the bed in this orientation — the part is balancing on an edge, a point or a curve. Pick a flat face (Pick a face → Lay on bed) or use Auto."),
+    (re.compile(r"too tall|exceeds the maximum print height|larger than the print volume|outside (of )?the print (volume|area)", re.I),
+     "The part does not fit the slicer's build volume in this orientation."),
+    (re.compile(r"infill pattern .* is not supposed to work at 100%|not supposed to work at 100", re.I),
+     "This infill pattern cannot be used at 100% — the profile should use rectilinear for solid parts."),
+    (re.compile(r"empty print|nothing to (print|slice)|no object", re.I),
+     "The slicer produced nothing — the mesh may be empty or far below the bed."),
+]
+
+
+def explain_slicer_error(stderr: str | None, stdout: str | None, rc: int) -> str:
+    """Turn PrusaSlicer's CLI output into one useful line (full text, plus a hint for the usual causes)."""
+    def clean(txt):
+        ls = [ln.strip() for ln in (txt or "").splitlines() if ln.strip() and not re.match(r"^\d+\s*=>", ln.strip())]
+        return [ln for ln in ls if not ln.startswith("Slicing result exported")]
+    err_lines, out_lines = clean(stderr), clean(stdout)
+    # stderr carries the real error; stdout mostly carries progress and support/brim advice
+    lines = err_lines or [ln for ln in out_lines if not re.search(r"consider enabling|bed adhesion|bridge anchors|bridging extrusions", ln, re.I)] or out_lines
+    core = " ".join(lines[-4:]) if lines else f"exit code {rc}"
+    core = re.sub(r"\s+", " ", core)[:400]
+    for rx, hint in _HINTS:
+        if rx.search(core):
+            return f"{hint} (PrusaSlicer: {core})"
+    return "PrusaSlicer failed: " + core
+
+
 _TIME_RE = re.compile(r"estimated printing time \(normal mode\)\s*=\s*(.+)")
 
 
@@ -287,8 +315,7 @@ def run_slice(cmd: list[str], stl_path: Path, ini_text: str, work_dir: Path, kee
     r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env, creationflags=creation)
     dt = time.time() - t0
     if r.returncode != 0 or not gcode.exists():
-        msg = (r.stderr or r.stdout or "").strip().splitlines()
-        raise RuntimeError("PrusaSlicer failed: " + (msg[-1] if msg else f"exit {r.returncode}"))
+        raise RuntimeError(explain_slicer_error(r.stderr, r.stdout, r.returncode))
     res = parse_gcode_header(gcode)
     if "grams" not in res and "cm3" in res:
         m = re.search(r"filament_density\s*=\s*([\d.]+)", ini_text)

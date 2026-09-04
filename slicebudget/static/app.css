@@ -218,3 +218,5 @@ th.sortable.asc::after{content:' ▲';font-size:9px}
 th.sortable.desc::after{content:' ▼';font-size:9px}
 .field.out dd{margin:0;font-weight:600;color:var(--ink)}
 .field.out label{color:var(--ink3)}
+.callout{margin-top:10px;padding:8px 10px;border-radius:6px;font-size:12px;line-height:1.4;background:var(--panel2);border:1px solid var(--rule)}
+.callout.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
