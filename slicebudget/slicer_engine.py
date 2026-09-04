@@ -146,19 +146,28 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
         prog("Downloading PrusaSlicer " + PRUSA_VERSION, 0.0)
         download(url, dmg, lambda d, t: prog(f"Downloading {d / 1e6:.0f} / {t / 1e6:.0f} MB", 0.8 * d / t if t else 0.4))
         prog("Mounting disk image", 0.85)
-        mnt = Path(tempfile.mkdtemp(prefix="prusa_dmg_"))
-        subprocess.run(["hdiutil", "attach", str(dmg), "-mountpoint", str(mnt), "-nobrowse", "-quiet"], check=True)
+        mount_points = _hdiutil_attach(dmg)
         try:
-            apps = list(mnt.glob("*.app"))
-            if not apps:
-                raise RuntimeError("No .app inside the PrusaSlicer disk image")
-            dest = sd / apps[0].name
+            app = None
+            for mp in mount_points:
+                app = _find_app(mp)
+                if app:
+                    break
+            if app is None:
+                listing = "; ".join(f"{mp}: {[x.name for x in Path(mp).iterdir()]}" for mp in mount_points if Path(mp).exists())
+                raise RuntimeError("No PrusaSlicer.app inside the disk image. Mounted at " + (listing or "nothing") +
+                                   ". You can also point SliceBudget at an existing PrusaSlicer.app in Setup → 'Use a different install'.")
+            dest = sd / app.name
             if dest.exists():
                 shutil.rmtree(dest)
             prog("Copying application", 0.9)
-            shutil.copytree(apps[0], dest, symlinks=True)
+            if shutil.which("ditto"):
+                subprocess.run(["ditto", str(app), str(dest)], check=True)  # preserves the code signature
+            else:
+                shutil.copytree(app, dest, symlinks=True)
         finally:
-            subprocess.run(["hdiutil", "detach", str(mnt), "-quiet"], check=False)
+            for mp in mount_points:
+                subprocess.run(["hdiutil", "detach", str(mp), "-quiet", "-force"], check=False)
         subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest)], check=False)
         dmg.unlink(missing_ok=True)
     else:
@@ -182,6 +191,45 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
         raise RuntimeError("PrusaSlicer did not start. Executable: " + " ".join(cmd))
     prog("Installed PrusaSlicer " + v, 1.0)
     return cmd
+
+
+def _hdiutil_attach(dmg: Path) -> list[str]:
+    """Mount a dmg (accepting any license prompt) and return its mount points."""
+    import plistlib
+    r = subprocess.run(["hdiutil", "attach", str(dmg), "-nobrowse", "-readonly", "-noautoopen", "-plist"],
+                       input=b"Y\n", capture_output=True, timeout=300)
+    mounts: list[str] = []
+    if r.returncode == 0:
+        try:
+            out = r.stdout
+            i = out.find(b"<?xml")  # a license agreement, if any, is printed before the plist
+            info = plistlib.loads(out[i:] if i >= 0 else out)
+            for ent in info.get("system-entities", []):
+                if ent.get("mount-point"):
+                    mounts.append(ent["mount-point"])
+        except Exception:
+            pass
+    if not mounts:
+        # fall back: whatever PrusaSlicer volume is mounted
+        vols = Path("/Volumes")
+        if vols.exists():
+            mounts = [str(v) for v in vols.iterdir() if "prusa" in v.name.lower()]
+    if not mounts:
+        raise RuntimeError("Could not mount the PrusaSlicer disk image: " + (r.stderr or r.stdout or b"").decode(errors="replace")[-400:])
+    return mounts
+
+
+def _find_app(mount_point: str) -> Path | None:
+    root = Path(mount_point)
+    best = None
+    for depth_glob in ("*.app", "*/*.app", "*/*/*.app"):
+        for cand in root.glob(depth_glob):
+            if cand.is_symlink() or not cand.is_dir():
+                continue  # the 'Applications' shortcut in most dmgs
+            if "prusa" in cand.name.lower():
+                return cand
+            best = best or cand
+    return best
 
 
 # ------------------------------------------------------------------ slicing

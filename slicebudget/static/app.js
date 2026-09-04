@@ -531,7 +531,7 @@
     if (!pid) { if (!all.length) { m.append(h('div', { class: 'empty' }, 'No printed parts yet.')); return; } pid = all[0].part.id; }
     const it = all.find(i => i.part.id === pid); if (!it) { m.append(h('div', { class: 'empty' }, 'Part not found.')); return; }
     const p = await api('GET', `parts/${pid}`); const st = S.state;
-    const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(async () => { await refreshRobot(); }).catch(fail);
+    const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(async () => { await refreshRobot(); await renderMain(); }).catch(fail);
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, it.description, p.locked && h('span', { class: 'pill lock', style: { marginLeft: '8px' } }, '🔒 locked')),
       h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${p.mesh.watertight ? 'watertight' : 'not watertight'} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ' · mirrored' : ''}` : 'No mesh attached yet')),
       h('div', { class: 'tb' },
@@ -1040,7 +1040,7 @@
   }
 
   // ------------------------------------------------------------ render loop
-  async function refreshRobot() { if (S.robotId) await loadRobot(S.robotId); renderShell(); if (['sheet', 'parts'].includes(S.view)) renderMain(); }
+  async function refreshRobot(rerender = true) { if (S.robotId) await loadRobot(S.robotId); renderShell(); if (rerender && ['sheet', 'parts'].includes(S.view)) await renderMain(); }
   let rendering = false;
   async function renderMain() {
     const m = $('#main'); m.textContent = '';
