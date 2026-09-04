@@ -10,7 +10,19 @@ import webbrowser
 from pathlib import Path
 
 
+def _ssl_certs():
+    """Bundled runtimes (macOS/Linux) have no system CA store: point Python at certifi's bundle."""
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi  # type: ignore
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except Exception:
+        pass
+
+
 def main():
+    _ssl_certs()
     ap = argparse.ArgumentParser(prog="slicebudget")
     ap.add_argument("--port", type=int, default=int(os.environ.get("SLICEBUDGET_PORT", 8765)))
     ap.add_argument("--host", default="127.0.0.1")

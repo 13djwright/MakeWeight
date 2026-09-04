@@ -182,9 +182,13 @@ class JobManager:
             self.events.emit("job", {"job": job})
             try:
                 res = self._run(job)
-                self.db.update("slice_jobs", job["id"], {
-                    "status": "done", "finished": now(), "grams": res["grams"], "cm3": res.get("cm3"),
-                    "time_s": res.get("time_s"), "print_time_s": res.get("print_time_s"), "error": None})
+                upd = {"status": "done", "finished": now(), "grams": res["grams"], "cm3": res.get("cm3"),
+                       "time_s": res.get("time_s"), "print_time_s": res.get("print_time_s"), "error": None}
+                if job.get("slicer_version") != self.slicer_version and self.slicer_version:
+                    # queued before the slicer was installed: re-key so the cache finds it later
+                    upd["slicer_version"] = self.slicer_version
+                    upd["cache_key"] = cache_key(job["mesh_sha"], job["orient_key"], job["profile_hash"], self.slicer_version)
+                self.db.update("slice_jobs", job["id"], upd)
             except Exception as e:  # noqa
                 self.db.update("slice_jobs", job["id"], {"status": "error", "finished": now(), "error": str(e)[:1000]})
                 traceback.print_exc()

@@ -70,6 +70,8 @@ def auto_orient(tri: np.ndarray) -> list[dict]:
         s["quat"] = meshio.mat_to_quat(R)
         s["normal"] = [float(v) for v in nrm]
         s["label"] = axis_label(nrm)
+        if nrm[2] < -0.999:  # tie-break: keep the imported orientation when nothing beats it
+            s["score"] += 1.0
         results.append(s)
     results.sort(key=lambda r: -r["score"])
     return results
