@@ -211,3 +211,10 @@ canvas.viewer.pick{cursor:crosshair}
 .empty{padding:40px;text-align:center;color:var(--ink3)}
 kbd{font-family:ui-monospace,monospace;font-size:11px;background:var(--panel2);border:1px solid var(--rule);border-radius:3px;padding:0 4px}
 @media (max-width:900px){#app{grid-template-columns:1fr}.side{display:none}.budget{display:none}}
+
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--ink)}
+th.sortable.asc::after{content:' ▲';font-size:9px}
+th.sortable.desc::after{content:' ▼';font-size:9px}
+.field.out dd{margin:0;font-weight:600;color:var(--ink)}
+.field.out label{color:var(--ink3)}

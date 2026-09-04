@@ -91,7 +91,7 @@
       if (td.querySelector('input,select')) return;
       let inp;
       if (opts.options) { inp = select(opts.options, value); }
-      else { inp = h('input', { type: opts.type || 'text', value: value == null ? '' : value, class: opts.type === 'number' ? 'num' : '', step: opts.step || 'any' }); }
+      else { inp = h('input', { type: opts.type || 'text', value: value == null ? '' : value, class: opts.type === 'number' ? 'num' : '', step: opts.step || 'any' }); if (opts.list) inp.setAttribute('list', opts.list); }
       const done = async (save) => {
         if (!save) { show(); return; }
         let v = inp.value;
@@ -109,6 +109,72 @@
 
   // ------------------------------------------------------------ state
   const S = { state: null, robot: null, robotId: null, view: 'home', param: null, jobs: null, es: null, lib: null, runs: null, cache: {} };
+  // ------------------------------------------------------------ sortable tables
+  // Every table with a header becomes click-to-sort. Rows are re-ordered in place (listeners survive);
+  // group rows (section headers, sums) stay where they are and only the rows between them are sorted.
+  const SORT = {};
+  const FIXED_ROW = r => ['sec-h', 'grp', 'sum', 'nosort'].some(c => r.classList.contains(c));
+  function cellKey(tr, i) {
+    const td = tr.children[i]; if (!td) return '';
+    if (td.dataset.sort != null) return td.dataset.sort;
+    const inp = td.querySelector('input,select');
+    const t = inp ? (inp.tagName === 'SELECT' ? (inp.options[inp.selectedIndex] || {}).text : inp.value) : td.textContent;
+    return (t || '').trim();
+  }
+  const NUM_RE = /^[-+−]?\d[\d,]*(\.\d+)?/;
+  function sortTable(tbl, col, dir) {
+    const th = tbl.tHead && tbl.tHead.rows[0] && tbl.tHead.rows[0].children[col];
+    const forceNum = th && th.classList.contains('num');
+    for (const tb of tbl.tBodies) {
+      const out = []; let group = [];
+      const flush = () => {
+        if (!group.length) return;
+        const keyed = group.map(r => ({ r, k: cellKey(r, col) }));
+        const nonEmpty = keyed.filter(x => x.k && x.k !== '—');
+        const numeric = forceNum || (nonEmpty.length && nonEmpty.every(x => /^[-+−]?\d[\d,]*(\.\d+)?(\s*\S{0,4})?$/.test(x.k)));
+        for (const x of keyed) { const m = x.k.replace('−', '-').match(NUM_RE); x.n = m ? parseFloat(m[0].replace(/,/g, '')) : (x.k && x.k !== '—' ? NaN : -Infinity); }
+        keyed.sort((a, b) => {
+          let c;
+          if (numeric) { const an = isNaN(a.n) ? -Infinity : a.n, bn = isNaN(b.n) ? -Infinity : b.n; c = an - bn; if (!c) c = a.k.localeCompare(b.k); }
+          else c = (a.k === '' || a.k === '—') - (b.k === '' || b.k === '—') || a.k.localeCompare(b.k, undefined, { numeric: true, sensitivity: 'base' });
+          return dir === 'desc' ? -c : c;
+        });
+        out.push(...keyed.map(x => x.r)); group = [];
+      };
+      for (const r of [...tb.rows]) { if (FIXED_ROW(r)) { flush(); out.push(r); } else group.push(r); }
+      flush(); out.forEach(r => tb.append(r));
+    }
+    for (const t of tbl.tHead.rows[0].children) { t.classList.remove('asc', 'desc'); }
+    if (th) th.classList.add(dir);
+  }
+  function tableKey(tbl) {
+    const inModal = tbl.closest('.modal, dialog');
+    const root = inModal || document.getElementById('main');
+    const idx = [...root.querySelectorAll('table')].indexOf(tbl);
+    return (inModal ? 'modal' : S.view) + '#' + idx;
+  }
+  function makeSortable(root) {
+    for (const tbl of root.querySelectorAll('table')) {
+      if (tbl.dataset.sortable || !tbl.tHead || !tbl.tHead.rows.length) continue;
+      const ths = [...tbl.tHead.rows[0].children];
+      if (!ths.some(t => t.textContent.trim())) continue;
+      tbl.dataset.sortable = '1';
+      const key = tableKey(tbl);
+      ths.forEach((th, i) => {
+        if (!th.textContent.trim() || th.classList.contains('nosort')) return;
+        th.classList.add('sortable'); th.title = 'Click to sort';
+        th.addEventListener('click', () => {
+          const cur = SORT[key];
+          const dir = cur && cur.col === i && cur.dir === 'asc' ? 'desc' : 'asc';
+          SORT[key] = { col: i, dir }; sortTable(tbl, i, dir);
+        });
+      });
+      const saved = SORT[key];
+      if (saved && ths[saved.col]) sortTable(tbl, saved.col, saved.dir);
+    }
+  }
+  new MutationObserver(() => { if (makeSortable._t) return; makeSortable._t = requestAnimationFrame(() => { makeSortable._t = 0; makeSortable(document.body); }); }).observe(document.body, { childList: true, subtree: true });
+
   const ROLES = [['armor', 'Armor · walls first'], ['structure', 'Structure'], ['internal', 'Internal'], ['cosmetic', 'Cosmetic'], ['weapon', 'Weapon']];
   const STATUSES = [['', '—'], ['planned', 'planned'], ['ordered', 'ordered'], ['on hand', 'on hand'], ['installed', 'installed']];
   const PATTERNS = ['cubic', 'grid', 'gyroid', 'triangles', 'rectilinear', 'honeycomb', '3dhoneycomb', 'adaptivecubic', 'supportcubic', 'lightning', 'alignedrectilinear', 'stars', 'concentric'];
@@ -752,12 +818,13 @@
     const strat = { v: (run && run.inputs.strategy) || 'per_role' }, model = { v: (run && run.inputs.model) || 'anchored' }, rank = input({ type: 'range', min: 0, max: 100, value: run ? run.inputs.rank ?? 25 : 25, class: 'slider' });
     const margin = input({ type: 'number', value: r.margin_g, step: '0.1', style: { width: '90px' } }), nplans = input({ type: 'number', value: run ? run.inputs.n_plans || 5 : 5, step: '1', min: 1, max: 12, style: { width: '70px' } });
     const budgetLbl = h('b', { class: 'mono', style: { fontSize: '16px' } });
-    const calcBudget = () => { budgetLbl.textContent = fmt(r.weight_class_g - parseFloat(margin.value || 0) - (t.best_known - t.printed)) + ' g'; }; margin.addEventListener('input', calcBudget); calcBudget();
+    const pctLbl = h('span', { class: 'rng' });
+    const calcBudget = () => { budgetLbl.textContent = fmt(r.weight_class_g - parseFloat(margin.value || 0) - (t.best_known - t.printed)) + ' g'; pctLbl.textContent = `${((parseFloat(margin.value) || 0) / r.weight_class_g * 100).toFixed(1)}% of class`; }; margin.addEventListener('input', calcBudget); calcBudget();
     const segBtn = (obj, val, label, desc) => h('button', { 'aria-pressed': String(obj.v === val), title: desc, onClick: e => { obj.v = val; [...e.currentTarget.parentNode.children].forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); } }, label);
     const status = h('span', { class: 'hint', style: { margin: 0 } });
     left.append(h('div', { class: 'card' }, h('h3', null, 'Target'),
       h('div', { class: 'grid2' },
-        h('div', null, field('Class', h('span', null, `${r.class_name || ''} · ${fmt(r.weight_class_g)} g`)), field('Non-printed', h('span', { class: 'mono' }, `${fmt(t.best_known - t.printed)} g `, h('span', { class: 'rng' }, 'best known, from sheet'))), field('Margin', h('div', { class: 'tb' }, margin, h('span', { class: 'rng' }, `${(parseFloat(margin.value) / r.weight_class_g * 100).toFixed(1)}% of class`))), field('Printed budget', budgetLbl)),
+        h('div', null, field('Class', h('span', null, `${r.class_name || ''} · ${fmt(r.weight_class_g)} g`)), field('Non-printed', h('span', { class: 'mono' }, `${fmt(t.best_known - t.printed)} g `, h('span', { class: 'rng' }, 'best known, from sheet'))), field('Margin', h('div', { class: 'tb' }, margin, pctLbl)), field('Printed budget', budgetLbl)),
         h('div', null,
           field('Strategy', h('div', { class: 'seg' }, segBtn(strat, 'uniform', 'Uniform', 'One profile for all free parts'), segBtn(strat, 'per_role', 'Per role', 'Each role gets its own walls/shells'), segBtn(strat, 'priority', 'Priority fill', 'Minimums first, then spend grams on armor walls'), segBtn(strat, 'trim', 'Trim', 'Smallest change from current profiles'))),
           field('Rank', h('div', null, rank, h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--ink3)' } }, h('span', null, 'prefer walls'), h('span', null, 'prefer infill')))),
@@ -896,6 +963,7 @@
   V.library = async function (m) {
     const comps = await api('GET', 'components');
     const cats = [...new Set(comps.map(c => c.category || 'Other'))].sort();
+    S.cache.cats = cats; catDatalist(cats);
     const st = { q: S.cache.libq || '', cat: S.cache.libcat || '' };
     const search = input({ class: 'search', placeholder: 'Search…', value: st.q });
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Component library'), h('p', null, 'Shared across robots. Measured weights here propagate to every robot that uses the part.')),
@@ -911,7 +979,7 @@
       tw.append(h('table', null, h('thead', null, h('tr', null, h('th', null, 'Component'), h('th', null, 'Category'), h('th', { class: 'num' }, 'Weight g'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Dimensions'), h('th', { class: 'num' }, 'Used'), h('th'))),
         h('tbody', null, ...rows.map(c => h('tr', null,
           h('td', null, c.name, c.link && h('a', { href: c.link, target: '_blank', rel: 'noopener', class: 'src', style: { textTransform: 'none' } }, ' link ↗'), c.notes && h('span', { class: 'sub' }, c.notes)),
-          edCell(c.category, v => api('PUT', `components/${c.id}`, { category: v }).then(() => { c.category = v; }), {}),
+          edCell(c.category, v => api('PUT', `components/${c.id}`, { category: v }).then(() => { c.category = v; if (!cats.includes(v)) { cats.push(v); cats.sort(); catDatalist(cats); } }), { list: 'cat-list' }),
           edCell(c.grams, v => api('PUT', `components/${c.id}`, { grams: v, grams_source: 'manual', propagate: true }).then(() => { c.grams = v; }), { type: 'number', cls: 'num', fmt: v => fmt(v, 2) }),
           h('td', null, h('span', { class: 'pill ' + (c.grams_source === 'measured' ? 'mea' : 'auto') }, c.grams_source || 'manual')),
           edCell(c.price, v => api('PUT', `components/${c.id}`, { price: v }).then(() => { c.price = v; }), { type: 'number', cls: 'num', fmt: v => Number(v).toFixed(2), placeholder: '' }),
@@ -926,8 +994,15 @@
     search.addEventListener('input', () => { st.q = search.value; S.cache.libq = st.q; draw(); });
     m.append(tabs, tw); draw();
   };
+  function catDatalist(cats) {
+    let dl = document.getElementById('cat-list');
+    if (!dl) { dl = h('datalist', { id: 'cat-list' }); document.body.append(dl); }
+    dl.textContent = ''; for (const c of cats || S.cache.cats || []) dl.append(h('option', { value: c }));
+    return dl;
+  }
   function compModal(c) {
-    const f = { name: input({ value: c?.name || '' }), category: input({ value: c?.category || '' }), vendor: input({ value: c?.vendor || '' }), link: input({ value: c?.link || '' }), price: input({ type: 'number', value: c?.price ?? '', step: '0.01' }), dimensions: input({ value: c?.dimensions || '' }), grams: input({ type: 'number', value: c?.grams ?? '', step: '0.01' }), notes: h('textarea', null, c?.notes || '') };
+    catDatalist();
+    const f = { name: input({ value: c?.name || '' }), category: input({ value: c?.category || '', list: 'cat-list', autocomplete: 'off' }), vendor: input({ value: c?.vendor || '' }), link: input({ value: c?.link || '' }), price: input({ type: 'number', value: c?.price ?? '', step: '0.01' }), dimensions: input({ value: c?.dimensions || '' }), grams: input({ type: 'number', value: c?.grams ?? '', step: '0.01' }), notes: h('textarea', null, c?.notes || '') };
     modal(c ? 'Edit component' : 'New component', h('div', null, field('Name', f.name), field('Category', f.category), field('Vendor', f.vendor), field('Link', f.link), field('Price', f.price), field('Dimensions', f.dimensions), field('Weight (g)', f.grams), field('Notes', f.notes)),
       [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { const body = { name: f.name.value, category: f.category.value || 'Other', vendor: f.vendor.value || null, link: f.link.value || null, price: f.price.value === '' ? null : parseFloat(f.price.value), dimensions: f.dimensions.value || null, grams: f.grams.value === '' ? null : parseFloat(f.grams.value), notes: f.notes.value || null }; if (c) await api('PUT', `components/${c.id}`, Object.assign(body, { propagate: true })); else await api('POST', 'components', body); render(); } }]);
   }
@@ -961,37 +1036,175 @@
 
   // ---------------------------------------------------------------- calculators
   V.calc = function (m) {
-    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Calculators'), h('p', null, 'The formulas from your “Calculations and doodles” and Bot-ulator sheets. Inputs are remembered in this browser.'))));
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Calculators'), h('p', null, 'The basics: belt centre distance, weapon tip speed & energy, drive speed, battery. Inputs are remembered in this browser. Cross-checked against the Ember (Level 5 Robotics) calculators.'))));
     let saved = {}; try { saved = JSON.parse(localStorage.getItem('sb.calc') || '{}'); } catch { }
     const persist = () => { try { localStorage.setItem('sb.calc', JSON.stringify(saved)); } catch { } };
-    const num = (key, def, attrs) => { const i = input(Object.assign({ type: 'number', value: saved[key] ?? def, step: 'any', style: { width: '110px' } }, attrs)); i.addEventListener('input', () => { saved[key] = parseFloat(i.value); persist(); recalcAll(); }); return i; };
-    const val = i => parseFloat(i.value) || 0;
-    const outs = [];
-    const out = (label) => { const dd = h('dd', { class: 'mono' }, '—'); outs.push(dd); return { row: h('div', { class: 'field' }, h('label', null, label), dd), dd }; };
     const calcs = [];
-    // belt
-    const cd = num('belt.cd', 79), p1 = num('belt.p1', 18), p2 = num('belt.p2', 18), stretch = num('belt.stretch', 0), pitch = num('belt.pitch', 3);
-    const bl = out('Belt length (mm)'), bt = out('Teeth at this pitch');
-    calcs.push(() => { const C = val(cd), D1 = val(p1), D2 = val(p2); const L = (2 * C + Math.PI / 2 * (D1 + D2) + (D2 - D1) ** 2 / (4 * C)) / (1 + val(stretch)); bl.dd.textContent = L.toFixed(1); bt.dd.textContent = val(pitch) ? (L / val(pitch)).toFixed(1) + ' T' : '—'; });
-    // weapon tip speed
-    const wc = num('w.cells', 4), wv = num('w.volt', 3.85), wkv = num('w.kv', 1700), wmp = num('w.mp', 1), wwp = num('w.wp', 1), wd = num('w.dia', 63.5), wmass = num('w.mass', 170), wr = num('w.radius', 25);
-    const wrpm = out('Weapon RPM'), wtip = out('Tip speed'), wenergy = out('Stored energy (approx, disk)');
-    calcs.push(() => { const rpm = val(wc) * val(wv) * val(wkv) * val(wmp) / Math.max(1e-9, val(wwp)); const tip = Math.PI * val(wd) / 1000 * rpm / 60; wrpm.dd.textContent = rpm.toFixed(0); wtip.dd.textContent = `${tip.toFixed(1)} m/s · ${(tip * 2.23694).toFixed(1)} mph · ${(tip * 3.28084).toFixed(0)} ft/s`;
-      const I = 0.5 * (val(wmass) / 1000) * (val(wr) / 1000) ** 2; const w = rpm * 2 * Math.PI / 60; wenergy.dd.textContent = `${(0.5 * I * w * w).toFixed(0)} J (I = ${(I * 1e6).toFixed(0)} g·cm²)`; });
-    // drive speed
-    const dc = num('d.cells', 4), dv = num('d.volt', 3.85), dkv = num('d.kv', 2500), dgear = num('d.gear', 27), dip = num('d.ip', 1), dop = num('d.op', 1), dwheel = num('d.wheel', 50.8);
-    const drpm = out('Wheel RPM'), dspeed = out('Ground speed');
-    calcs.push(() => { const ratio = val(dgear) * val(dop) / Math.max(1e-9, val(dip)); const rpm = val(dc) * val(dv) * val(dkv) / Math.max(1e-9, ratio); const v = Math.PI * val(dwheel) / 1000 * rpm / 60; drpm.dd.textContent = rpm.toFixed(0); dspeed.dd.textContent = `${v.toFixed(2)} m/s · ${(v * 2.23694).toFixed(1)} mph · ${(v * 3.28084).toFixed(1)} ft/s`; });
-    // battery
-    const bmah = num('b.mah', 550), bweap = num('b.weap', 7), bdrive = num('b.drive', 3), bpeak = num('b.peak', 25), bc = num('b.c', 60), buse = num('b.use', 80);
-    const blife = out('Run time at that draw'), bmin = out('Minimum mAh for peak current'), bcont = out('Continuous current this pack allows');
-    calcs.push(() => { const A = val(bweap) + val(bdrive); const mins = A ? (val(bmah) / 1000 * val(buse) / 100) / A * 60 : 0; blife.dd.textContent = A ? `${mins.toFixed(1)} min` : '—'; bmin.dd.textContent = val(bc) ? `${(val(bpeak) / val(bc) * 1000).toFixed(0)} mAh` : '—'; bcont.dd.textContent = `${(val(bmah) / 1000 * val(bc)).toFixed(1)} A`; });
-    function recalcAll() { calcs.forEach(f => f()); }
+    function recalcAll() { calcs.forEach(f => { try { f(); } catch (e) { console.error(e); } }); }
+    const num = (key, def, attrs) => { const i = input(Object.assign({ type: 'number', value: saved[key] ?? def, step: 'any', style: { width: '110px' }, class: 'w mono' }, attrs)); i.addEventListener('input', () => { saved[key] = i.value === '' ? null : parseFloat(i.value); persist(); recalcAll(); }); return i; };
+    const setNum = (i, key, v) => { i.value = v; saved[key] = v; persist(); recalcAll(); };
+    const val = i => { const v = parseFloat(i.value); return isNaN(v) ? 0 : v; };
+    const out = (label) => { const dd = h('dd', { class: 'mono' }, '—'); return { row: h('div', { class: 'field out' }, h('label', null, label), dd), dd, set(v) { dd.textContent = v; } }; };
+    // segmented choice persisted under key
+    const seg = (key, options, def, onChange) => {
+      const st = { v: saved[key] ?? def };
+      const el = h('div', { class: 'seg' });
+      const draw = () => { el.textContent = ''; for (const [v, label, title] of options) el.append(h('button', { 'aria-pressed': String(st.v === v), title, onClick: () => { st.v = v; saved[key] = v; persist(); draw(); if (onChange) onChange(v); recalcAll(); } }, label)); };
+      draw(); return Object.assign(el, { get: () => st.v });
+    };
+    const IN = 25.4;
+    // unit toggle for a length input: value is always stored in mm; the field shows mm or in
+    const lenField = (label, key, defMm) => {
+      const unit = { v: saved[key + '.u'] || 'mm' };
+      const i = input({ type: 'number', step: 'any', style: { width: '110px' }, class: 'w mono' });
+      const show = () => { const mm = saved[key] ?? defMm; i.value = unit.v === 'in' ? +(mm / IN).toFixed(4) : +mm.toFixed(3); };
+      i.addEventListener('input', () => { const v = parseFloat(i.value); saved[key] = isNaN(v) ? null : (unit.v === 'in' ? v * IN : v); persist(); recalcAll(); });
+      const tog = h('div', { class: 'seg' }); const drawTog = () => { tog.textContent = ''; for (const u of ['mm', 'in']) tog.append(h('button', { 'aria-pressed': String(unit.v === u), onClick: () => { unit.v = u; saved[key + '.u'] = u; persist(); drawTog(); show(); } }, u)); };
+      drawTog(); show();
+      return { row: field(label, h('div', { class: 'tb' }, i, tog)), mm: () => saved[key] ?? defMm };
+    };
+    // battery voltage helper: S count × per-cell voltage with Nom / Max / LiHV presets
+    const voltBlock = (prefix, defCells) => {
+      const cells = num(prefix + '.cells', defCells, { style: { width: '70px' }, min: 1, step: 1 });
+      const vpc = num(prefix + '.volt', 3.7, { style: { width: '80px' } });
+      const presets = h('div', { class: 'seg' }, ...[[3.7, 'Nom'], [4.2, 'Max'], [4.35, 'LiHV']].map(([v, l]) => h('button', { 'aria-pressed': String(Math.abs(val(vpc) - v) < 0.001), onClick: (e) => { setNum(vpc, prefix + '.volt', v); [...e.currentTarget.parentNode.children].forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); } }, l)));
+      vpc.addEventListener('input', () => [...presets.children].forEach(b => b.setAttribute('aria-pressed', 'false')));
+      const packV = h('span', { class: 'rng' });
+      calcs.push(() => { packV.textContent = `= ${(val(cells) * val(vpc)).toFixed(2)} V pack`; });
+      return { cells, vpc, rows: [field('Battery', h('div', { class: 'tb' }, cells, h('span', { class: 'rng' }, 'S ×'), vpc, h('span', { class: 'rng' }, 'V/cell'), presets, packV))], volts: () => val(cells) * val(vpc) };
+    };
+
+    // ---- 1. belt / chain / gear centre distance
+    const bMode = seg('belt.mode', [['teeth', 'Pulley teeth'], ['dia', 'Pitch diameters']], 'teeth', () => drawBelt());
+    const bDir = seg('belt.dir', [['cd', 'Have centre distance → belt'], ['len', 'Have belt → centre distance']], 'cd', () => drawBelt());
+    const bT1 = num('belt.t1', 16, { step: 1 }), bT2 = num('belt.t2', 40, { step: 1 }), bPitch = num('belt.pitch', 3);
+    const bD1 = lenField('Pulley 1 pitch Ø', 'belt.d1', 15.28), bD2 = lenField('Pulley 2 pitch Ø', 'belt.d2', 38.2);
+    const bCD = lenField('Centre distance', 'belt.cdmm', 79), bLenT = num('belt.lenT', 100, { step: 1 }), bStretch = num('belt.stretch', 0, { step: 0.001 });
+    const oLen = out('Belt pitch length'), oTeeth = out('Belt teeth at this pitch'), oNear = out('Nearest whole-tooth belts'), oCD = out('Centre distance'), oRatio = out('Ratio'), oPD = out('Pitch diameters');
+    const beltBody = h('div');
+    const beltCalc = () => {
+      const p = val(bPitch);
+      let d1, d2;
+      if (bMode.get() === 'teeth') { d1 = val(bT1) * p / Math.PI; d2 = val(bT2) * p / Math.PI; } else { d1 = bD1.mm(); d2 = bD2.mm(); }
+      const lenFor = C => 2 * C + Math.PI / 2 * (d1 + d2) + (d2 - d1) ** 2 / (4 * C);
+      const cdFor = L => { const b = L - Math.PI / 2 * (d1 + d2); const disc = b * b - 2 * (d2 - d1) ** 2; return disc < 0 ? NaN : (b + Math.sqrt(disc)) / 4; };  // exact inverse of lenFor
+      const ratio = d1 && d2 ? (d2 >= d1 ? `${(d2 / d1).toFixed(2)}:1` : `1:${(d1 / d2).toFixed(2)}`) : '—';
+      oRatio.set(ratio); oPD.set(`${d1.toFixed(2)} / ${d2.toFixed(2)} mm (${(d1 / IN).toFixed(3)} / ${(d2 / IN).toFixed(3)} in)`);
+      if (bDir.get() === 'cd') {
+        const C = bCD.mm(); if (!(C > 0)) { oLen.set('—'); oTeeth.set('—'); oNear.set('—'); return; }
+        const L = lenFor(C) / (1 + val(bStretch));
+        oLen.set(`${L.toFixed(1)} mm · ${(L / IN).toFixed(2)} in`);
+        if (p > 0) {
+          const nT = L / p; oTeeth.set(`${nT.toFixed(2)} T`);
+          const cands = [...new Set([Math.floor(nT), Math.ceil(nT)])].filter(t => t > 0);
+          oNear.set(cands.map(t => `${t}T (${(t * p).toFixed(0)} mm) → C = ${cdFor(t * p * (1 + val(bStretch))).toFixed(2)} mm`).join('   ·   '));
+        } else { oTeeth.set('—'); oNear.set('—'); }
+      } else {
+        const L = (bMode.get() === 'teeth' || p > 0) ? val(bLenT) * p : val(bLenT);
+        const C = cdFor(L * (1 + val(bStretch)));
+        oLen.set(`${L.toFixed(1)} mm · ${(L / IN).toFixed(2)} in`); oTeeth.set(p > 0 ? `${(L / p).toFixed(0)} T` : '—');
+        oCD.set(isNaN(C) ? 'belt too short for these pulleys' : `${C.toFixed(2)} mm · ${(C / IN).toFixed(3)} in`); oNear.set('—');
+      }
+    };
+    calcs.push(beltCalc);
+    function drawBelt() {
+      beltBody.textContent = '';
+      beltBody.append(field('Mode', bMode), field('Solve for', bDir), field('Belt pitch (mm)', h('div', { class: 'tb' }, bPitch, h('span', { class: 'rng' }, 'GT2 = 2 · S3M/HTD 3M = 3 · HTD 5M = 5 · #25 chain = 6.35'))));
+      if (bMode.get() === 'teeth') beltBody.append(field('Pulley 1 teeth', bT1), field('Pulley 2 teeth', bT2)); else beltBody.append(bD1.row, bD2.row);
+      if (bDir.get() === 'cd') beltBody.append(bCD.row); else beltBody.append(field(bMode.get() === 'teeth' ? 'Belt length (teeth)' : 'Belt length (teeth, or mm if pitch is 0)', bLenT));
+      beltBody.append(field('Stretch factor', h('div', { class: 'tb' }, bStretch, h('span', { class: 'rng' }, '0 for timing belts; ~0.02–0.05 for stretched round/urethane belts'))));
+      beltBody.append(oPD.row, oRatio.row, oLen.row, oTeeth.row, bDir.get() === 'cd' ? oNear.row : oCD.row);
+      recalcAll();
+    }
+    drawBelt();
+    // gears
+    const gT1 = num('gear.t1', 12, { step: 1 }), gT2 = num('gear.t2', 36, { step: 1 }), gMod = num('gear.mod', 1), gUnit = seg('gear.unit', [['mod', 'Module (mm)'], ['dp', 'Diametral pitch (1/in)']], 'mod');
+    const oGCD = out('Gear centre distance'), oGR = out('Gear ratio');
+    calcs.push(() => { const mod = gUnit.get() === 'mod' ? val(gMod) : (val(gMod) ? IN / val(gMod) : 0); const C = mod * (val(gT1) + val(gT2)) / 2; oGCD.set(C ? `${C.toFixed(3)} mm · ${(C / IN).toFixed(4)} in` : '—'); oGR.set(val(gT1) ? `${(val(gT2) / val(gT1)).toFixed(3)}:1` : '—'); });
+
+    // ---- 2. weapon
+    const wV = voltBlock('w', 4);
+    const wKv = num('w.kv', 1700), wRpmOverride = num('w.rpm', null, { placeholder: 'optional' }), wMp = num('w.mp', 1, { step: 1 }), wWp = num('w.wp', 1, { step: 1 });
+    const wDia = lenField('Weapon Ø (tip to tip)', 'w.dia', 63.5), wMass = num('w.mass', 170), wShape = seg('w.shape', [['disk', 'Solid disk', 'I = ½·m·r²'], ['ring', 'Ring / drum shell', 'I = m·r²'], ['bar', 'Bar about centre', 'I = m·L²/12 (L = Ø)'], ['custom', 'Known MOI']], 'disk', () => drawW());
+    const wMoiR = lenField('Mass radius (for disk / ring)', 'w.r', 25), wMoiCustom = num('w.moi', 500);
+    const oWrpm = out('Weapon RPM (no-load)'), oWtip = out('Tip speed'), oWmoi = out('Moment of inertia'), oWke = out('Stored energy'), oWspark = out('SPARC Sportsman check');
+    const wBody = h('div');
+    calcs.push(() => {
+      const ratio = val(wWp) / Math.max(1e-9, val(wMp));
+      const motorRpm = val(wRpmOverride) > 0 ? val(wRpmOverride) : wV.volts() * val(wKv);
+      const rpm = motorRpm / ratio; const w = rpm * 2 * Math.PI / 60; const D = wDia.mm() / 1000;
+      const tip = Math.PI * D * rpm / 60;
+      oWrpm.set(`${rpm.toFixed(0)} rpm${ratio !== 1 ? ` (motor ${motorRpm.toFixed(0)} ÷ ${ratio.toFixed(3)})` : ''}`);
+      oWtip.set(`${tip.toFixed(1)} m/s · ${(tip * 2.23694).toFixed(1)} mph · ${(tip * 3.28084).toFixed(1)} ft/s`);
+      const mkg = val(wMass) / 1000; let I;
+      if (wShape.get() === 'disk') I = 0.5 * mkg * (wMoiR.mm() / 1000) ** 2;
+      else if (wShape.get() === 'ring') I = mkg * (wMoiR.mm() / 1000) ** 2;
+      else if (wShape.get() === 'bar') I = mkg * D * D / 12;
+      else I = val(wMoiCustom) * 1e-7;  // g·cm² → kg·m²
+      const ke = 0.5 * I * w * w;
+      oWmoi.set(`${(I * 1e7).toFixed(0)} g·cm² · ${(I * 1e3).toFixed(4)} kg·cm²`);
+      oWke.set(`${ke.toFixed(0)} J · ${(ke * 0.737562).toFixed(0)} ft·lb`);
+      const mph = tip * 2.23694; oWspark.set(mph > 250 ? `⚠ ${mph.toFixed(0)} mph is over the 250 mph SPARC Sportsman spinner limit` : `${mph.toFixed(0)} mph — under the 250 mph Sportsman limit`);
+    });
+    function drawW() {
+      wBody.textContent = '';
+      wBody.append(...wV.rows, field('Motor KV (rpm/V)', wKv), field('Motor RPM override', h('div', { class: 'tb' }, wRpmOverride, h('span', { class: 'rng' }, 'if you know the real rpm at this voltage'))), field('Motor pulley teeth', wMp), field('Weapon pulley teeth', wWp), wDia.row, field('Weapon mass (g)', wMass), field('Mass distribution', wShape));
+      if (wShape.get() === 'disk' || wShape.get() === 'ring') wBody.append(wMoiR.row);
+      if (wShape.get() === 'custom') wBody.append(field('MOI (g·cm²)', h('div', { class: 'tb' }, wMoiCustom, h('span', { class: 'rng' }, 'from CAD: Fusion/Onshape mass properties'))));
+      wBody.append(oWrpm.row, oWtip.row, oWmoi.row, oWke.row, oWspark.row);
+      recalcAll();
+    }
+    drawW();
+
+    // ---- 3. drive
+    const dV = voltBlock('d', 4);
+    const dKv = num('d.kv', 2500), dRpmOverride = num('d.rpm', null, { placeholder: 'optional' }), dGear = num('d.gear', 27), dIp = num('d.ip', 1, { step: 1 }), dOp = num('d.op', 1, { step: 1 });
+    const dWheel = lenField('Wheel Ø', 'd.wheel', 50.8), dEff = num('d.eff', 80, { step: 1 }), dArena = num('d.arena', 8);
+    const oDrpm = out('Wheel RPM (no-load)'), oDspeed = out('Ground speed (no-load)'), oDload = out('Under load'), oDcross = out('Time to cross arena');
+    calcs.push(() => {
+      const ratio = val(dGear) * val(dOp) / Math.max(1e-9, val(dIp));
+      const motorRpm = val(dRpmOverride) > 0 ? val(dRpmOverride) : dV.volts() * val(dKv);
+      const rpm = motorRpm / Math.max(1e-9, ratio); const v = Math.PI * dWheel.mm() / 1000 * rpm / 60;
+      oDrpm.set(`${rpm.toFixed(0)} rpm (total ratio ${ratio.toFixed(2)}:1)`);
+      oDspeed.set(`${v.toFixed(2)} m/s · ${(v * 2.23694).toFixed(1)} mph · ${(v * 3.28084).toFixed(1)} ft/s`);
+      const vl = v * val(dEff) / 100; oDload.set(`${vl.toFixed(2)} m/s · ${(vl * 2.23694).toFixed(1)} mph at ${val(dEff)}%`);
+      oDcross.set(vl > 0 ? `${(val(dArena) * 0.3048 / vl).toFixed(2)} s for ${val(dArena)} ft` : '—');
+    });
+
+    // ---- 4. battery
+    const bV = voltBlock('b', 4);
+    const bMah = num('b.mah', 550), bWeap = num('b.weap', 7), bDrive = num('b.drive', 3), bPeak = num('b.peak', 25), bC = num('b.c', 60), bUse = num('b.use', 80, { step: 1 }), bMatch = num('b.match', 3), bNewS = num('b.newS', 3, { step: 1 });
+    const oBwh = out('Pack energy'), oBlife = out('Run time at that draw'), oBneed = out('mAh needed for the match'), oBmin = out('Minimum mAh for the peak (C rating)'), oBcont = out('Continuous current this pack allows'), oBequiv = out('Same energy at a different cell count');
+    calcs.push(() => {
+      const A = val(bWeap) + val(bDrive), Ah = val(bMah) / 1000, use = val(bUse) / 100;
+      oBwh.set(`${(Ah * bV.volts()).toFixed(2)} Wh at ${bV.volts().toFixed(2)} V`);
+      oBlife.set(A ? `${(Ah * use / A * 60).toFixed(1)} min at ${A.toFixed(1)} A average` : '—');
+      oBneed.set(A ? `${(A * val(bMatch) / 60 / Math.max(0.01, use) * 1000).toFixed(0)} mAh for ${val(bMatch)} min at ${A.toFixed(1)} A (${val(bUse)}% usable)` : '—');
+      oBmin.set(val(bC) ? `${(val(bPeak) / val(bC) * 1000).toFixed(0)} mAh at ${val(bC)}C` : '—');
+      oBcont.set(`${(Ah * val(bC)).toFixed(1)} A`);
+      oBequiv.set(val(bNewS) ? `${(val(bMah) * val(bV.cells) / val(bNewS)).toFixed(0)} mAh at ${val(bNewS)}S` : '—');
+    });
+
+    // ---- 5. scale factors between classes
+    const CLASSES_G = [['150 g', 150], ['1 lb', 453.592], ['3 lb', 1360.78], ['12 lb', 5443.11], ['30 lb', 13607.8], ['250 lb', 113398]];
+    const sFrom = num('s.from', 453.592), sTo = num('s.to', 1360.78), sDim = lenField('Dimension to scale', 's.dim', 100);
+    const clsBtns = (target, key) => h('div', { class: 'seg' }, ...CLASSES_G.map(([l, g]) => h('button', { onClick: () => setNum(target, key, +g.toFixed(3)) }, l)));
+    const oSlin = out('Linear scale factor'), oSarea = out('Area (surface / armor) factor'), oSdim = out('Scaled dimension');
+    calcs.push(() => { const k = val(sFrom) > 0 && val(sTo) > 0 ? Math.cbrt(val(sTo) / val(sFrom)) : 0; oSlin.set(k ? `× ${k.toFixed(3)}` : '—'); oSarea.set(k ? `× ${(k * k).toFixed(3)}` : '—'); oSdim.set(k ? `${(sDim.mm() * k).toFixed(2)} mm · ${(sDim.mm() * k / IN).toFixed(3)} in` : '—'); });
+
+    // ---- 6. motor torque
+    const tKv = num('t.kv', 1700), tI = num('t.i', 40), tRatio = num('t.ratio', 1), tArm = lenField('Lever arm', 't.arm', 50);
+    const oTkt = out('Torque constant Kt'), oTm = out('Motor torque at that current'), oTo = out('Output torque after reduction'), oTf = out('Force at the lever arm');
+    calcs.push(() => { const kv = val(tKv); if (!kv) { [oTkt, oTm, oTo, oTf].forEach(o => o.set('—')); return; } const kt = 60 / (2 * Math.PI * kv); const Tm = kt * val(tI); const To = Tm * val(tRatio); const arm = tArm.mm() / 1000; oTkt.set(`${(kt * 1000).toFixed(2)} mN·m/A`); oTm.set(`${Tm.toFixed(3)} N·m · ${(Tm * 10.1972).toFixed(2)} kg·cm · ${(Tm * 141.612).toFixed(1)} oz·in`); oTo.set(`${To.toFixed(3)} N·m · ${(To * 10.1972).toFixed(2)} kg·cm`); oTf.set(arm > 0 ? `${(To / arm).toFixed(1)} N · ${(To / arm * 0.224809).toFixed(1)} lbf · ${(To / arm / 9.80665 * 1000).toFixed(0)} gf` : '—'); });
+
     m.append(h('div', { class: 'grid2' },
-      h('div', { class: 'card' }, h('h3', null, 'Drive belt length'), field('Center distance (mm)', cd), field('Pulley 1 pitch Ø (mm)', p1), field('Pulley 2 pitch Ø (mm)', p2), field('Stretch factor', stretch), field('Belt pitch (mm)', pitch), bl.row, bt.row, h('p', { class: 'hint' }, 'L = (2C + π/2·(D₁+D₂) + (D₂−D₁)²/(4C)) / (1 + stretch). GT2 pitch 2, S3M/HTD 3.')),
-      h('div', { class: 'card' }, h('h3', null, 'Weapon tip speed & energy'), field('Cells', wc), field('Volts per cell', wv), field('Motor KV', wkv), field('Motor pulley teeth', wmp), field('Weapon pulley teeth', wwp), field('Weapon Ø (mm)', wd), field('Weapon mass (g)', wmass), field('Mass radius (mm)', wr), wrpm.row, wtip.row, wenergy.row, h('p', { class: 'hint' }, 'RPM = cells × V × KV × motor teeth / weapon teeth (no-load). Energy treats the weapon as a solid disk of that mass and radius; real MOI is usually lower.')),
-      h('div', { class: 'card' }, h('h3', null, 'Drive speed'), field('Cells', dc), field('Volts per cell', dv), field('Motor KV', dkv), field('Gearbox ratio', dgear), field('Motor pulley teeth', dip), field('Wheel pulley teeth', dop), field('Wheel Ø (mm)', dwheel), drpm.row, dspeed.row, h('p', { class: 'hint' }, 'No-load speed; expect 70–85% of this under load.')),
-      h('div', { class: 'card' }, h('h3', null, 'Battery'), field('Capacity (mAh)', bmah), field('Avg weapon draw (A)', bweap), field('Avg drive draw (A)', bdrive), field('Peak current (A)', bpeak), field('C rating', bc), field('Usable capacity (%)', buse), blife.row, bmin.row, bcont.row, h('p', { class: 'hint' }, 'Run time = usable Ah ÷ average amps. A 3-minute match with 1 minute of pit time is the usual target.'))));
+      h('div', { class: 'card' }, h('h3', null, 'Belt / chain centre distance'), beltBody, h('p', { class: 'hint' }, 'Pitch Ø = teeth × pitch / π. L = 2C + π/2·(D₁+D₂) + (D₂−D₁)²/(4C); the reverse solves that exactly. Whole-tooth options show the centre distance each real belt needs.'),
+        h('h3', { style: { marginTop: '14px' } }, 'Gear pair'), field('Units', gUnit), field('Pinion teeth', gT1), field('Gear teeth', gT2), field('Module / DP', gMod), oGCD.row, oGR.row, h('p', { class: 'hint' }, 'C = module × (N₁+N₂) / 2. Module = 25.4 / DP.')),
+      h('div', { class: 'card' }, h('h3', null, 'Weapon tip speed & energy'), wBody, h('p', { class: 'hint' }, 'RPM = cells × V/cell × KV × motor teeth ÷ weapon teeth (no-load). Tip speed = π × Ø × rpm / 60. Energy = ½·I·ω². Solid disk over-estimates most spinners; a real MOI from CAD is best.')),
+      h('div', { class: 'card' }, h('h3', null, 'Drive speed'), ...dV.rows, field('Motor KV (rpm/V)', dKv), field('Motor RPM override', dRpmOverride), field('Gearbox ratio (:1)', dGear), field('Motor pulley teeth', dIp), field('Wheel pulley teeth', dOp), dWheel.row, field('Loaded speed (% of no-load)', dEff), field('Arena width (ft)', dArena), oDrpm.row, oDspeed.row, oDload.row, oDcross.row, h('p', { class: 'hint' }, 'Wheel rpm = motor rpm ÷ (gearbox × wheel teeth ÷ motor teeth). Real speed under load is usually 70–85% of no-load.')),
+      h('div', { class: 'card' }, h('h3', null, 'Battery'), ...bV.rows, field('Capacity (mAh)', bMah), field('Avg weapon draw (A)', bWeap), field('Avg drive draw (A)', bDrive), field('Peak current (A)', bPeak), field('C rating', bC), field('Usable capacity (%)', bUse), field('Match length (min)', bMatch), field('Compare at (S)', bNewS), oBwh.row, oBlife.row, oBneed.row, oBmin.row, oBcont.row, oBequiv.row, h('p', { class: 'hint' }, 'Run time = usable Ah ÷ average amps. Energy (Wh) = Ah × pack volts; the same Wh at another cell count needs mAh × S₁ ÷ S₂.')),
+      h('div', { class: 'card' }, h('h3', null, 'Scale between weight classes'), field('From class (g)', h('div', null, sFrom, clsBtns(sFrom, 's.from'))), field('To class (g)', h('div', null, sTo, clsBtns(sTo, 's.to'))), sDim.row, oSlin.row, oSarea.row, oSdim.row, h('p', { class: 'hint' }, 'Linear factor = ∛(m₂/m₁) — same density and proportions. 150 g → 1 lb is ×1.45; 1 lb → 3 lb is ×1.44.')),
+      h('div', { class: 'card' }, h('h3', null, 'Motor torque'), field('Motor KV (rpm/V)', tKv), field('Current (A)', tI), field('Gear reduction (:1)', tRatio), tArm.row, oTkt.row, oTm.row, oTo.row, oTf.row, h('p', { class: 'hint' }, 'Kt = 60 / (2π·KV) N·m per amp. Assumes the motor is not saturated; with sensorless hobby ESCs keep a 2–3× margin.'))));
     recalcAll();
   };
 
