@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import slicer_engine
+from .log import log, run_logged
 from .slicer_engine import app_root, download
 
 BAMBU_VERSION = "02.08.02.61"
@@ -98,18 +99,71 @@ def _env() -> dict:
     return env
 
 
+def _version_cache_file() -> Path:
+    return bambu_dir() / "version.txt"
+
+
 def version_of(cmd: list[str]) -> str | None:
+    """Version of the located Bambu Studio. `--help` prints it on Linux/macOS; the Windows build is a GUI-subsystem exe
+    whose console output cannot be captured, so there we fall back to a real (tiny) slice and read the version from the
+    G-code header, then cache it next to the install."""
+    cache = _version_cache_file()
     try:
-        r = subprocess.run(cmd + ["--help"], capture_output=True, text=True, timeout=60, env=_env())
+        if cache.exists():
+            c = json.loads(cache.read_text())
+            if c.get("cmd") == cmd and c.get("version") and Path(cmd[-1]).exists() and c.get("mtime") == os.path.getmtime(cmd[-1]):
+                return c["version"]
+    except Exception:  # noqa
+        pass
+    v = None
+    try:
+        r = run_logged(cmd + ["--help"], "bambu --help", capture_output=True, text=True, timeout=90, env=_env(),
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0)
         out = (r.stdout or "") + (r.stderr or "")
         m = re.search(r"BambuStudio-(\d[\d.]*\d)", out)
         if m:
-            return m.group(1)
-        if "libgtk" in out or "cannot open shared object" in out:
+            v = m.group(1)
+        elif "cannot open shared object" in out:
+            log.warning("bambu --help: %s", out.strip()[-300:])
             return None
+        else:
+            log.info("bambu --help printed nothing usable (exit %s) — running a probe slice instead", r.returncode)
+    except Exception as e:  # noqa
+        log.warning("bambu --help failed: %s", e)
         return None
-    except Exception:
+    if not v:
+        v = probe_version(cmd)
+    if v:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"cmd": cmd, "version": v, "mtime": os.path.getmtime(cmd[-1])}))
+        except Exception:  # noqa
+            pass
+    return v
+
+
+def probe_version(cmd: list[str]) -> str | None:
+    """Slice a 10 mm cube with the bundled presets and read '; BambuStudio <version>' from the G-code."""
+    res = resources_dir(cmd)
+    if res is None:
+        log.warning("bambu probe: no resources/profiles/BBL next to %s", cmd)
         return None
+    from . import meshio, profiles
+    work = Path(tempfile.mkdtemp(prefix="sb-bambu-probe-"))
+    try:
+        cube = work / "cube.stl"
+        meshio.write_stl(meshio.box_mesh([0, 0, 0], [10, 10, 10]), cube)
+        P = Presets(res)
+        presets = P.write(work / "presets", profiles.normalize({}), {"name": "Generic PLA", "material": "PLA", "density": 1.24, "flow": 0.98, "max_vol_speed": 12}, "P1S")
+        r = run_slice(cmd, cube, presets, work / "job", work / "data", keep_gcode=True, timeout=600)
+        v = r.get("slicer_version")
+        log.info("bambu probe slice: %s g, version %s", r.get("grams"), v)
+        return v or "unknown"
+    except Exception as e:  # noqa
+        log.error("bambu probe slice failed: %s", e)
+        return None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def missing_libs(cmd: list[str]) -> str | None:
@@ -155,16 +209,35 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
         if progress:
             progress(msg, frac)
 
+    log.info("bambu install: platform=%s target=%s (path length %d)", s, bd, len(str(bd)))
     if s == "Windows":
         z = bd / "download.zip"
         prog("Downloading Bambu Studio " + BAMBU_VERSION + " (about 470 MB)", 0.0)
         download(BAMBU_URLS["Windows"], z, lambda d, t: prog(f"Downloading {d / 1e6:.0f} / {t / 1e6:.0f} MB", 0.8 * d / t if t else 0.4))
-        prog("Unpacking", 0.85)
+        log.info("bambu install: downloaded %.1f MB", z.stat().st_size / 1e6)
+        prog("Unpacking (this takes a minute)", 0.85)
+        # Windows still has a 260-character path limit unless long paths are enabled; the \\?\ prefix lifts it
+        target = str(bd.resolve())
+        if not target.startswith("\\\\?\\"):
+            target = "\\\\?\\" + target
+        n = 0
         with zipfile.ZipFile(z) as zf:
-            for info in zf.infolist():
-                if info.filename.lower().endswith(".pdb"):
-                    continue  # debug symbols, ~200 MB we never use
-                zf.extract(info, bd)
+            infos = [i for i in zf.infolist() if not i.filename.lower().endswith(".pdb")]  # skip ~200 MB of debug symbols
+            for k, info in enumerate(infos):
+                try:
+                    zf.extract(info, target)
+                except OSError as e:
+                    if target != str(bd):
+                        log.warning("bambu install: long-path extract failed for %s (%s); retrying without the prefix", info.filename, e)
+                        target = str(bd)
+                        zf.extract(info, target)
+                    else:
+                        raise RuntimeError(f"Could not unpack {info.filename}: {e}. The install folder path is {len(str(bd))} characters long; "
+                                           "Windows limits paths to 260 unless long paths are enabled — try moving SliceBudget to a shorter path such as C:\\SliceBudget.") from e
+                n += 1
+                if k % 500 == 0:
+                    prog(f"Unpacking {k}/{len(infos)}", 0.85 + 0.08 * k / max(1, len(infos)))
+        log.info("bambu install: extracted %d files", n)
         z.unlink(missing_ok=True)
     elif s == "Darwin":
         dmg = bd / "download.dmg"
@@ -188,12 +261,12 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
                 shutil.rmtree(dest)
             prog("Copying application", 0.9)
             if shutil.which("ditto"):
-                subprocess.run(["ditto", str(app), str(dest)], check=True)
+                run_logged(["ditto", str(app), str(dest)], "ditto", check=True)
             else:
                 shutil.copytree(app, dest, symlinks=True)
         finally:
             for mp in mounts:
-                subprocess.run(["hdiutil", "detach", str(mp), "-quiet", "-force"], check=False)
+                run_logged(["hdiutil", "detach", str(mp), "-quiet", "-force"], "hdiutil detach", check=False)
         subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest)], check=False)
         dmg.unlink(missing_ok=True)
     else:
@@ -203,19 +276,23 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
         img.chmod(img.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
         prog("Unpacking AppImage", 0.85)
         # extract so it runs without FUSE and so the bundled profiles are readable
-        r = subprocess.run([str(img), "--appimage-extract"], cwd=str(bd), capture_output=True, text=True, timeout=900)
+        r = run_logged([str(img), "--appimage-extract"], "appimage extract", cwd=str(bd), capture_output=True, text=True, timeout=900)
         if r.returncode != 0 or not (bd / "squashfs-root" / "AppRun").exists():
             raise RuntimeError("Could not unpack the AppImage: " + (r.stderr or r.stdout)[-400:])
         img.unlink(missing_ok=True)
-    prog("Verifying", 0.95)
+    prog("Verifying (a test slice, a few seconds)", 0.95)
     cmd = locate()
+    log.info("bambu install: located %s; resources %s", cmd, resources_dir(cmd) if cmd else None)
     if not cmd:
         raise RuntimeError("Bambu Studio was unpacked but no executable was found in " + str(bd))
+    if resources_dir(cmd) is None:
+        raise RuntimeError("Bambu Studio was unpacked but its preset library (resources/profiles/BBL) is missing in " + str(bd))
     v = version_of(cmd)
     if not v:
         hint = missing_libs(cmd)
-        raise RuntimeError(hint or ("Bambu Studio did not start: " + " ".join(cmd)))
+        raise RuntimeError(hint or ("Bambu Studio is installed but a test slice failed — see Diagnostics on this page. Command: " + " ".join(cmd)))
     prog("Installed Bambu Studio " + v, 1.0)
+    log.info("bambu install: done, version %s", v)
     return cmd
 
 
@@ -362,10 +439,10 @@ def run_slice(cmd: list[str], model_path: Path, presets: tuple[Path, Path, Path]
     out.mkdir(parents=True, exist_ok=True)
     datadir.mkdir(parents=True, exist_ok=True)
     args = cmd + ["--datadir", str(datadir), "--load-settings", f"{machine};{process}", "--load-filaments", str(filament),
-                  "--slice", "0", "--export-3mf", str(out / "result.3mf"), "--outputdir", str(out), "--debug", "0", str(model_path)]
+                  "--slice", "0", "--export-3mf", "result.3mf", "--outputdir", str(out), "--debug", "0", str(model_path)]
     t0 = time.time()
     creation = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
-    r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=_env(), creationflags=creation)
+    r = run_logged(args, f"bambu slice {model_path.name}", capture_output=True, text=True, timeout=timeout, env=_env(), creationflags=creation)
     dt = time.time() - t0
     gcodes = sorted(out.glob("*.gcode"))
     res: dict = {}
@@ -386,8 +463,11 @@ def run_slice(cmd: list[str], model_path: Path, presets: tuple[Path, Path, Path]
                 res["error"] = info["error_string"]
         except Exception:
             pass
-    if gcodes and ("grams" not in res or "print_time_s" not in res):
+    if gcodes:
         head = gcodes[0].read_text(encoding="utf-8", errors="replace")[:200000]
+        mv = re.search(r";\s*BambuStudio\s+(\S+)", head)
+        if mv:
+            res["slicer_version"] = mv.group(1)
         m = _W_RE.search(head)
         if m and "grams" not in res:
             res["grams"] = float(m.group(1))
@@ -401,6 +481,7 @@ def run_slice(cmd: list[str], model_path: Path, presets: tuple[Path, Path, Path]
         text = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()
         lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("[")]
         msg = res.get("error") or " ".join(lines[-3:]) or f"exit code {r.returncode}"
+        log.warning("bambu slice produced no result: rc=%s files=%s msg=%s", r.returncode, [p.name for p in out.iterdir()] if out.exists() else [], msg[:300])
         raise RuntimeError(slicer_engine.explain_slicer_error(None, "Bambu Studio: " + msg, r.returncode))
     res["grams_source"] = "bambu"
     res["time_s"] = dt

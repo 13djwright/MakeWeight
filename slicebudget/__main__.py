@@ -43,7 +43,8 @@ def main():
                 break
     httpd = serve(root, args.host, port)
     url = f"http://{args.host}:{port}/"
-    print(f"SliceBudget running at {url}   (data in {root / 'data'})", flush=True)
+    from .log import log
+    log.info("SliceBudget running at %s   (data in %s)", url, root / "data")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

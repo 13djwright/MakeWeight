@@ -14,6 +14,8 @@ import zipfile
 from pathlib import Path
 from typing import Callable
 
+from .log import log, run_logged
+
 PRUSA_VERSION = "2.9.6"
 PRUSA_URLS = {
     "Windows": f"https://github.com/prusa3d/PrusaSlicer/releases/download/version_{PRUSA_VERSION}/PrusaSlicer-{PRUSA_VERSION}.zip",
@@ -96,7 +98,7 @@ def locate(configured: str | None = None) -> list[str] | None:
 
 def version_of(cmd: list[str]) -> str | None:
     try:
-        r = subprocess.run(cmd + ["--help"], capture_output=True, text=True, timeout=30)
+        r = run_logged(cmd + ["--help"], "prusa --help", capture_output=True, text=True, timeout=30)
         m = re.search(r"PrusaSlicer-(\d+\.\d+\.\d+[^\s]*)", (r.stdout or "") + (r.stderr or ""))
         return m.group(1) if m else ((r.stdout or "").splitlines() or ["?"])[0][:60]
     except Exception:
@@ -131,6 +133,7 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
         if progress:
             progress(msg, frac)
 
+    log.info("prusa install: platform=%s target=%s", s, sd)
     if s == "Windows":
         url = PRUSA_URLS["Windows"]
         z = sd / "download.zip"
@@ -312,7 +315,7 @@ def run_slice(cmd: list[str], stl_path: Path, ini_text: str, work_dir: Path, kee
         creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
         creation = 0
-    r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env, creationflags=creation)
+    r = run_logged(args, f"prusa slice {stl_path.name}", capture_output=True, text=True, timeout=timeout, env=env, creationflags=creation)
     dt = time.time() - t0
     if r.returncode != 0 or not gcode.exists():
         raise RuntimeError(explain_slicer_error(r.stderr, r.stdout, r.returncode))

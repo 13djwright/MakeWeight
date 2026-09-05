@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import platform
 import re
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -13,7 +15,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import bambu_engine, exports, meshio, optimizer, orient, profiles, slicer_engine
+from . import bambu_engine, exports, log as applog, meshio, optimizer, orient, profiles, slicer_engine
+from .log import log
 from .db import DB, loads, now
 from .jobs import Events, JobManager
 
@@ -26,6 +29,8 @@ class App:
         self.data_dir = self.root / "data"
         self.mesh_dir = self.data_dir / "meshes"
         self.mesh_dir.mkdir(parents=True, exist_ok=True)
+        applog.setup(self.data_dir)
+        log.info("SliceBudget %s starting; root=%s; %s; python %s", applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
         self.db = DB(self.data_dir / "slicebudget.db")
         self.events = Events()
         cores = os.cpu_count() or 2
@@ -247,8 +252,11 @@ class App:
         def prog(msg, frac):
             self.install_state.update({"message": msg, "progress": frac})
             self.events.emit("install", self.install_state)
+            if not re.match(r"(Downloading|Unpacking) \d+", msg):
+                log.info("install %s: %s", engine, msg)
 
         def run():
+            log.info("install %s: starting", engine)
             try:
                 if engine == "bambu":
                     cmd = bambu_engine.install(prog)
@@ -261,7 +269,8 @@ class App:
                 self.jobs.engine_status(force=True)
                 self.install_state.update({"status": "done", "message": "Installed " + label, "progress": 1.0})
             except Exception as e:
-                self.install_state.update({"status": "error", "message": str(e)})
+                log.exception("install %s failed", engine)
+                self.install_state.update({"status": "error", "message": str(e) or e.__class__.__name__})
             self.events.emit("install", self.install_state)
             self.events.emit("queue", self.jobs.queue_state())
         threading.Thread(target=run, daemon=True).start()
@@ -326,11 +335,12 @@ class Handler(BaseHTTPRequestHandler):
         except KeyError as e:
             self._json({"error": f"not found: {e}"}, 404)
         except (ValueError, RuntimeError) as e:
+            log.info("%s %s -> 400 %s", method, self.path, e)
             self._json({"error": str(e)}, 400)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:  # noqa
-            traceback.print_exc()
+            log.exception("%s %s -> 500", method, self.path)
             try:
                 self._json({"error": str(e), "trace": traceback.format_exc()[-2000:]}, 500)
             except Exception:
@@ -386,6 +396,13 @@ class Handler(BaseHTTPRequestHandler):
                     # jobs queued for the other engine are re-keyed when they run; make sure workers are awake
                     app.jobs.start()
             return self._json({"ok": True, "slicer": app.jobs.queue_state()})
+        if path == "log" and m == "GET":
+            n = int(qs.get("n") or 400)
+            return self._json({"lines": applog.tail(n), "file": str(applog.log_file() or "")})
+        if path == "diagnostics" and m == "GET":
+            return self._bytes(applog.bundle(app), "application/zip", f"slicebudget-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.zip")
+        if path == "environment" and m == "GET":
+            return self._json(applog.environment(app))
         if path == "slicer/install" and m == "POST":
             b = self._jbody(); app.install_slicer_async(b.get("engine") or "bambu"); return self._json(app.install_state)
         if path == "slicer/refresh" and m == "POST":

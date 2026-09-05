@@ -11,6 +11,7 @@ import traceback
 from pathlib import Path
 
 from . import bambu_engine, meshio, orient, profiles, slicer_engine
+from .log import log
 from .db import DB, loads, now
 
 
@@ -145,6 +146,7 @@ class JobManager:
             cmd = slicer_engine.locate(self.db.setting("slicer_path"))
             self.slicer_cmd = cmd
             self.slicer_version = slicer_engine.version_of(cmd) if cmd else None
+        log.info("slicer: engine=%s cmd=%s version=%s", self.engine, self.slicer_cmd, self.slicer_version)
         return {"cmd": self.slicer_cmd, "version": self.slicer_version, "engine": self.engine}
 
     @property
@@ -281,9 +283,9 @@ class JobManager:
             except Exception as e:  # noqa
                 self.db.update("slice_jobs", job["id"], {"status": "error", "finished": now(), "error": str(e)[:1000]})
                 if isinstance(e, RuntimeError):
-                    print(f"slice job {job['id']} failed: {e}", flush=True)
+                    log.warning("slice job %s (part %s) failed: %s", job["id"], job.get("part_id"), e)
                 else:
-                    traceback.print_exc()
+                    log.exception("slice job %s (part %s) crashed", job["id"], job.get("part_id"))
             job = self.db.get("slice_jobs", job["id"])
             self._after(job)
             self.events.emit("job", {"job": job})

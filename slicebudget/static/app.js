@@ -1293,6 +1293,31 @@
       h('div', { class: 'field' }, h('label', null, 'Default profile'), select(st.profiles.map(p => [p.id, p.name]), st.settings.default_profile_id, { onChange: e => api('PUT', 'settings', { default_profile_id: +e.target.value }) }))));
     right.append(h('div', { class: 'card' }, h('h3', null, 'Data'), h('dl', { class: 'kv' }, h('dt', null, 'Location'), h('dd', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', textAlign: 'left' } }, st.root + '/data'), h('dt', null, 'Version'), h('dd', null, st.version)),
       h('div', { class: 'tb', style: { marginTop: '8px' } }, h('button', { class: 'btn small', onClick: async () => { const r = await api('POST', 'backup'); toast('Backup written: ' + r.file); } }, 'Back up now'), S.robot && h('button', { class: 'btn small', onClick: () => window.open(`/api/robots/${S.robotId}/export/archive`) }, 'Export robot archive'), h('button', { class: 'btn small', onClick: importArchive }, 'Import robot archive'))));
+    // diagnostics: the log, live, and a bundle to send along with a bug report
+    const logPre = h('pre', { class: 'log' }, 'loading…');
+    const lvl = select([['all', 'Everything'], ['warn', 'Warnings & errors']], S.cache.loglvl || 'all', { style: { width: '170px' } });
+    const drawLog = async () => {
+      try {
+        const r = await api('GET', 'log?n=400');
+        let lines = r.lines || [];
+        if (lvl.value === 'warn') lines = lines.filter(l => / (WARN|ERROR|CRITICAL)\S* /.test(l));
+        logPre.textContent = lines.slice(-250).map(l => l.replace(' slicebudget:', '').replace(/ Thread-\d+ \(process_request_thread\)/, ' http')).join('\n') || '(empty)';
+        logPre.scrollTop = logPre.scrollHeight;
+        logPre.dataset.file = r.file || '';
+      } catch (e) { logPre.textContent = 'could not load the log: ' + e.message; }
+    };
+    lvl.addEventListener('change', () => { S.cache.loglvl = lvl.value; drawLog(); });
+    const diag = h('div', { class: 'card' }, h('h3', null, 'Diagnostics', h('div', { class: 'tb' }, lvl,
+        h('button', { class: 'btn small', onClick: drawLog }, 'Refresh'),
+        h('button', { class: 'btn small', onClick: async () => { try { await navigator.clipboard.writeText(logPre.textContent); toast('Log copied'); } catch { toast('Select the text and copy it manually', true); } } }, 'Copy'),
+        h('button', { class: 'btn small primary', onClick: () => window.open('/api/diagnostics') }, 'Download diagnostics bundle'))),
+      h('p', { class: 'hint', style: { marginTop: 0 } }, 'Installs, every slicer run, job failures and server errors are recorded here. If something fails, download the bundle (log + environment facts, no robot data) and send it along with the bug report.'),
+      logPre,
+      h('p', { class: 'hint' }, 'Full log file: ', h('span', { class: 'mono', style: { fontSize: '11px' } }, (st.root || '') + '/data/logs/slicebudget.log')));
+    left.append(diag);
+    drawLog();
+    if (S.logTimer) clearInterval(S.logTimer);
+    S.logTimer = setInterval(() => { if (S.view === 'jobs' && document.body.contains(logPre)) drawLog(); else { clearInterval(S.logTimer); S.logTimer = null; } }, 4000);
   };
   function printerModal(p) {
     const name = input({ value: p?.name || '' }), noz = input({ value: p ? p.nozzles.join(', ') : '0.4, 0.6' }), bx = input({ type: 'number', value: p?.bed.x ?? 256, style: { width: '80px' } }), by = input({ type: 'number', value: p?.bed.y ?? 256, style: { width: '80px' } }), bz = input({ type: 'number', value: p?.bed.z ?? 256, style: { width: '80px' } });
