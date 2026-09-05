@@ -662,13 +662,18 @@
       .sort((a, b) => ((b.slicer_version === curVer) - (a.slicer_version === curVer)) || (b.id - a.id))
       .filter(j => { const k = j.profile_hash + j.filament_key; if (seen.has(k)) return false; seen.add(k); return true; });
     rows.sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9));
-    const stale = rows.filter(j => j.status === 'done' && curVer && j.slicer_version !== curVer);
+    // rows sliced with a different filament than the part uses now are shown, but greyed
+    const fk = j => (j.filament_key || '').split('|');
+    const sameFil = j => { if (!p.filament) return true; const k = fk(j); return Math.abs(parseFloat(k[0]) - p.filament.density) < 1e-4 && Math.abs(parseFloat(k[1] || 1) - (p.filament.flow || 1)) < 1e-4 && (k.length < 5 || k[4] === (p.filament.name || '').replace(/\|/g, '/')); };
+    const stale = rows.filter(j => j.status === 'done' && ((curVer && j.slicer_version !== curVer) || !sameFil(j)));
     for (const j of rows) {
       const pr = j.profile_json ? JSON.parse(j.profile_json) : null;
       const isCur = cur && j.cache_key === cur.cache_key;
-      const other = j.status === 'done' && curVer && j.slicer_version !== curVer;
-      sweepRows.append(h('tr', { class: (isCur ? 'sel ' : '') + (other ? 'dim' : ''), title: other ? `Sliced with ${engLabel(j.slicer_version)} — the active engine is ${engLabel(curVer)}` : '' },
-        h('td', null, h('span', { class: 'prof' }, pr ? profString(pr) : '?'), isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current'), other && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, engLabel(j.slicer_version).split(' ')[0])),
+      const otherEng = j.status === 'done' && curVer && j.slicer_version !== curVer;
+      const otherFil = j.status === 'done' && !sameFil(j);
+      const why = [otherEng && `sliced with ${engLabel(j.slicer_version)} (active: ${engLabel(curVer)})`, otherFil && `sliced with filament ${fk(j)[4] || fk(j)[0] + ' g/cm³'} (part uses ${p.filament ? p.filament.name : '?'})`].filter(Boolean).join('; ');
+      sweepRows.append(h('tr', { class: (isCur ? 'sel ' : '') + (otherEng || otherFil ? 'dim' : ''), title: why },
+        h('td', null, h('span', { class: 'prof' }, pr ? profString(pr) : '?'), isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current'), otherEng && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, engLabel(j.slicer_version).split(' ')[0]), otherFil && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, 'other filament')),
         h('td', { class: 'num', style: { fontWeight: 600 } }, j.status === 'done' ? fmt(j.grams, 2) : h('span', { class: 'pill ' + (j.status === 'error' ? 'bad' : 'warn'), title: j.error }, j.status)),
         h('td', { class: 'num' }, j.status === 'done' && p.filament ? fmt(j.grams * (p.filament.correction.factor || 1), 2) : ''),
         h('td', { class: 'num', style: { color: cur && cur.grams != null && j.grams != null ? (j.grams > cur.grams ? 'var(--bad)' : 'var(--good)') : '' } }, cur && cur.grams != null && j.grams != null && !isCur ? signed(j.grams - cur.grams, 2) : ''),
@@ -677,7 +682,7 @@
         h('td', null, !isCur && pr && !p.locked && h('button', { class: 'btn small', onClick: () => applyParamsAsProfile(p, pr) }, 'Apply'))));
     }
     left.append(h('div', { class: 'card', style: { marginTop: '12px' } }, h('h3', null, 'Profile sweep · real slices · this orientation', h('div', { class: 'tb' },
-      stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer', onClick: async () => { try { for (const j of stale) { const pr = JSON.parse(j.profile_json); await api('POST', `parts/${p.id}/slice`, { params: pr }); } render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
+      stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer and this part’s filament', onClick: async () => { try { for (const j of stale) { const pr = JSON.parse(j.profile_json); await api('POST', `parts/${p.id}/slice`, { params: pr }); } render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
       h('button', { class: 'btn small', onClick: () => customSliceModal(p) }, '＋ Slice a profile'),
       h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
       h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),

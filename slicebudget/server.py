@@ -933,11 +933,35 @@ class Handler(BaseHTTPRequestHandler):
         robot = db.get("robots", rid)
         base_prof = db.get("profiles", db.setting("default_profile_id") or 1)
         base_params = profiles.normalize(loads(base_prof["params_json"], {})) if base_prof else profiles.default_params(robot.get("nozzle") or 0.4)
-        created = []; merged = {}
+        created = []; merged = {}; fil_cache: dict = {}
         for o in objs:
             blob = meshio.to_binary_stl_bytes(meshio.place_on_bed(o["tri"]))  # placement-independent, so duplicates merge
             sha = meshio.sha256_of(blob)
             params = profiles.normalize(base_params | meshio.slicer_settings_to_params(o["settings"], o.get("project_defaults")))
+            # the project's filament for this object (Bambu Studio): create it in the library if it is new
+            fil_id = None
+            try:
+                ext = int((o.get("settings") or {}).get("extruder") or 1)
+            except (TypeError, ValueError):
+                ext = 1
+            pf = meshio.bambu_project_filament(o.get("project_defaults") or {}, ext)
+            if pf:
+                key_f = (pf["name"], round(pf["density"], 4), round(pf["flow"], 4))
+                if key_f not in fil_cache:
+                    row = db.one("SELECT * FROM filaments WHERE name=? AND ABS(density-?)<1e-4 AND ABS(flow-?)<1e-4", [pf["name"], pf["density"], pf["flow"]])
+                    if not row:
+                        row = db.one("SELECT * FROM filaments WHERE name=?", [pf["name"]])
+                        if row and (abs(row["density"] - pf["density"]) > 1e-4 or abs((row["flow"] or 1) - pf["flow"]) > 1e-4):
+                            row = None  # same name, different numbers → keep the project's as a separate filament
+                            pf["name"] = f"{pf['name']} (flow {pf['flow']:g})"
+                            row = db.one("SELECT * FROM filaments WHERE name=?", [pf["name"]])
+                    if not row:
+                        fid = db.insert("filaments", {"name": pf["name"], "material": pf["material"], "density": pf["density"], "flow": pf["flow"],
+                                                      "max_vol_speed": pf["max_vol_speed"], "color": "#8a8a8a", "correction_json": "{}", "builtin": 0,
+                                                      "notes": f"Imported from {fname}"})
+                        row = db.get("filaments", fid)
+                    fil_cache[key_f] = row["id"]
+                fil_id = fil_cache[key_f]
             ph = profiles.profile_hash(params)
             key = (sha, ph)
             if key in merged:  # same geometry + same settings → one line with qty+1
@@ -950,7 +974,10 @@ class Handler(BaseHTTPRequestHandler):
             if not prof:
                 pid = db.insert("profiles", {"name": profiles.profile_string(params), "printer_id": None, "nozzle": params["nozzle"], "params_json": json.dumps(params), "builtin": 0, "notes": f"Imported from {fname}"})
                 prof = db.get("profiles", pid)
-            part = self._create_part(rid, {"name": o["name"], "mesh_id": mesh["id"], "profile_id": prof["id"], "orient": {"mode": "preset", "quat": [0, 0, 0, 1], "label": "imported"}, "auto_orient": False})
+            spec = {"name": o["name"], "mesh_id": mesh["id"], "profile_id": prof["id"], "orient": {"mode": "preset", "quat": [0, 0, 0, 1], "label": "imported"}, "auto_orient": False}
+            if fil_id:
+                spec["filament_id"] = fil_id
+            part = self._create_part(rid, spec)
             merged[key] = part; created.append(part)
         return {"created": len(created), "parts": created}
 

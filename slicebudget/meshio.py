@@ -540,3 +540,42 @@ def bambu_3mf_with_modifiers(tri: np.ndarray, name: str, modifiers: list[dict], 
         z.writestr("3D/3dmodel.model", model.getvalue())
         z.writestr("Metadata/model_settings.config", cfg.getvalue())
     return buf.getvalue()
+
+
+def bambu_project_filament(ps: dict, extruder: int = 1, variant: str = "Direct Drive Standard") -> dict | None:
+    """The filament a Bambu Studio project assigns to `extruder` (1-based): name, material, density, flow, max
+    volumetric speed. Bambu stores per-variant arrays (Standard / High Flow nozzle …) indexed through
+    filament_self_index / filament_extruder_variant; older projects have one entry per filament."""
+    if not ps:
+        return None
+    try:
+        ids = ps.get("filament_settings_id") or []
+        n = len(ids)
+        if n == 0:
+            return None
+        i = max(0, min(n - 1, int(extruder) - 1))
+        name = str(ids[i]).split(" @")[0].strip() or f"Filament {i + 1}"
+        types = ps.get("filament_type") or []
+        dens = ps.get("filament_density") or []
+        self_idx = ps.get("filament_self_index") or []
+        variants = ps.get("filament_extruder_variant") or []
+
+        def pick(arr):
+            if not isinstance(arr, list) or not arr:
+                return None
+            if len(arr) == n:
+                return arr[i]
+            if self_idx and variants and len(arr) == len(self_idx):
+                cands = [k for k in range(len(arr)) if str(self_idx[k]) == str(i + 1)]
+                for k in cands:
+                    if k < len(variants) and variants[k] == variant:
+                        return arr[k]
+                if cands:
+                    return arr[cands[0]]
+            return arr[min(i, len(arr) - 1)]
+        out = {"name": name, "material": (types[i] if i < len(types) else None) or "PLA",
+               "density": float(pick(dens) or 1.24), "flow": float(pick(ps.get("filament_flow_ratio")) or 1.0),
+               "max_vol_speed": float(pick(ps.get("filament_max_volumetric_speed")) or 12)}
+        return out
+    except Exception:
+        return None
