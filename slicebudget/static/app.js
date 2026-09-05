@@ -655,13 +655,20 @@
     const sweepRows = h('tbody');
     const cur = p.slice;
     const seen = new Set();
-    const rows = jobs.filter(j => j.purpose !== 'orient' && j.orient_key === (cur ? cur.orient_key : j.orient_key)).filter(j => { const k = j.profile_hash + j.filament_key; if (seen.has(k)) return false; seen.add(k); return true; });
+    const curVer = (S.state.slicer && S.state.slicer.slicer) || '';
+    const engLabel = v => !v ? '' : v.startsWith('bambu-') ? 'Bambu Studio ' + v.slice(6) : 'PrusaSlicer ' + v.split('+')[0];
+    // one row per profile+filament, preferring a result from the active slicer over an older engine's
+    const rows = jobs.filter(j => j.purpose !== 'orient' && j.orient_key === (cur ? cur.orient_key : j.orient_key))
+      .sort((a, b) => ((b.slicer_version === curVer) - (a.slicer_version === curVer)) || (b.id - a.id))
+      .filter(j => { const k = j.profile_hash + j.filament_key; if (seen.has(k)) return false; seen.add(k); return true; });
     rows.sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9));
+    const stale = rows.filter(j => j.status === 'done' && curVer && j.slicer_version !== curVer);
     for (const j of rows) {
       const pr = j.profile_json ? JSON.parse(j.profile_json) : null;
       const isCur = cur && j.cache_key === cur.cache_key;
-      sweepRows.append(h('tr', { class: isCur ? 'sel' : '' },
-        h('td', null, h('span', { class: 'prof' }, pr ? profString(pr) : '?'), isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current')),
+      const other = j.status === 'done' && curVer && j.slicer_version !== curVer;
+      sweepRows.append(h('tr', { class: (isCur ? 'sel ' : '') + (other ? 'dim' : ''), title: other ? `Sliced with ${engLabel(j.slicer_version)} — the active engine is ${engLabel(curVer)}` : '' },
+        h('td', null, h('span', { class: 'prof' }, pr ? profString(pr) : '?'), isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current'), other && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, engLabel(j.slicer_version).split(' ')[0])),
         h('td', { class: 'num', style: { fontWeight: 600 } }, j.status === 'done' ? fmt(j.grams, 2) : h('span', { class: 'pill ' + (j.status === 'error' ? 'bad' : 'warn'), title: j.error }, j.status)),
         h('td', { class: 'num' }, j.status === 'done' && p.filament ? fmt(j.grams * (p.filament.correction.factor || 1), 2) : ''),
         h('td', { class: 'num', style: { color: cur && cur.grams != null && j.grams != null ? (j.grams > cur.grams ? 'var(--bad)' : 'var(--good)') : '' } }, cur && cur.grams != null && j.grams != null && !isCur ? signed(j.grams - cur.grams, 2) : ''),
@@ -670,6 +677,7 @@
         h('td', null, !isCur && pr && !p.locked && h('button', { class: 'btn small', onClick: () => applyParamsAsProfile(p, pr) }, 'Apply'))));
     }
     left.append(h('div', { class: 'card', style: { marginTop: '12px' } }, h('h3', null, 'Profile sweep · real slices · this orientation', h('div', { class: 'tb' },
+      stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer', onClick: async () => { try { for (const j of stale) { const pr = JSON.parse(j.profile_json); await api('POST', `parts/${p.id}/slice`, { params: pr }); } render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
       h('button', { class: 'btn small', onClick: () => customSliceModal(p) }, '＋ Slice a profile'),
       h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
       h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),
