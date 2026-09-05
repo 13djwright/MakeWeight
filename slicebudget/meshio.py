@@ -494,3 +494,49 @@ def prusa_3mf_with_modifiers(tri: np.ndarray, name: str, modifiers: list[dict]) 
         z.writestr("3D/3dmodel.model", model.getvalue())
         z.writestr("Metadata/Slic3r_PE_model.config", cfg.getvalue())
     return buf.getvalue()
+
+
+def bambu_3mf_with_modifiers(tri: np.ndarray, name: str, modifiers: list[dict], center=(128.0, 128.0)) -> bytes:
+    """A Bambu Studio-style 3MF: the part and each modifier box are separate mesh objects, assembled into one
+    object through <components>; Metadata/model_settings.config marks the boxes as modifier parts with their
+    setting overrides (Bambu keys, e.g. wall_loops / sparse_infill_density).
+    modifiers: [{name, min, max, settings}] in the part's bed frame (part centred on x=y=0, z from bed)."""
+    from xml.sax.saxutils import escape
+    parts = [(2, "normal_part", name, tri, {})]
+    nid = 3
+    for md in modifiers:
+        parts.append((nid, "modifier_part", md.get("name") or "modifier", box_mesh(md["min"], md["max"]), md.get("settings") or {}))
+        nid += 1
+    root_id = nid
+    model = io.StringIO()
+    model.write('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">\n')
+    model.write(' <metadata name="Application">SliceBudget</metadata>\n <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n')
+    for (pid, subtype, pname, ptri, settings) in parts:
+        verts, faces = _indexed(ptri, tol=1e-5)
+        model.write(f'  <object id="{pid}" name="{escape(pname)}" type="model">\n   <mesh>\n    <vertices>\n')
+        for v in verts:
+            model.write(f'     <vertex x="{v[0]:.5f}" y="{v[1]:.5f}" z="{v[2]:.5f}"/>\n')
+        model.write('    </vertices>\n    <triangles>\n')
+        for f in faces:
+            model.write(f'     <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"/>\n')
+        model.write('    </triangles>\n   </mesh>\n  </object>\n')
+    model.write(f'  <object id="{root_id}" name="{escape(name)}" type="model">\n   <components>\n')
+    for (pid, *_rest) in parts:
+        model.write(f'    <component objectid="{pid}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n')
+    model.write('   </components>\n  </object>\n </resources>\n <build>\n')
+    model.write(f'  <item objectid="{root_id}" transform="1 0 0 0 1 0 0 0 1 {center[0]:.4f} {center[1]:.4f} 0" printable="1"/>\n </build>\n</model>\n')
+    cfg = io.StringIO()
+    cfg.write(f'<?xml version="1.0" encoding="UTF-8"?>\n<config>\n  <object id="{root_id}">\n    <metadata key="name" value="{escape(name)}"/>\n    <metadata key="extruder" value="1"/>\n')
+    for (pid, subtype, pname, ptri, settings) in parts:
+        cfg.write(f'    <part id="{pid}" subtype="{subtype}">\n      <metadata key="name" value="{escape(pname)}"/>\n      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n')
+        for k, v in settings.items():
+            cfg.write(f'      <metadata key="{escape(str(k))}" value="{escape(str(v))}"/>\n')
+        cfg.write('    </part>\n')
+    cfg.write(f'  </object>\n  <plate>\n    <metadata key="plater_id" value="1"/>\n    <metadata key="plater_name" value=""/>\n    <metadata key="locked" value="false"/>\n    <model_instance>\n      <metadata key="object_id" value="{root_id}"/>\n      <metadata key="instance_id" value="0"/>\n      <metadata key="identify_id" value="{root_id * 10}"/>\n    </model_instance>\n  </plate>\n</config>\n')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n <Default Extension="config" ContentType="text/xml"/>\n</Types>\n')
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>\n')
+        z.writestr("3D/3dmodel.model", model.getvalue())
+        z.writestr("Metadata/model_settings.config", cfg.getvalue())
+    return buf.getvalue()

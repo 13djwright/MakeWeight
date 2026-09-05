@@ -220,3 +220,7 @@ th.sortable.desc::after{content:' ▼';font-size:9px}
 .field.out label{color:var(--ink3)}
 .callout{margin-top:10px;padding:8px 10px;border-radius:6px;font-size:12px;line-height:1.4;background:var(--panel2);border:1px solid var(--rule)}
 .callout.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+.engine{padding:10px 12px;border:1px solid var(--rule);border-radius:8px;margin-bottom:8px}
+.engine.active{border-color:var(--accent, #d95f1b);background:var(--panel2)}
+.engine .eh{display:flex;align-items:center;gap:8px}
+.engine .radio{display:flex;align-items:center;gap:6px;cursor:pointer}

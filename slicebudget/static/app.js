@@ -230,7 +230,7 @@
     nav.append(h('div', { class: 'sec' }, 'Library'), item('library', 'Components'), item('filaments', 'Filaments & profiles'));
     nav.append(h('div', { class: 'sec' }, 'Tool'), item('calc', 'Calculators'), item('jobs', 'Jobs & setup', st.slicer.slicer ? null : '!', 'warn'));
     const q = st.slicer;
-    nav.append(h('div', { class: 'foot' }, q.slicer ? h('span', null, h('b', null, 'PrusaSlicer ' + q.slicer.split('+')[0]), h('br'), `${q.workers} worker${q.workers > 1 ? 's' : ''} · ${q.running} running · ${q.queued} queued`) : h('span', null, h('b', { style: { color: 'var(--warn)' } }, 'PrusaSlicer not installed'), h('br'), 'Open Jobs & setup')));
+    nav.append(h('div', { class: 'foot' }, q.slicer ? h('span', null, h('b', null, (q.slicer_label || q.slicer).split('+')[0]), h('br'), `${q.workers} worker${q.workers > 1 ? 's' : ''} · ${q.running} running · ${q.queued} queued`) : h('span', null, h('b', { style: { color: 'var(--warn)' } }, 'PrusaSlicer not installed'), h('br'), 'Open Jobs & setup')));
   }
 
   function exportMenu(anchor) {
@@ -534,7 +534,7 @@
   function jobPill(j, p) {
     if (!p.mesh) return h('button', { class: 'btn small', onClick: () => attachMeshModal({ id: p.line_item_id, part: p }) }, 'Attach mesh');
     if (!j) return h('span', { class: 'pill auto' }, 'not sliced');
-    if (j.status === 'done') return h('span', { class: 'pill ver', title: `PrusaSlicer ${j.slicer_version || ''}` }, j.time_s ? `sliced ${secs(j.time_s)}` : 'cached');
+    if (j.status === 'done') return h('span', { class: 'pill ver', title: `sliced with ${(j.slicer_version || '').startsWith('bambu-') ? 'Bambu Studio ' + j.slicer_version.slice(6) : 'PrusaSlicer ' + (j.slicer_version || '')}` }, j.time_s ? `sliced ${secs(j.time_s)}` : 'cached');
     if (j.status === 'running') return h('span', { class: 'pill warn' }, 'slicing…');
     if (j.status === 'queued') return h('span', { class: 'pill warn' }, 'queued');
     if (j.status === 'error') return h('span', { class: 'pill bad', title: j.error }, 'error');
@@ -639,7 +639,7 @@
       }).catch(() => { layerCard.hidden = true; });
       layerImg.alt = ''; layerLbl.textContent = 'building the layer model (a few seconds the first time)…';
     } else layerCard.hidden = true;
-    if (p.slice && p.slice.status === 'error') previewCard.append(h('div', { class: 'callout bad' }, h('b', null, 'This orientation did not slice. '), p.slice.error || 'PrusaSlicer failed.', ' ', h('button', { class: 'btn small', style: { marginLeft: '6px' }, onClick: () => api('POST', 'jobs/retry_errors', { part_id: p.id }).then(() => refreshRobot()).then(render).catch(fail) }, 'Try again')));
+    if (p.slice && p.slice.status === 'error') previewCard.append(h('div', { class: 'callout bad' }, h('b', null, 'This orientation did not slice. '), p.slice.error || 'The slicer failed.', ' ', h('button', { class: 'btn small', style: { marginLeft: '6px' }, onClick: () => api('POST', 'jobs/retry_errors', { part_id: p.id }).then(() => refreshRobot()).then(render).catch(fail) }, 'Try again')));
     left.append(h('div', { class: 'grid2' }, previewCard, layerCard));
     if (p.mesh) {
       setTimeout(async () => {
@@ -705,7 +705,7 @@
       }
       modsCard.append(h('div', { class: 'tw' }, h('table', null, tb)));
     }
-    modsCard.append(h('p', { class: 'hint' }, 'A box region with its own walls/infill (e.g. 100% around the weapon bolt pattern). Sliced for real as a PrusaSlicer modifier mesh. Coordinates are in the preview frame: x/y centred on the part, z from the bed.'));
+    modsCard.append(h('p', { class: 'hint' }, 'A box region with its own walls/infill (e.g. 100% around the weapon bolt pattern). Sliced for real as a modifier mesh in the active slicer. Coordinates are in the preview frame: x/y centred on the part, z from the bed.'));
     right.append(modsCard);
     right.append(h('div', { class: 'card' }, h('h3', null, 'Weigh-ins', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => weighInModal(it) }, '＋ Add'))),
       it.weigh_ins.length ? h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...[...it.weigh_ins].reverse().slice(0, 6).map(w => h('tr', null, h('td', { class: 'mono' }, w.date || ''), h('td', { class: 'num' }, fmt(w.grams, 2) + ' g'), h('td', { class: 'prof' }, w.profile_string || '')))))) : h('p', { class: 'hint' }, 'No weigh-ins yet. Enter the scale reading after printing; it calibrates this filament.'),
@@ -798,7 +798,7 @@
   function customSliceModal(p) {
     const params = p.profile ? p.profile.params : S.state.profiles[0].params;
     const { body, read } = paramsForm(params);
-    modal('Slice this part with a profile', h('div', null, body, h('p', { class: 'hint' }, 'Runs one real PrusaSlicer slice and adds the row to the sweep table.')), [{ label: 'Cancel' }, { label: 'Slice', cls: 'primary', onClick: async () => { await api('POST', `parts/${p.id}/slice`, { params: read(), purpose: 'sweep', priority: 4 }); toast('Slice queued'); setTimeout(render, 500); } }], { width: '560px' });
+    modal('Slice this part with a profile', h('div', null, body, h('p', { class: 'hint' }, 'Runs one real slice and adds the row to the sweep table.')), [{ label: 'Cancel' }, { label: 'Slice', cls: 'primary', onClick: async () => { await api('POST', `parts/${p.id}/slice`, { params: read(), purpose: 'sweep', priority: 4 }); toast('Slice queued'); setTimeout(render, 500); } }], { width: '560px' });
   }
   function exactSweepModal(p) {
     const c = p.constraints || {};
@@ -1231,21 +1231,38 @@
     const st = S.state, j = await api('GET', 'jobs');
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Jobs & setup'), h('p', null, 'The slicer, the queue, the cache, backups.'))));
     const left = h('div'), right = h('div'); m.append(h('div', { class: 'cols' }, left, right));
-    // slicer card
+    // slicer card — two engines, one active
     const inst = st.install || {};
-    const slicerCard = h('div', { class: 'card' }, h('h3', null, 'Slicer'));
-    const dl = h('dl', { class: 'kv' });
-    dl.append(h('dt', null, 'Engine'), h('dd', null, st.slicer.slicer ? `PrusaSlicer ${st.slicer.slicer}` : h('span', { class: 'pill warn' }, 'not found')),
-      h('dt', null, 'Command'), h('dd', { class: 'mono', style: { fontSize: '11px', textAlign: 'left', wordBreak: 'break-all' } }, (st.slicer.slicer_cmd || []).join(' ') || '—'),
+    const eng = st.engines || {}, active = st.settings.slicer_engine || 'bambu';
+    const slicerCard = h('div', { class: 'card' }, h('h3', null, 'Slicer engine'));
+    const setEngine = async (e) => { await api('PUT', 'settings', { slicer_engine: e }); await loadState(); render(); };
+    const engineRow = (key, title, info, blurb, installLabel, pathPlaceholder, pathKey) => {
+      const isActive = active === key, ok = !!(info && info.version);
+      const installing = inst.status === 'running' && inst.engine === key;
+      return h('div', { class: 'engine' + (isActive ? ' active' : '') },
+        h('div', { class: 'eh' },
+          h('label', { class: 'radio' }, h('input', { type: 'radio', name: 'engine', checked: isActive, onChange: () => setEngine(key) }), h('b', null, title)),
+          ok ? h('span', { class: 'pill ver' }, `v${info.version}`) : h('span', { class: 'pill warn' }, 'not installed'),
+          isActive && h('span', { class: 'pill auto' }, 'active')),
+        h('p', { class: 'hint', style: { margin: '4px 0' } }, blurb),
+        ok && h('div', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', color: 'var(--ink3)' } }, (info.cmd || []).join(' ')),
+        info && info.hint && h('div', { class: 'callout bad' }, info.hint),
+        installing && h('div', { class: 'progress' }, h('i', { style: { width: ((inst.progress || 0) * 100) + '%' } })),
+        installing && h('p', { class: 'hint' }, inst.message || ''),
+        !installing && inst.engine === key && inst.status === 'error' && h('div', { class: 'callout bad' }, inst.message),
+        h('div', { class: 'tb', style: { marginTop: '6px' } },
+          h('button', { class: 'btn small ' + (ok ? '' : 'primary'), disabled: inst.status === 'running', onClick: async () => { await api('POST', 'slicer/install', { engine: key }); S.installWatch = true; render(); } }, ok ? `Reinstall / update` : installLabel),
+          h('button', { class: 'btn small', onClick: () => { const p = input({ value: st.settings[pathKey] || '', placeholder: pathPlaceholder }); modal(`Use an existing ${title}`, h('div', null, field('Path or command', p)), [{ label: 'Cancel' }, { label: 'Use', cls: 'primary', onClick: async () => { const body = {}; body[pathKey] = p.value || null; await api('PUT', 'settings', body); await loadState(); render(); } }], { width: '640px' }); } }, 'Use a different install…')));
+    };
+    slicerCard.append(
+      engineRow('bambu', 'Bambu Studio', eng.bambu, 'Recommended. Slices with Bambu Studio itself using its own printer, process and filament presets, so weights and print times are exactly what Bambu Studio shows. Download ~230–470 MB on first install.', 'Install Bambu Studio', 'path to bambu-studio.exe / BambuStudio.app / AppImage folder, or "flatpak run com.bambulab.BambuStudio"', 'bambu_path'),
+      engineRow('prusa', 'PrusaSlicer', eng.prusa, 'Fallback. Bambu settings are translated to a PrusaSlicer config; weights agree with Bambu Studio within about 1%, print time runs ~10% longer. Download ~100–140 MB.', 'Install PrusaSlicer', 'path to prusa-slicer-console.exe / PrusaSlicer.app / AppImage, or "flatpak run com.prusa3d.PrusaSlicer"', 'slicer_path'));
+    const dl = h('dl', { class: 'kv', style: { marginTop: '10px' } });
+    dl.append(h('dt', null, 'Slicing with'), h('dd', null, st.slicer.slicer_label || h('span', { class: 'pill warn' }, 'nothing — install an engine above')),
       h('dt', null, 'Workers'), h('dd', null, input({ type: 'number', value: st.slicer.workers, min: 1, max: 16, style: { width: '70px' }, onChange: async e => { await api('PUT', 'settings', { workers: +e.target.value }); await loadState(); renderShell(); } })),
       h('dt', null, 'Keep G-code'), h('dd', null, h('input', { type: 'checkbox', checked: !!st.settings.keep_gcode, onChange: e => api('PUT', 'settings', { keep_gcode: e.target.checked }) })));
-    slicerCard.append(dl);
-    const prog = h('div', { class: 'progress', hidden: inst.status !== 'running' }, h('i', { style: { width: ((inst.progress || 0) * 100) + '%' } }));
-    const msg = h('p', { class: 'hint' }, inst.message || (st.slicer.slicer ? '' : 'SliceBudget can download PrusaSlicer’s portable build into its own folder (~100 MB). Nothing is installed system-wide.'));
-    slicerCard.append(prog, msg, h('div', { class: 'tb', style: { marginTop: '8px' } },
-      h('button', { class: 'btn ' + (st.slicer.slicer ? '' : 'primary'), disabled: inst.status === 'running', onClick: async () => { await api('POST', 'slicer/install'); S.installWatch = true; render(); } }, st.slicer.slicer ? 'Reinstall / update PrusaSlicer' : 'Install PrusaSlicer'),
-      h('button', { class: 'btn', onClick: () => { const p = input({ value: st.settings.slicer_path || '', placeholder: 'path to prusa-slicer-console.exe / PrusaSlicer.app / AppImage, or "flatpak run com.prusa3d.PrusaSlicer"' }); modal('Use an existing PrusaSlicer', h('div', null, field('Path or command', p)), [{ label: 'Cancel' }, { label: 'Use', cls: 'primary', onClick: async () => { await api('PUT', 'settings', { slicer_path: p.value || null }); await loadState(); render(); } }], { width: '640px' }); } }, 'Use a different install…'),
-      h('button', { class: 'btn', onClick: async () => { await api('POST', 'slicer/refresh'); await loadState(); render(); } }, 'Re-detect')));
+    slicerCard.append(dl, h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: async () => { await api('POST', 'slicer/refresh'); await loadState(); render(); } }, 'Re-detect installs')),
+      h('p', { class: 'hint' }, 'Switching engines keeps old results in the cache; parts re-slice with the new engine as they are touched. Both engines can be installed side by side; nothing is installed system-wide.'));
     left.append(slicerCard);
     // queue
     const qtb = h('tbody');
@@ -1304,7 +1321,7 @@
       const saved = +localStorage.getItem('sb.robot');
       const rid = S.state.robots.find(r => r.id === saved && r.status === 'active') ? saved : (S.state.robots.find(r => r.status === 'active') || {}).id;
       if (rid) await loadRobot(rid);
-      if (!S.state.slicer.slicer && S.view === 'home') { toast('PrusaSlicer is not installed yet — open Jobs & setup to install it.', true); }
+      if (!S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
       await render(); connectSSE();
     } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the SliceBudget service: ' + e.message)); }
   })();

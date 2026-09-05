@@ -113,9 +113,11 @@ README = """SliceBudget {version}
                `xattr -dr com.apple.quarantine .` in this folder if macOS refuses)
      Linux   : ./slicebudget.sh
    A browser tab opens at http://localhost:8765. The window that opened must stay open while you use it.
-3. First run: open "Jobs & setup" and click "Install PrusaSlicer". SliceBudget downloads PrusaSlicer's
-   portable build (~100 MB) into the slicer/ folder here. Nothing is installed elsewhere on your computer.
-   Linux: PrusaSlicer comes from Flathub or your distribution; the Setup page explains.
+3. First run: open "Jobs & setup" and click "Install Bambu Studio". SliceBudget downloads Bambu Studio
+   (230-470 MB depending on platform) into the slicer/ folder here and slices with it headlessly, so the
+   weights and print times are exactly what Bambu Studio shows. PrusaSlicer is available as a fallback
+   engine on the same page. Nothing is installed elsewhere on your computer.
+   Linux: Bambu Studio needs the GTK/WebKit system libraries (the Setup page names the apt command).
 4. Your data lives in data/ (SQLite database, mesh files, nightly backups). Back that folder up.
 5. Tips: drop a Bambu Studio / PrusaSlicer .3mf project onto Printed parts to import every object with its
    settings; "Modifier regions" on a part slice a box with its own walls/infill for real; the Optimizer only
@@ -159,7 +161,7 @@ def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
     fname, body = LAUNCHERS[launcher]
     (stage / fname).write_text(body, newline="")
     (stage / "README.txt").write_text(README.format(version=APP_VERSION))
-    (stage / "LICENSES.txt").write_text("SliceBudget bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nPrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) is downloaded separately on first run.\n")
+    (stage / "LICENSES.txt").write_text("SliceBudget bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nBambu Studio (AGPL-3.0, https://github.com/bambulab/BambuStudio) and/or PrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) are downloaded separately on first run.\n")
     # zip with executable bits for posix launchers
     zpath = out_dir / f"SliceBudget-{APP_VERSION}-{name}.zip"
     log(f"[{name}] zipping -> {zpath.name}")

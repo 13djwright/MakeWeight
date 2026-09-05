@@ -13,7 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import exports, meshio, optimizer, orient, profiles, slicer_engine
+from . import bambu_engine, exports, meshio, optimizer, orient, profiles, slicer_engine
 from .db import DB, loads, now
 from .jobs import Events, JobManager
 
@@ -238,10 +238,11 @@ class App:
         self.db.set_setting("last_backup", time.time())
         return out
 
-    def install_slicer_async(self):
+    def install_slicer_async(self, engine: str = "bambu"):
         if self.install_state["status"] == "running":
             return
-        self.install_state = {"status": "running", "message": "Starting", "progress": 0.0}
+        engine = engine if engine in ("bambu", "prusa") else "bambu"
+        self.install_state = {"status": "running", "engine": engine, "message": "Starting", "progress": 0.0}
 
         def prog(msg, frac):
             self.install_state.update({"message": msg, "progress": frac})
@@ -249,9 +250,16 @@ class App:
 
         def run():
             try:
-                cmd = slicer_engine.install(prog)
+                if engine == "bambu":
+                    cmd = bambu_engine.install(prog)
+                    ver = bambu_engine.version_of(cmd)
+                    label = "Bambu Studio " + (ver or "")
+                else:
+                    cmd = slicer_engine.install(prog)
+                    label = "PrusaSlicer " + (slicer_engine.version_of(cmd) or "")
                 self.jobs.refresh_slicer()
-                self.install_state.update({"status": "done", "message": "Installed PrusaSlicer " + (self.jobs.slicer_version or ""), "progress": 1.0})
+                self.jobs.engine_status(force=True)
+                self.install_state.update({"status": "done", "message": "Installed " + label, "progress": 1.0})
             except Exception as e:
                 self.install_state.update({"status": "error", "message": str(e)})
             self.events.emit("install", self.install_state)
@@ -357,8 +365,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "state":
             return self._json({
-                "slicer": app.jobs.queue_state(), "install": app.install_state,
-                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "default_printer_id", "default_filament_id", "default_profile_id")},
+                "slicer": app.jobs.queue_state(), "install": app.install_state, "engines": app.jobs.engine_status(),
+                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id")},
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
@@ -371,13 +379,17 @@ class Handler(BaseHTTPRequestHandler):
                 db.set_setting(k, v)
             if "workers" in body:
                 app.jobs.set_workers(int(body["workers"]))
-            if "slicer_path" in body:
+            if "slicer_path" in body or "bambu_path" in body or "slicer_engine" in body:
                 app.jobs.refresh_slicer()
+                app.jobs.engine_status(force=True)
+                if "slicer_engine" in body:
+                    # jobs queued for the other engine are re-keyed when they run; make sure workers are awake
+                    app.jobs.start()
             return self._json({"ok": True, "slicer": app.jobs.queue_state()})
         if path == "slicer/install" and m == "POST":
-            app.install_slicer_async(); return self._json(app.install_state)
+            b = self._jbody(); app.install_slicer_async(b.get("engine") or "bambu"); return self._json(app.install_state)
         if path == "slicer/refresh" and m == "POST":
-            return self._json(app.jobs.refresh_slicer())
+            r_ = app.jobs.refresh_slicer(); r_["engines"] = app.jobs.engine_status(force=True); return self._json(r_)
         if path == "import/archive" and m == "POST":
             return self._json(exports.import_archive(self, self._body()))
         if path == "backup" and m == "POST":
@@ -579,8 +591,13 @@ class Handler(BaseHTTPRequestHandler):
                 pr = db.get("printers", prof["printer_id"]) if prof.get("printer_id") else db.one("SELECT * FROM printers ORDER BY builtin DESC, id LIMIT 1")
                 return self._bytes(profiles.to_prusa_ini(loads(prof["params_json"], {}), fil, app.jobs.slicer_version, machine=profiles.machine_key(pr["name"] if pr else None)).encode(), "text/plain", f"{prof['name']}.ini")
             if len(parts) == 3 and parts[2] == "bambu.json":
-                prof = db.get("profiles", pid); pr = db.get("printers", prof["printer_id"]) if prof.get("printer_id") else None
-                data = profiles.to_bambu_preset(loads(prof["params_json"], {}), prof["name"], pr["name"] if pr else "Bambu Lab P1S")
+                prof = db.get("profiles", pid); pr = db.get("printers", prof["printer_id"]) if prof.get("printer_id") else db.one("SELECT * FROM printers ORDER BY builtin DESC, id LIMIT 1")
+                if app.jobs.presets is not None:
+                    # the exact process preset the Bambu engine slices with (Bambu's own system preset + this profile)
+                    data = app.jobs.presets.process_for(loads(prof["params_json"], {}), profiles.machine_key(pr["name"] if pr else None))
+                    data["name"] = prof["name"]; data["print_settings_id"] = prof["name"]; data["from"] = "User"; data["is_custom_defined"] = "0"
+                else:
+                    data = profiles.to_bambu_preset(loads(prof["params_json"], {}), prof["name"], pr["name"] if pr else "Bambu Lab P1S")
                 return self._bytes(json.dumps(data, indent=2).encode(), "application/json", f"{prof['name']}.json")
         if parts[0] == "printers":
             if len(parts) == 1 and m == "POST":

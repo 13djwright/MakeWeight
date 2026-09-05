@@ -257,8 +257,8 @@ def explain_slicer_error(stderr: str | None, stdout: str | None, rc: int) -> str
     core = re.sub(r"\s+", " ", core)[:400]
     for rx, hint in _HINTS:
         if rx.search(core):
-            return f"{hint} (PrusaSlicer: {core})"
-    return "PrusaSlicer failed: " + core
+            return f"{hint} ({core if core.startswith('Bambu Studio') else 'PrusaSlicer: ' + core})"
+    return ("" if core.startswith("Bambu Studio") else "PrusaSlicer failed: ") + core
 
 
 _TIME_RE = re.compile(r"estimated printing time \(normal mode\)\s*=\s*(.+)")

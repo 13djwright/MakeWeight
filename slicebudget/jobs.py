@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import json
 import queue
 import threading
@@ -9,7 +10,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import meshio, orient, profiles, slicer_engine
+from . import bambu_engine, meshio, orient, profiles, slicer_engine
 from .db import DB, loads, now
 
 
@@ -55,14 +56,23 @@ def part_okey(part: dict) -> str:
 
 
 MOD_KEYS = {"walls": "perimeters", "infill": "fill_density", "pattern": "fill_pattern", "top": "top_solid_layers", "bottom": "bottom_solid_layers"}
+MOD_KEYS_BAMBU = {"walls": "wall_loops", "infill": "sparse_infill_density", "pattern": "sparse_infill_pattern", "top": "top_shell_layers", "bottom": "bottom_shell_layers"}
 
 
-def modifier_settings(md: dict) -> dict:
+def modifier_settings(md: dict, engine: str = "prusa") -> dict:
+    keys = MOD_KEYS_BAMBU if engine == "bambu" else MOD_KEYS
     out = {}
     for k, v in (md.get("params") or {}).items():
-        if k in MOD_KEYS and v not in (None, ""):
-            out[MOD_KEYS[k]] = f"{float(v):g}%" if k == "infill" else str(v)
-    if out.get("fill_density") in ("100%",) and "fill_pattern" not in out:
+        if k in keys and v not in (None, ""):
+            if k == "infill":
+                out[keys[k]] = f"{float(v):g}%"
+            elif k in ("walls", "top", "bottom"):
+                out[keys[k]] = str(int(float(v)))
+            elif k == "pattern" and engine == "bambu":
+                out[keys[k]] = bambu_engine._PATTERN_TO_BAMBU.get(str(v), str(v))
+            else:
+                out[keys[k]] = str(v)
+    if engine != "bambu" and out.get("fill_density") in ("100%",) and "fill_pattern" not in out:
         out["fill_pattern"] = "rectilinear"
     return out
 
@@ -72,7 +82,8 @@ def cache_key(mesh_sha: str, okey: str, phash: str, slicer_version: str) -> str:
 
 
 def filament_key(filament: dict, machine: str) -> str:
-    return f"{filament['density']}|{filament.get('flow', 1)}|{filament.get('max_vol_speed') or 12}|{machine}"
+    name = str(filament.get("name") or "").replace("|", "/")
+    return f"{filament['density']}|{filament.get('flow', 1)}|{filament.get('max_vol_speed') or 12}|{machine}|{name}"
 
 
 class JobManager:
@@ -90,17 +101,58 @@ class JobManager:
         self._lock = threading.Lock()
         self.slicer_cmd: list[str] | None = None
         self.slicer_version: str | None = None
+        self.presets = None
         self.refresh_slicer()
         # any job left 'running' from a crash goes back to queued
         db.x("UPDATE slice_jobs SET status='queued' WHERE status='running'")
 
     # ---- slicer status
+    @property
+    def engine(self) -> str:
+        """'bambu' (Bambu Studio, the default) or 'prusa' (PrusaSlicer through the settings mapping)."""
+        e = self.db.setting("slicer_engine") or "bambu"
+        return e if e in ("bambu", "prusa") else "bambu"
+
+    def engine_status(self, force: bool = False) -> dict:
+        """Locate both engines so the setup page can show what is installed (cached for 60 s; --help is slow on Windows)."""
+        cached = getattr(self, "_engine_status", None)
+        if cached and not force and time.time() - cached[0] < 60:
+            return cached[1]
+        out = {}
+        pc = slicer_engine.locate(self.db.setting("slicer_path"))
+        out["prusa"] = {"cmd": pc, "version": slicer_engine.version_of(pc) if pc else None}
+        bc = bambu_engine.locate(self.db.setting("bambu_path"))
+        bv = bambu_engine.version_of(bc) if bc else None
+        out["bambu"] = {"cmd": bc, "version": bv, "resources": str(bambu_engine.resources_dir(bc) or "") if bc else "",
+                        "hint": bambu_engine.missing_libs(bc) if (bc and not bv) else None}
+        self._engine_status = (time.time(), out)
+        return out
+
     def refresh_slicer(self):
-        configured = self.db.setting("slicer_path")
-        cmd = slicer_engine.locate(configured)
-        self.slicer_cmd = cmd
-        self.slicer_version = slicer_engine.version_of(cmd) if cmd else None
-        return {"cmd": cmd, "version": self.slicer_version}
+        self._engine_status = None
+        self.presets = None
+        if self.engine == "bambu":
+            cmd = bambu_engine.locate(self.db.setting("bambu_path"))
+            ver = bambu_engine.version_of(cmd) if cmd else None
+            res = bambu_engine.resources_dir(cmd) if cmd else None
+            if cmd and ver and res is None:
+                ver = None  # can run but its preset library is missing — cannot build settings
+            if cmd and ver:
+                self.presets = bambu_engine.Presets(res)
+            self.slicer_cmd = cmd if ver else None
+            self.slicer_version = ("bambu-" + ver) if ver else None
+        else:
+            cmd = slicer_engine.locate(self.db.setting("slicer_path"))
+            self.slicer_cmd = cmd
+            self.slicer_version = slicer_engine.version_of(cmd) if cmd else None
+        return {"cmd": self.slicer_cmd, "version": self.slicer_version, "engine": self.engine}
+
+    @property
+    def slicer_label(self) -> str | None:
+        v = self.slicer_version
+        if not v:
+            return None
+        return ("Bambu Studio " + v[6:]) if v.startswith("bambu-") else ("PrusaSlicer " + v)
 
     def set_workers(self, n: int):
         self.workers = max(1, int(n))
@@ -185,7 +237,7 @@ class JobManager:
         rows = self.db.q("SELECT status, COUNT(*) n FROM slice_jobs WHERE status IN ('queued','running') GROUP BY status")
         st = {r["status"]: r["n"] for r in rows}
         return {"queued": st.get("queued", 0), "running": st.get("running", 0), "workers": self.workers,
-                "slicer": self.slicer_version, "slicer_cmd": self.slicer_cmd}
+                "slicer": self.slicer_version, "slicer_label": self.slicer_label, "engine": self.engine, "slicer_cmd": self.slicer_cmd}
 
     def cancel_queued(self, run_id: int | None = None, part_id: int | None = None):
         sql = "UPDATE slice_jobs SET status='cancelled' WHERE status='queued'"
@@ -237,24 +289,31 @@ class JobManager:
             self.events.emit("job", {"job": job})
             self.events.emit("queue", self.queue_state())
 
-    def oriented_stl(self, part: dict, mesh: dict) -> Path:
-        """Oriented geometry for the slicer: an STL, or a PrusaSlicer 3MF when the part has modifier regions."""
+    def oriented_stl(self, part: dict, mesh: dict, center=(200.0, 200.0)) -> Path:
+        """Oriented geometry for the slicer: an STL, or (with modifier regions) a 3MF in the active engine's dialect."""
         okey = part_okey(part)
         mods = loads(part.get("modifiers_json"), []) or []
-        name = hashlib.sha1(f"{mesh['sha256']}|{okey}".encode()).hexdigest()[:20] + (".3mf" if mods else ".stl")
+        engine = self.engine if mods else ""
+        tag = f"{mesh['sha256']}|{okey}|{engine}|{center[0]:g},{center[1]:g}" if mods else f"{mesh['sha256']}|{okey}"
+        name = hashlib.sha1(tag.encode()).hexdigest()[:20] + (".3mf" if mods else ".stl")
         out = self.work_dir / "oriented" / name
         if not out.exists():
             out.parent.mkdir(parents=True, exist_ok=True)
             tri = meshio.load_mesh(Path(mesh["path"]))
             t = orient.apply_orientation(tri, loads(part.get("orient_json"), {}), float(part.get("scale") or 1.0), bool(part.get("mirror")))
-            shift = [200.0 - (t[:, :, 0].min() + t[:, :, 0].max()) / 2, 200.0 - (t[:, :, 1].min() + t[:, :, 1].max()) / 2, 0.0]
-            t = t + shift
-            if mods:
-                boxes = [{"name": m.get("name") or "modifier", "min": [float(m["min"][i]) + shift[i] for i in range(3)],
-                          "max": [float(m["max"][i]) + shift[i] for i in range(3)], "settings": modifier_settings(m)} for m in mods if m.get("min") and m.get("max")]
-                out.write_bytes(meshio.prusa_3mf_with_modifiers(t, mesh.get("filename") or "part", boxes))
+            if mods and engine == "bambu":
+                boxes = [{"name": m.get("name") or "modifier", "min": [float(v) for v in m["min"]], "max": [float(v) for v in m["max"]],
+                          "settings": modifier_settings(m, "bambu")} for m in mods if m.get("min") and m.get("max")]
+                out.write_bytes(meshio.bambu_3mf_with_modifiers(t, mesh.get("filename") or "part", boxes, center=center))
             else:
-                meshio.write_stl(t, out)
+                shift = [center[0] - (t[:, :, 0].min() + t[:, :, 0].max()) / 2, center[1] - (t[:, :, 1].min() + t[:, :, 1].max()) / 2, 0.0]
+                t = t + shift
+                if mods:
+                    boxes = [{"name": m.get("name") or "modifier", "min": [float(m["min"][i]) + shift[i] for i in range(3)],
+                              "max": [float(m["max"][i]) + shift[i] for i in range(3)], "settings": modifier_settings(m, "prusa")} for m in mods if m.get("min") and m.get("max")]
+                    out.write_bytes(meshio.prusa_3mf_with_modifiers(t, mesh.get("filename") or "part", boxes))
+                else:
+                    meshio.write_stl(t, out)
         return out
 
     def _run(self, job: dict) -> dict:
@@ -265,21 +324,29 @@ class JobManager:
         if not mesh:
             raise RuntimeError("mesh missing")
         params = loads(job["profile_json"], {})
-        fk = (job["filament_key"] or "1.24|1").split("|") + [None, None]
-        dens, flow, mvs, machine = fk[0], fk[1], fk[2], fk[3]
-        ini = profiles.to_prusa_ini(params, {"density": float(dens), "flow": float(flow), "max_vol_speed": float(mvs) if mvs else None},
-                                    self.slicer_version, machine=machine or "P1S")
-        stl = self.oriented_stl(part, mesh)
+        fk = (job["filament_key"] or "1.24|1").split("|") + [None, None, None]
+        dens, flow, mvs, machine, fname = fk[0], fk[1], fk[2], fk[3] or "P1S", fk[4]
+        fil = {"density": float(dens), "flow": float(flow), "max_vol_speed": float(mvs) if mvs else None, "name": fname or ""}
+        frow = self.db.one("SELECT material FROM filaments WHERE name=?", [fname]) if fname else None
+        fil["material"] = (frow or {}).get("material") or "PLA"
         keep = bool(self.db.setting("keep_gcode", False))
         jobdir = self.work_dir / "jobs" / str(job["id"])
-        res = slicer_engine.run_slice(self.slicer_cmd, stl, ini, jobdir, keep_gcode=keep)
+        if self.engine == "bambu":
+            if not self.presets:
+                self.refresh_slicer()
+            if not self.presets:
+                raise RuntimeError("Bambu Studio is not installed (Jobs & setup → Install)")
+            nozzle = f"{profiles.normalize(params)['nozzle']:g}"
+            center = self.presets.bed_center(machine, nozzle)
+            model = self.oriented_stl(part, mesh, center=center)
+            presets = self.presets.write(jobdir / "presets", params, fil, machine)
+            res = bambu_engine.run_slice(self.slicer_cmd, model, presets, jobdir, self.work_dir / "bambu_data", keep_gcode=keep)
+        else:
+            ini = profiles.to_prusa_ini(params, fil, self.slicer_version, machine=machine)
+            model = self.oriented_stl(part, mesh)
+            res = slicer_engine.run_slice(self.slicer_cmd, model, ini, jobdir, keep_gcode=keep)
         if not keep:
-            try:
-                for f in jobdir.iterdir():
-                    f.unlink()
-                jobdir.rmdir()
-            except OSError:
-                pass
+            shutil.rmtree(jobdir, ignore_errors=True)
         return res
 
     def _after(self, job: dict):
