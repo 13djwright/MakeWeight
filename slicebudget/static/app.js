@@ -1325,7 +1325,11 @@
   window.addEventListener('hashchange', () => { route(); render(); });
   (async function init() {
     try {
-      await loadState(); route();
+      for (let n = 0; ; n++) {  // the service may still be starting
+        try { await loadState(); if (S.state && S.state.robots) break; } catch (e) { if (n >= 20) throw e; }
+        await new Promise(r => setTimeout(r, 500));
+      }
+      route();
       const saved = +localStorage.getItem('sb.robot');
       const rid = S.state.robots.find(r => r.id === saved && r.status === 'active') ? saved : (S.state.robots.find(r => r.status === 'active') || {}).id;
       if (rid) await loadRobot(rid);
