@@ -146,7 +146,11 @@ class JobManager:
             cmd = slicer_engine.locate(self.db.setting("slicer_path"))
             self.slicer_cmd = cmd
             self.slicer_version = slicer_engine.version_of(cmd) if cmd else None
-        log.info("slicer: engine=%s cmd=%s version=%s", self.engine, self.slicer_cmd, self.slicer_version)
+        state = (self.engine, str(self.slicer_cmd), self.slicer_version)
+        if state != getattr(self, "_last_logged", None):      # only when something changed — workers re-probe while nothing is installed
+            self._last_logged = state
+            log.info("slicer: engine=%s cmd=%s version=%s", self.engine, self.slicer_cmd, self.slicer_version)
+        self._last_probe = time.time()
         return {"cmd": self.slicer_cmd, "version": self.slicer_version, "engine": self.engine}
 
     @property
@@ -263,8 +267,8 @@ class JobManager:
 
     def _worker(self):
         while not self._stop:
-            if not self.slicer_cmd:
-                self.refresh_slicer()
+            if not self.slicer_cmd and time.time() - getattr(self, "_last_probe", 0) > 15:
+                self.refresh_slicer()                            # pick up an install made outside the app, without probing every second
             job = self._claim() if self.slicer_cmd else None
             if not job:
                 with self._wake:

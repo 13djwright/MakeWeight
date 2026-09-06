@@ -207,22 +207,33 @@ class Updater:
         return None
 
     @staticmethod
-    def launch(launcher: Path):
+    def launch(launcher: Path, args: list[str] | None = None):
+        """Start the new version's launcher the way a double-click would, passing on this run's command-line options
+        (port, --no-browser …) so the new version comes back on the same address."""
         s = platform.system()
         cwd = str(launcher.parent)
+        src = list(args if args is not None else sys.argv[1:]); args = []
+        skip = False
+        for a in src:                       # drop --root X / --root=X: the new version finds the data directory itself
+            if skip: skip = False; continue
+            if a == "--root": skip = True; continue
+            if a.startswith("--root="): continue
+            args.append(a)
         quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if s == "Windows":
             # a fresh console window like a double-click, detached from this process
-            subprocess.Popen(["cmd", "/c", "start", "", str(launcher)], cwd=cwd, close_fds=True,
+            subprocess.Popen(["cmd", "/c", "start", "", str(launcher), *args], cwd=cwd, close_fds=True,
                              creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "DETACHED_PROCESS", 0), **quiet)
         elif s == "Darwin":
-            # Terminal runs the .command in a new window, same as a double-click (no quarantine, so no Gatekeeper)
-            r = subprocess.run(["open", "-a", "Terminal", str(launcher)], capture_output=True, text=True)
+            # Terminal runs the .command in a new window, same as a double-click (no quarantine, so no Gatekeeper).
+            # Terminal cannot pass arguments, so a plain start is only used when there are none.
+            r = subprocess.run(["open", "-a", "Terminal", str(launcher)], capture_output=True, text=True) if not args else subprocess.CompletedProcess([], 1)
             if r.returncode != 0:
-                subprocess.Popen(["bash", str(launcher)], cwd=cwd, start_new_session=True, **quiet)
+                subprocess.Popen(["bash", str(launcher), *args], cwd=cwd, start_new_session=True, **quiet)
         else:
             term = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("konsole") or shutil.which("xterm")
             if term:
-                subprocess.Popen([term, "-e", f"bash \"{launcher}\""] if "gnome" not in term else [term, "--", "bash", str(launcher)], cwd=cwd, start_new_session=True, **quiet)
+                cmdline = " ".join([f'"{launcher}"', *(f'"{a}"' for a in args)])
+                subprocess.Popen([term, "-e", f"bash {cmdline}"] if "gnome" not in term else [term, "--", "bash", str(launcher), *args], cwd=cwd, start_new_session=True, **quiet)
             else:
-                subprocess.Popen(["bash", str(launcher)], cwd=cwd, start_new_session=True, **quiet)
+                subprocess.Popen(["bash", str(launcher), *args], cwd=cwd, start_new_session=True, **quiet)
