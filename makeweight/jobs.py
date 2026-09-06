@@ -76,7 +76,7 @@ def modifier_settings(md: dict, engine: str = "prusa") -> dict:
             elif k in ("walls", "top", "bottom"):
                 out[keys[k]] = str(int(float(v)))
             elif k == "pattern" and engine == "bambu":
-                out[keys[k]] = bambu_engine._PATTERN_TO_BAMBU.get(str(v), str(v))
+                out[keys[k]] = profiles.BAMBU_PATTERN.get(str(v), str(v))
             else:
                 out[keys[k]] = str(v)
     if engine != "bambu" and out.get("fill_density") in ("100%",) and "fill_pattern" not in out:
@@ -311,7 +311,7 @@ class JobManager:
         out = self.work_dir / "oriented" / name
         if not out.exists():
             out.parent.mkdir(parents=True, exist_ok=True)
-            tri = meshio.load_mesh(Path(mesh["path"]))
+            tri = meshio.load_mesh(meshio.mesh_path(mesh))
             t = orient.apply_orientation(tri, loads(part.get("orient_json"), {}), float(part.get("scale") or 1.0), bool(part.get("mirror")))
             if mods and engine == "bambu":
                 boxes = [{"name": m.get("name") or "modifier", "min": [float(v) for v in m["min"]], "max": [float(v) for v in m["max"]],

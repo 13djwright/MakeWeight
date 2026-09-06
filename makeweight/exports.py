@@ -219,8 +219,13 @@ def robot_archive(app, rid: int) -> bytes:
         z.writestr("robot.json", json.dumps(data, indent=1, default=str))
         for sha, fname in data["meshes"].items():
             m = db.one("SELECT path FROM meshes WHERE sha256=?", [sha])
-            if m and Path(m["path"]).exists():
-                z.write(m["path"], f"meshes/{sha}_{re.sub(r'[^A-Za-z0-9._-]+', '_', fname)}")
+            mp = None
+            try:
+                mp = meshio.mesh_path(m) if m else None
+            except FileNotFoundError:
+                mp = None
+            if mp:
+                z.write(mp, f"meshes/{sha}_{re.sub(r'[^A-Za-z0-9._-]+', '_', fname)}")
     return buf.getvalue()
 
 
@@ -279,7 +284,7 @@ def bambu_3mf(app, det: dict) -> bytes:
             if not p or not p.get("mesh"):
                 continue
             m = db.get("meshes", p["mesh"]["id"])
-            tri = meshio.load_mesh(Path(m["path"]))
+            tri = meshio.load_mesh(meshio.mesh_path(m))
             t = orient.apply_orientation(tri, p["orient"], float(p.get("scale") or 1.0), bool(p.get("mirror")))
             fname = (p.get("filament") or {}).get("name") or "filament"
             if fname not in fil_names:

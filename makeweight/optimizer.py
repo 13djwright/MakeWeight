@@ -273,7 +273,7 @@ class Optimization:
                 pm.model = gm
                 reports.append(f"{pm.item['description']}: grid of {len(pm.anchors)} real slices")
             else:
-                tri = meshio.load_mesh(Path(pm.mesh["path"]))
+                tri = meshio.load_mesh(meshio.mesh_path(pm.mesh))
                 t = orient.apply_orientation(tri, loads(pm.part["orient_json"], {}), float(pm.part.get("scale") or 1.0), bool(pm.part.get("mirror")))
                 rm = estimator.RegionModel(t, pm.base)
                 fm = estimator.FittedModel(rm, float(pm.filament["density"]), float(pm.filament.get("flow") or 1.0))

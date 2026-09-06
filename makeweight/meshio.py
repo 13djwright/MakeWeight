@@ -25,6 +25,28 @@ from .paths import APP_NAME as _APP
 
 
 # ---------------------------------------------------------------- loading
+MESH_DIR: Path | None = None      # set by the app at startup: where uploaded meshes live now
+
+
+class MeshFileMissing(FileNotFoundError):
+    pass
+
+
+def mesh_path(mesh: dict) -> Path:
+    """The file behind a meshes row. The database keeps the path the file had when it was uploaded; if the data
+    folder has moved since (new install location, migration from an older version), the same file name in the current
+    meshes folder is used instead. Raises MeshFileMissing with a message fit for the UI when neither exists."""
+    stored = Path(mesh["path"]) if mesh.get("path") else None
+    if stored and stored.exists():
+        return stored
+    if MESH_DIR is not None and stored is not None:
+        alt = MESH_DIR / stored.name
+        if alt.exists():
+            return alt
+    raise MeshFileMissing(f"The mesh file for “{mesh.get('filename', '?')}” is no longer on disk"
+                          f"{f' (last seen at {stored})' if stored else ''}. Re-attach the mesh to this part.")
+
+
 def load_mesh(path: str | Path, data: bytes | None = None) -> np.ndarray:
     p = Path(path)
     if data is None:

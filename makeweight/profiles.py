@@ -33,6 +33,27 @@ BAMBU_DEFAULTS = {
 PATTERNS = ["cubic", "grid", "gyroid", "triangles", "rectilinear", "honeycomb", "3dhoneycomb", "adaptivecubic",
             "supportcubic", "lightning", "alignedrectilinear", "stars", "concentric"]
 
+# Patterns a slicer accepts at 100 % density (everything else — cubic, grid, gyroid, honeycomb … — is refused with
+# "doesn't work at 100% density" by both Bambu Studio and PrusaSlicer).
+SOLID_OK = {"rectilinear", "alignedrectilinear", "monotonic", "monotonicline", "concentric", "zig-zag", "zigzag"}
+
+
+def effective_pattern(p: dict) -> str:
+    """The sparse-infill pattern actually sent to the slicer: the profile's own below 100 %, rectilinear at 100 %."""
+    pat = p.get("pattern") or "cubic"
+    return pat if float(p.get("infill", 0)) < 100 or pat in SOLID_OK else "rectilinear"
+
+
+# Our pattern names follow PrusaSlicer; Bambu Studio spells a few differently. An unknown name makes Bambu Studio fall
+# back to its default (cubic) without a word — which is how "rectilinear" used to turn into cubic.
+BAMBU_PATTERN = {"rectilinear": "zig-zag", "stars": "tri-hexagon"}
+
+
+def bambu_pattern(p: dict) -> str:
+    e = effective_pattern(p)
+    return BAMBU_PATTERN.get(e, e)
+
+
 # Bambu pattern name -> PrusaSlicer fill_pattern
 PATTERN_MAP = {p: p for p in PATTERNS}
 PATTERN_MAP.update({"zig-zag": "rectilinear", "line": "alignedrectilinear", "tri-hexagon": "stars"})
@@ -110,7 +131,7 @@ MACHINES = {
             "travel_accel": 10000, "first_accel": 500, "max_accel": 20000, "max_accel_travel": 9000, "max_feed": 1000,
             "max_feed_z": 30, "max_feed_e": 50, "jerk": 9, "jerk_z": 3, "jerk_e": 2.5, "bed": (350, 320), "height": 325},
 }
-MAPPING_VERSION = "m2"  # bump when the ini mapping changes in a way that should invalidate cached slices
+MAPPING_VERSION = "m3"  # bump when the settings mapping changes in a way that should invalidate cached slices (m3: rectilinear → zig-zag for Bambu; line pattern at 100 %)
 
 
 def machine_key(printer_name: str | None) -> str:
@@ -137,7 +158,7 @@ def to_prusa_ini(params: dict, filament: dict, slicer_version: str | None = None
         f"top_solid_min_thickness = {p['top_min_thickness']:g}",
         f"bottom_solid_min_thickness = {p['bottom_min_thickness']:g}",
         f"fill_density = {p['infill']:g}%",
-        f"fill_pattern = {'rectilinear' if p['infill'] >= 100 else PATTERN_MAP.get(p['pattern'], 'cubic')}",
+        f"fill_pattern = {PATTERN_MAP.get(effective_pattern(p), 'rectilinear')}",
         f"fill_angle = {p.get('infill_direction', 45)}",
         "top_fill_pattern = monotonic",
         "bottom_fill_pattern = monotonic",
@@ -276,7 +297,7 @@ def to_bambu_preset(params: dict, name: str, printer_name: str = "Bambu Lab P1S"
         "type": "process", "name": name, "from": "User", "inherits": inherits, "version": "1.9.0.0",
         "wall_loops": str(p["walls"]), "top_shell_layers": str(p["top"]), "bottom_shell_layers": str(p["bottom"]),
         "top_shell_thickness": f"{p['top_min_thickness']:g}", "bottom_shell_thickness": f"{p['bottom_min_thickness']:g}",
-        "sparse_infill_density": f"{p['infill']:g}%", "sparse_infill_pattern": p["pattern"],
+        "sparse_infill_density": f"{p['infill']:g}%", "sparse_infill_pattern": bambu_pattern(p),
         "layer_height": f"{p['layer_height']:g}", "initial_layer_print_height": f"{p['first_layer_height']:g}",
         "infill_wall_overlap": f"{p['infill_wall_overlap']:g}%", "only_one_wall_top": "1" if p["one_wall_top"] else "0",
         "minimum_sparse_infill_area": f"{p.get('min_sparse_area', 15):g}",

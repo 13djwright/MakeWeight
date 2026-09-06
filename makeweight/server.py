@@ -37,11 +37,13 @@ class App:
         self.data_dir = self.root / "data"
         self.mesh_dir = self.data_dir / "meshes"
         self.mesh_dir.mkdir(parents=True, exist_ok=True)
+        meshio.MESH_DIR = self.mesh_dir
         if not applog.log_file():
             applog.setup(self.data_dir)
         log.info("%s %s starting; data=%s; %s; python %s", paths.APP_NAME, applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
         paths.migrate_db_filename(self.data_dir, log)
         self.db = DB(self.data_dir / paths.DB_FILE)
+        self._repair_mesh_paths()
         self.events = Events()
         cores = os.cpu_count() or 2
         workers = self.db.setting("workers") or max(1, cores // 2)
@@ -79,7 +81,7 @@ class App:
                 def build():
                     try:
                         with self._rm_build_lock:  # one heavy build at a time
-                            tri = meshio.load_mesh(Path(mesh["path"]))
+                            tri = meshio.load_mesh(meshio.mesh_path(mesh))
                             t = orient.apply_orientation(tri, loads(orient_json, {}), scale, mirror)
                             rm = estimator.RegionModel(t, params)
                         with self._rm_lock:
@@ -100,6 +102,23 @@ class App:
         return self.region_model(part, params, wait=False)
 
     # ------------------------------------------------------------ helpers
+    def _repair_mesh_paths(self):
+        """Mesh rows remember where their file was uploaded. After the data folder moved (new install location, an
+        older version's data/ adopted) that path is stale while the file itself sits in the current meshes folder —
+        point the rows at it, once, so nothing downstream has to guess."""
+        fixed = 0
+        for m in self.db.q("SELECT id, path, filename FROM meshes"):
+            old = Path(m["path"] or "")
+            if old.exists():
+                continue
+            alt = self.mesh_dir / old.name
+            if old.name and alt.exists():
+                self.db.update("meshes", m["id"], {"path": str(alt)}); fixed += 1
+            else:
+                log.warning("mesh %s (%s) is missing on disk: %s", m["id"], m["filename"], old)
+        if fixed:
+            log.info("repaired %d mesh path(s) to %s", fixed, self.mesh_dir)
+
     def robot_detail(self, rid: int) -> dict:
         robot = self.db.get("robots", rid)
         if not robot:
@@ -358,7 +377,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(path)
         except KeyError as e:
             self._json({"error": f"not found: {e}"}, 404)
-        except (ValueError, RuntimeError) as e:
+        except (ValueError, RuntimeError, meshio.MeshFileMissing) as e:
             log.info("%s %s -> 400 %s", method, self.path, e)
             self._json({"error": str(e)}, 400)
         except (BrokenPipeError, ConnectionResetError):
@@ -698,7 +717,7 @@ class Handler(BaseHTTPRequestHandler):
             if not mesh:
                 raise KeyError("mesh")
             if parts[2] == "stl":
-                tri = meshio.load_mesh(Path(mesh["path"]))
+                tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if qs.get("part"):
                     p = db.get("printed_parts", int(qs["part"]))
                     tri = orient.apply_orientation(tri, loads(p["orient_json"], {}), float(p.get("scale") or 1.0), bool(p.get("mirror")))
@@ -743,7 +762,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(job)
             if sub == "auto_orient" and m == "POST":
                 mesh = db.get("meshes", p["mesh_id"])
-                tri = meshio.load_mesh(Path(mesh["path"]))
+                tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if p.get("mirror"):
                     tri = meshio.transform(tri, None, 1.0, True)
                 cands = orient.auto_orient(tri)
@@ -773,7 +792,7 @@ class Handler(BaseHTTPRequestHandler):
                     q = orient.quat_for_preset(b["name"])
                 return self._json(self._update_part(pid, {"orient": {"mode": "preset", "quat": q, "label": b["name"]}}))
             if sub == "orientation_sweep" and m == "POST":
-                mesh = db.get("meshes", p["mesh_id"]); tri = meshio.load_mesh(Path(mesh["path"]))
+                mesh = db.get("meshes", p["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if p.get("mirror"):
                     tri = meshio.transform(tri, None, 1.0, True)
                 cands = orient.auto_orient(tri)[:6]
@@ -1004,7 +1023,7 @@ class Handler(BaseHTTPRequestHandler):
                                           "mirror": 1 if b.get("mirror") else 0})
         if b.get("mesh_id") and (b.get("orient") is None or b.get("auto_orient", True)):
             try:
-                mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(Path(mesh["path"]))
+                mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if b.get("mirror"):
                     tri = meshio.transform(tri, None, 1.0, True)
                 cands = orient.auto_orient(tri)
@@ -1103,7 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
         db.update("printed_parts", pid, upd)
         if "mesh_id" in b and b.get("mesh_id") and "orient" not in b and loads(p["orient_json"], {}).get("mode", "auto") == "auto":
             try:
-                mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(Path(mesh["path"]))
+                mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if upd.get("mirror", p.get("mirror")):
                     tri = meshio.transform(tri, None, 1.0, True)
                 cands = orient.auto_orient(tri)

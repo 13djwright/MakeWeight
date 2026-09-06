@@ -25,7 +25,7 @@ import zipfile
 from pathlib import Path
 from typing import Callable
 
-from . import slicer_engine
+from . import profiles, slicer_engine
 from .log import log, run_logged
 from .slicer_engine import app_root, download
 
@@ -310,7 +310,7 @@ _PROCESS_BASE = {  # (nozzle, machine family) -> system process preset to start 
     ("0.6", "H2D"): "0.30mm Standard @BBL H2D 0.6 nozzle",
 }
 _MACHINE = {"P1S": "Bambu Lab P1S {n} nozzle", "H2D": "Bambu Lab H2D {n} nozzle"}
-_PATTERN_TO_BAMBU = {"stars": "tri-hexagon", "alignedrectilinear": "alignedrectilinear"}
+_PATTERN_TO_BAMBU = profiles.BAMBU_PATTERN   # kept as a name for older call sites
 
 
 class Presets:
@@ -378,7 +378,7 @@ class Presets:
         name = _PROCESS_BASE.get((nozzle, machine)) or _PROCESS_BASE[("0.4", machine if machine in ("P1S", "H2D") else "P1S")]
         d = self.load("process", name)
         lw = p["line_widths"]
-        pattern = _PATTERN_TO_BAMBU.get(p["pattern"], p["pattern"])
+        pattern = profiles.bambu_pattern(p)
         over = {
             "layer_height": f"{p['layer_height']:g}", "initial_layer_print_height": f"{p['first_layer_height']:g}",
             "wall_loops": str(int(p["walls"])), "top_shell_layers": str(int(p["top"])), "bottom_shell_layers": str(int(p["bottom"])),

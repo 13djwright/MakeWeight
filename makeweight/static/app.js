@@ -995,9 +995,12 @@
       const msgs = [];
       if (et !== t) msgs.push(`Top: ${t} layers becomes ${et} because “Top min thickness” is ${tm} mm (Bambu Studio does the same unless its Top shell thickness is 0). Set it to 0 for exactly ${t}.`);
       if (eb !== b) msgs.push(`Bottom: ${b} layers becomes ${eb} because “Bottom min thickness” is ${bm} mm.`);
+      const inf = parseFloat(f.infill.value) || 0, pat = f.pattern.value;
+      if (inf >= 100 && !['rectilinear', 'alignedrectilinear', 'monotonic', 'monotonicline', 'concentric', 'zig-zag'].includes(pat)) msgs.push(`100% infill is printed as solid rectilinear lines — “${pat}” only exists below 100% (Bambu Studio refuses it at 100%), so the slicer is given rectilinear.`);
       shellNote.hidden = !msgs.length; shellNote.textContent = msgs.join(' ');
     };
-    for (const k of ['top', 'bottom', 'layer_height', 'top_min_thickness', 'bottom_min_thickness']) f[k].addEventListener('input', updNote);
+    for (const k of ['top', 'bottom', 'layer_height', 'top_min_thickness', 'bottom_min_thickness', 'infill', 'pattern']) f[k].addEventListener('input', updNote);
+    f.pattern.addEventListener('change', updNote);
     updNote();
     const read = () => {
       const out = {};
