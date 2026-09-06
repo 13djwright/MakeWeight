@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $App = "MakeWeight"
 $Tagline = "make weight, with the numbers to prove it"
 $Repo = if ($env:MAKEWEIGHT_REPO) { $env:MAKEWEIGHT_REPO } else { "13djwright/MakeWeight" }
-if ($Repo -eq "13djwright/MakeWeight" -or -not $Repo) { Write-Host "$App: no repository configured. Run:  `$env:MAKEWEIGHT_REPO='owner/name'; irm .../install.ps1 | iex"; exit 1 }
+if ($Repo -eq "__REPO__" -or -not $Repo) { Write-Host "$App: no repository configured. Run:  `$env:MAKEWEIGHT_REPO='owner/name'; irm .../install.ps1 | iex"; exit 1 }
 $Dest = if ($env:MAKEWEIGHT_DIR) { $env:MAKEWEIGHT_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\$App" }
 Write-Host "$App: looking up the latest release of $Repo ..."
 $rel = Invoke-RestMethod -Headers @{ "User-Agent" = "$App-installer" } "https://api.github.com/repos/$Repo/releases/latest"

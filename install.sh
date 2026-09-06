@@ -15,7 +15,7 @@ case "$OS" in
   *) echo "$APP: unsupported OS $OS"; exit 1;;
 esac
 DEST="${MAKEWEIGHT_DIR:-$DEFAULT_DIR}"
-case "$REPO" in 13djwright/MakeWeight|"") echo "$APP: no repository configured. Run:  MAKEWEIGHT_REPO=owner/name sh install.sh"; exit 1;; esac
+case "$REPO" in __REPO__|"") echo "$APP: no repository configured. Run:  MAKEWEIGHT_REPO=owner/name sh install.sh"; exit 1;; esac
 echo "$APP: looking up the latest release of $REPO for $T ..."
 JSON=$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/releases/latest")
 URL=$(printf '%s' "$JSON" | grep -o '"browser_download_url": *"[^"]*-'"$T"'\.zip"' | head -1 | sed 's/.*"\(https[^"]*\)"/\1/')
