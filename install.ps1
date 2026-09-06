@@ -1,13 +1,13 @@
 # Installer for Windows (PowerShell).
-#   irm https://raw.githubusercontent.com/OWNER/REPO/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.ps1 | iex
 # Downloads the latest release into %LOCALAPPDATA%\Programs\<App> (override with $env:MAKEWEIGHT_DIR), clears the
 # "downloaded from the internet" mark so SmartScreen stays quiet, and starts it.
 # $App / $Tagline mirror slicebudget/brand.json — run `python3 build/sync_brand.py` after changing that file.
 $ErrorActionPreference = "Stop"
 $App = "MakeWeight"
 $Tagline = "make weight, with the numbers to prove it"
-$Repo = if ($env:MAKEWEIGHT_REPO) { $env:MAKEWEIGHT_REPO } else { "__REPO__" }
-if ($Repo -eq "__REPO__" -or -not $Repo) { Write-Host "$App: no repository configured. Run:  `$env:MAKEWEIGHT_REPO='owner/name'; irm .../install.ps1 | iex"; exit 1 }
+$Repo = if ($env:MAKEWEIGHT_REPO) { $env:MAKEWEIGHT_REPO } else { "13djwright/MakeWeight" }
+if ($Repo -eq "13djwright/MakeWeight" -or -not $Repo) { Write-Host "$App: no repository configured. Run:  `$env:MAKEWEIGHT_REPO='owner/name'; irm .../install.ps1 | iex"; exit 1 }
 $Dest = if ($env:MAKEWEIGHT_DIR) { $env:MAKEWEIGHT_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\$App" }
 Write-Host "$App: looking up the latest release of $Repo ..."
 $rel = Invoke-RestMethod -Headers @{ "User-Agent" = "$App-installer" } "https://api.github.com/repos/$Repo/releases/latest"

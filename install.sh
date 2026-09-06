@@ -1,13 +1,13 @@
 #!/bin/sh
 # Installer for macOS and Linux.
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.sh | sh
 # Downloads the latest release for this machine into ~/Applications/<App> (override with MAKEWEIGHT_DIR) and starts it.
 # Files fetched this way carry no macOS quarantine flag, so there is no "unidentified developer" prompt.
 # APP / SLUG mirror slicebudget/brand.json — run `python3 build/sync_brand.py` after changing that file.
 set -e
 APP="MakeWeight"
 SLUG="makeweight"
-REPO="${MAKEWEIGHT_REPO:-__REPO__}"
+REPO="${MAKEWEIGHT_REPO:-13djwright/MakeWeight}"
 OS=$(uname -s); ARCH=$(uname -m)
 case "$OS" in
   Darwin) case "$ARCH" in arm64|aarch64) T=macos-arm64;; *) T=macos-x86_64;; esac; DEFAULT_DIR="$HOME/Applications/$APP";;
@@ -15,7 +15,7 @@ case "$OS" in
   *) echo "$APP: unsupported OS $OS"; exit 1;;
 esac
 DEST="${MAKEWEIGHT_DIR:-$DEFAULT_DIR}"
-case "$REPO" in __REPO__|"") echo "$APP: no repository configured. Run:  MAKEWEIGHT_REPO=owner/name sh install.sh"; exit 1;; esac
+case "$REPO" in 13djwright/MakeWeight|"") echo "$APP: no repository configured. Run:  MAKEWEIGHT_REPO=owner/name sh install.sh"; exit 1;; esac
 echo "$APP: looking up the latest release of $REPO for $T ..."
 JSON=$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/releases/latest")
 URL=$(printf '%s' "$JSON" | grep -o '"browser_download_url": *"[^"]*-'"$T"'\.zip"' | head -1 | sed 's/.*"\(https[^"]*\)"/\1/')

@@ -9,13 +9,13 @@ whole robot under its class limit.
 **macOS / Linux** — paste into Terminal:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.sh | sh
 ```
 
 **Windows** — paste into PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/OWNER/REPO/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.ps1 | iex
 ```
 
 Both download the latest release for your machine, unpack it (`~/Applications/MakeWeight`, `~/.local/opt/makeweight`,
