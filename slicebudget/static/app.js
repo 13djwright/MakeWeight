@@ -50,15 +50,28 @@
 
   function modal(title, body, buttons, opts = {}) {
     const root = $('#modal-root');
-    const close = () => { bg.remove(); if (opts.onClose) opts.onClose(); };
-    const bg = h('div', { class: 'modal-bg', onClick: e => { if (e.target === bg && !opts.sticky) close(); } },
-      h('div', { class: 'modal', style: opts.width ? { width: opts.width } : null, role: 'dialog', 'aria-modal': 'true' },
-        h('header', null, h('h2', null, title), h('button', { class: 'btn icon x', onClick: close, 'aria-label': 'Close' }, '✕')),
-        h('div', { class: 'body' }, body),
-        buttons && h('footer', null, ...buttons.map(b => h('button', { class: 'btn ' + (b.cls || ''), onClick: async () => { try { const r = await b.onClick?.(close); if (r !== false && !b.keep) close(); } catch (e) { fail(e); } } }, b.label)))));
+    const opener = document.activeElement;
+    const onKey = e => {
+      if (root.lastElementChild !== bg) return;                       // only the topmost dialog reacts
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+      else if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && buttons && opts.enterSubmits !== false && bg.contains(e.target)) { const prim = bg.querySelector('footer .btn.primary'); if (prim) { e.preventDefault(); prim.click(); } }
+      else if (e.key === 'Tab') {                                       // keep focus inside the dialog
+        const f = [...bg.querySelectorAll('input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex="0"]')].filter(x => x.offsetParent !== null);
+        if (!f.length) return;
+        if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+        else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+      }
+    };
+    const close = () => { bg.remove(); document.removeEventListener('keydown', onKey, true); if (opts.onClose) opts.onClose(); if (opener && opener.focus && document.body.contains(opener)) opener.focus(); };
+    const dlg = h('div', { class: 'modal', style: opts.width ? { width: opts.width } : null, role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: '-1' },
+      h('header', null, h('h2', null, title), h('button', { class: 'btn icon x', onClick: close, 'aria-label': 'Close' }, '✕')),
+      h('div', { class: 'body' }, body),
+      buttons && h('footer', null, ...buttons.map(b => h('button', { class: 'btn ' + (b.cls || ''), onClick: async () => { try { const r = await b.onClick?.(close); if (r !== false && !b.keep) close(); } catch (e) { fail(e); } } }, b.label))));
+    const bg = h('div', { class: 'modal-bg', onClick: e => { if (e.target === bg && !opts.sticky) close(); } }, dlg);
     root.append(bg);
-    const first = bg.querySelector('input,select,textarea,button:not(.x)'); if (first && !opts.noFocus) setTimeout(() => first.focus(), 30);
-    bg.addEventListener('keydown', e => { if (e.key === 'Escape') close(); if (e.key === 'Enter' && e.target.tagName === 'INPUT' && buttons && opts.enterSubmits !== false) { const prim = bg.querySelector('footer .btn.primary'); prim && prim.click(); } });
+    document.addEventListener('keydown', onKey, true);
+    const first = bg.querySelector('input:not([disabled]),select:not([disabled]),textarea:not([disabled]),footer button:not(.x)');
+    setTimeout(() => { if (!opts.noFocus && first) first.focus(); else dlg.focus(); }, 30);
     return close;
   }
   function confirmModal(msg, onYes, label = 'Delete') {
@@ -74,36 +87,57 @@
   function menu(anchor, items) {
     document.querySelectorAll('.menu').forEach(m => m.remove());
     const r = anchor.getBoundingClientRect();
-    const m = h('div', { class: 'menu', style: { top: (r.bottom + window.scrollY + 4) + 'px', left: Math.min(r.left, window.innerWidth - 230) + 'px' } });
+    const m = h('div', { class: 'menu', role: 'menu', style: { top: (r.bottom + window.scrollY + 4) + 'px', left: Math.min(r.left, window.innerWidth - 230) + 'px' } });
+    const close = () => { m.remove(); document.removeEventListener('keydown', onKey, true); anchor.setAttribute('aria-expanded', 'false'); };
     for (const it of items) {
       if (it === '-') { m.append(h('hr')); continue; }
-      m.append(h('button', { class: it.cls || '', onClick: () => { m.remove(); it.onClick(); } }, it.label));
+      m.append(h('button', { class: it.cls || '', role: 'menuitem', onClick: () => { close(); it.onClick(); } }, it.label));
     }
+    const onKey = e => {
+      const btns = [...m.querySelectorAll('button')]; const i = btns.indexOf(document.activeElement);
+      if (e.key === 'Escape') { e.preventDefault(); close(); anchor.focus(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); (btns[i + 1] || btns[0]).focus(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); (btns[i - 1] || btns[btns.length - 1]).focus(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    anchor.setAttribute('aria-haspopup', 'menu'); anchor.setAttribute('aria-expanded', 'true');
     document.body.append(m);
-    setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }), 0);
+    const first = m.querySelector('button'); if (first) first.focus();
+    setTimeout(() => document.addEventListener('click', close, { once: true }), 0);
   }
   // editable cell: click to edit, Enter/blur saves
   function edCell(value, onSave, opts = {}) {
-    const td = h('td', { class: 'ed ' + (opts.cls || ''), title: opts.title || 'Click to edit' });
-    const show = () => { td.textContent = ''; td.append(opts.render ? opts.render(value) : (value == null || value === '' ? (opts.placeholder || '—') : (opts.fmt ? opts.fmt(value) : value))); };
+    // Inline-editable cell. Affordances: text cursor + pencil on hover, focusable (Tab) and Enter/F2 to edit.
+    // While editing, the cell keeps its exact width so the rest of the table never shifts.
+    const td = h('td', { class: 'ed ' + (opts.cls || ''), title: opts.title || 'Click to edit', tabindex: '0', role: 'button', 'aria-label': opts.label || 'Edit value' });
+    const show = () => { td.textContent = ''; td.classList.remove('editing'); td.style.width = ''; td.append(opts.render ? opts.render(value) : (value == null || value === '' ? (opts.placeholder || '—') : (opts.fmt ? opts.fmt(value) : value))); };
     show();
-    td.addEventListener('click', () => {
+    const edit = () => {
       if (td.querySelector('input,select')) return;
+      const w = td.getBoundingClientRect().width;              // freeze the column
+      const cs = getComputedStyle(td);
+      const inner = Math.max(24, w - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 2);
+      td.style.width = w + 'px'; td.classList.add('editing');
       let inp;
       if (opts.options) { inp = select(opts.options, value); }
-      else { inp = h('input', { type: opts.type || 'text', value: value == null ? '' : value, class: opts.type === 'number' ? 'num' : '', step: opts.step || 'any' }); if (opts.list) inp.setAttribute('list', opts.list); }
+      else { inp = h('input', { type: opts.type || 'text', value: value == null ? '' : value, class: opts.type === 'number' ? 'num' : '', step: opts.step || 'any', inputmode: opts.type === 'number' ? 'decimal' : undefined }); if (opts.list) inp.setAttribute('list', opts.list); }
+      inp.style.width = inner + 'px'; inp.style.minWidth = '0'; inp.style.boxSizing = 'border-box';
+      let closed = false;
       const done = async (save) => {
-        if (!save) { show(); return; }
+        if (closed) return; closed = true;
+        if (!save) { show(); td.focus(); return; }
         let v = inp.value;
         if (opts.type === 'number') v = v === '' ? null : parseFloat(v);
-        if (v === value || (v === '' && value == null)) { show(); return; }
+        if (v === value || (v === '' && value == null) || (opts.type === 'number' && v !== null && isNaN(v))) { show(); return; }
         try { value = v; show(); await onSave(v); } catch (e) { fail(e); }
       };
-      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); done(true); } if (e.key === 'Escape') done(false); });
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); done(true); } else if (e.key === 'Escape') { e.preventDefault(); done(false); } else if (e.key === 'Tab') { done(true); } e.stopPropagation(); });
       inp.addEventListener('blur', () => done(true));
       if (inp.tagName === 'SELECT') inp.addEventListener('change', () => done(true));
       td.textContent = ''; td.append(inp); inp.focus(); if (inp.select) inp.select();
-    });
+    };
+    td.addEventListener('click', edit);
+    td.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === 'F2' || e.key === ' ') && !td.querySelector('input,select')) { e.preventDefault(); edit(); } });
     return td;
   }
 
@@ -254,11 +288,11 @@
   V.home = function (m) {
     const st = S.state;
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Robots'), h('p', null, 'Each robot has its own weight sheet, printed parts, runs and event log. The library is shared.')),
-      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: importArchive }, 'Import archive'), h('button', { class: 'btn primary', onClick: newRobotModal }, '＋ New robot'))));
+      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: importArchive }, 'Import archive…'), h('button', { class: 'btn primary', onClick: newRobotModal }, '＋ New robot…'))));
     const grid = h('div', { class: 'robots' });
     const active = st.robots.filter(r => r.status === 'active'), archived = st.robots.filter(r => r.status !== 'active');
     for (const r of active) grid.append(robotCard(r));
-    grid.append(h('button', { class: 'rcard new', onClick: newRobotModal }, '＋ New robot'));
+    grid.append(h('button', { class: 'rcard new', onClick: newRobotModal }, '＋ New robot…'));
     m.append(grid);
     if (archived.length) {
       m.append(h('h3', { style: { marginTop: '24px', fontSize: '12px', color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '.06em' } }, 'Archived'));
@@ -304,9 +338,9 @@
     const t = r.totals;
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Weight sheet'), h('p', null, 'Printed-part estimates come from the slicer; measured weights from your scale win when present.')),
       h('div', { class: 'tb' },
-        h('button', { class: 'btn', onClick: () => addLineModal() }, '＋ Line'),
-        h('button', { class: 'btn', onClick: () => fromLibraryModal() }, '＋ From library'),
-        h('button', { class: 'btn', onClick: () => addSectionModal() }, '＋ Section'),
+        h('button', { class: 'btn', onClick: () => addLineModal() }, '＋ Line…'),
+        h('button', { class: 'btn', onClick: () => fromLibraryModal() }, '＋ From library…'),
+        h('button', { class: 'btn', onClick: () => addSectionModal() }, '＋ Section…'),
         h('button', { class: 'btn', onClick: robotWeighInModal }, 'Weigh-in…'),
         h('button', { class: 'btn', onClick: e => robotMenu(e.currentTarget) }, 'Robot ▾'),
         h('button', { class: 'btn primary', onClick: () => go('optimizer') }, 'Fix weight →'))));
@@ -325,11 +359,11 @@
         h('td', { class: 'num' }, s.counts ? fmt(s.subtotal) : `(${fmt(s.subtotal)})`), h('td', { colspan: 3 }),
         h('td', null, h('button', { class: 'btn icon', title: 'Section menu', onClick: e => sectionMenu(e.currentTarget, s) }, '⋯'))));
       for (const it of s.items) tb.append(lineRow(it, s));
-      if (!s.items.length) tb.append(h('tr', { class: 'dim' }, h('td', { colspan: 11, style: { textAlign: 'center' } }, h('button', { class: 'btn small ghost', onClick: () => addLineModal(s.id) }, '＋ add a line to ' + s.name))));
+      if (!s.items.length) tb.append(h('tr', { class: 'dim' }, h('td', { colspan: 11, style: { textAlign: 'center' } }, h('button', { class: 'btn small ghost', onClick: () => addLineModal(s.id) }, '＋ add a line to ' + s.name + '…'))));
     }
     tb.append(h('tr', { class: 'sum' }, h('td'), h('td', null, 'Weigh-in total'), h('td'), h('td', { class: 'num' }, fmt(t.estimated_only)), h('td'), h('td'), h('td', { class: 'num' }, fmt(t.best_known)), h('td', { class: 'num' }, money(r.sections.reduce((a, s) => a + s.items.reduce((b, i) => b + (i.price || 0) * (i.qty || 0), 0), 0))), h('td', { colspan: 3 })));
     m.append(h('div', { class: 'tw' }, tbl));
-    m.append(h('p', { class: 'hint' }, 'Click a cell to edit. Red dot = needs re-weigh (set automatically when a profile, mesh or library weight changes after a measurement). Grey rows are excluded from the total (e.g. an assembly line supersedes them).'));
+    m.append(h('p', { class: 'hint' }, 'Cells with a text cursor (and a ✎ on hover) edit in place — Enter saves, Esc cancels; buttons ending in “…” open a dialog. Red dot = needs re-weigh (set automatically when a profile, mesh or library weight changes after a measurement). Grey rows are excluded from the total (e.g. an assembly line supersedes them).'));
   };
   function stat(label, value, unit, extra, cls) { return h('div', { class: 'stat ' + (cls || '') }, h('div', { class: 'l' }, label), h('div', { class: 'v' }, value, unit && h('small', null, unit)), extra); }
   function needRobot(m) { m.append(h('div', { class: 'empty' }, 'Choose a robot first.', h('br'), h('button', { class: 'btn primary', style: { marginTop: '10px' }, onClick: () => go('home') }, 'All robots'))); }
@@ -532,7 +566,7 @@
   };
   function filChip(f) { return f ? h('span', { class: 'mat' }, h('i', { style: { background: f.color || '#888' } }), f.name) : '—'; }
   function jobPill(j, p) {
-    if (!p.mesh) return h('button', { class: 'btn small', onClick: () => attachMeshModal({ id: p.line_item_id, part: p }) }, 'Attach mesh');
+    if (!p.mesh) return h('button', { class: 'btn small', onClick: () => attachMeshModal({ id: p.line_item_id, part: p }) }, 'Attach mesh…');
     if (!j) return h('span', { class: 'pill auto' }, 'not sliced');
     if (j.status === 'done') return h('span', { class: 'pill ver', title: `sliced with ${(j.slicer_version || '').startsWith('bambu-') ? 'Bambu Studio ' + j.slicer_version.slice(6) : 'PrusaSlicer ' + (j.slicer_version || '')}` }, j.time_s ? `sliced ${secs(j.time_s)}` : 'cached');
     if (j.status === 'running') return h('span', { class: 'pill warn' }, 'slicing…');
@@ -591,18 +625,23 @@
   // ---------------------------------------------------------------- part detail
   let viewer = null;
   V.part = async function (m) {
-    const r = S.robot; if (!r) return needRobot(m);
+    let r = S.robot;
     let pid = S.param ? +S.param : null;
+    // a part link may point at another robot (bookmark, back button): switch to that robot first
+    if (pid && (!r || !r.sections.some(s => s.items.some(i => i.part && i.part.id === pid)))) {
+      try { const p0 = await api('GET', `parts/${pid}`); if (p0.robot_id && p0.robot_id !== S.robotId) { await loadRobot(p0.robot_id); renderShell(); r = S.robot; } } catch { /* falls through to 'not found' */ }
+    }
+    if (!r) return needRobot(m);
     const all = r.sections.flatMap(s => s.items.filter(i => i.part));
     if (!pid) { if (!all.length) { m.append(h('div', { class: 'empty' }, 'No printed parts yet.')); return; } pid = all[0].part.id; }
-    const it = all.find(i => i.part.id === pid); if (!it) { m.append(h('div', { class: 'empty' }, 'Part not found.')); return; }
+    const it = all.find(i => i.part.id === pid); if (!it) { m.append(h('div', { class: 'empty' }, 'Part not found. ', h('button', { class: 'btn small', onClick: () => go('parts') }, 'Printed parts'))); return; }
     const p = await api('GET', `parts/${pid}`); const st = S.state;
     const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(async () => { await refreshRobot(); await renderMain(); }).catch(fail);
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, it.description, p.locked && h('span', { class: 'pill lock', style: { marginLeft: '8px' } }, '🔒 locked')),
       h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${p.mesh.watertight ? 'watertight' : 'not watertight'} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ' · mirrored' : ''}` : 'No mesh attached yet')),
       h('div', { class: 'tb' },
         h('select', { onChange: e => go('part', e.target.value) }, ...all.map(x => h('option', { value: x.part.id, selected: x.part.id === pid }, x.description))),
-        h('button', { class: 'btn', onClick: () => attachMeshModal(it) }, p.mesh ? 'Replace mesh' : 'Attach mesh'),
+        h('button', { class: 'btn', onClick: () => attachMeshModal(it) }, p.mesh ? 'Replace mesh…' : 'Attach mesh…'),
         h('button', { class: 'btn', onClick: () => api('POST', `parts/${p.id}/mirror_copy`, {}).then(refreshRobot).then(() => toast('Mirrored copy created')).catch(fail) }, 'Mirror copy'),
         h('button', { class: 'btn', onClick: () => targetWeightModal(p, it) }, 'Target weight…'),
         h('button', { class: 'btn' + (p.locked ? ' primary' : ''), onClick: () => upd({ locked: !p.locked }) }, p.locked ? 'Unlock' : 'Lock'))));
@@ -683,7 +722,7 @@
     }
     left.append(h('div', { class: 'card', style: { marginTop: '12px' } }, h('h3', null, 'Profile sweep · real slices · this orientation', h('div', { class: 'tb' },
       stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer and this part’s filament', onClick: async () => { try { for (const j of stale) { const pr = JSON.parse(j.profile_json); await api('POST', `parts/${p.id}/slice`, { params: pr }); } render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
-      h('button', { class: 'btn small', onClick: () => customSliceModal(p) }, '＋ Slice a profile'),
+      h('button', { class: 'btn small', onClick: () => customSliceModal(p) }, '＋ Slice a profile…'),
       h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
       h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),
       h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Profile'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th'))), sweepRows)),
@@ -696,7 +735,7 @@
       field('Filament', select(st.filaments.map(f => [f.id, `${f.name} · ${f.density}${f.correction.factor ? ' · ×' + f.correction.factor.toFixed(3) : ''}`]), p.filament_id, { disabled: p.locked, onChange: e => upd({ filament_id: +e.target.value }) })),
       field('Profile', select(st.profiles.map(x => [x.id, `${x.name} — ${x.string}`]), p.profile_id, { disabled: p.locked, onChange: e => upd({ profile_id: +e.target.value }) })),
       params && h('div', { class: 'hint' }, `Walls ${params.walls} · top ${params.top} (effective ${prof.effective_shells[0]}) · bottom ${params.bottom} (effective ${prof.effective_shells[1]}) · ${params.infill}% ${params.pattern} · ${params.layer_height} mm · ${params.nozzle} mm nozzle`),
-      h('div', { class: 'tb', style: { marginTop: '8px' } }, prof && h('button', { class: 'btn small', onClick: () => editProfileModal(prof) }, prof.builtin ? 'View profile' : 'Edit profile'), h('button', { class: 'btn small', onClick: () => editProfileModal(null, params, (np) => upd({ profile_id: np.id })) }, 'New profile from this…')),
+      h('div', { class: 'tb', style: { marginTop: '8px' } }, prof && h('button', { class: 'btn small', onClick: () => editProfileModal(prof) }, prof.builtin ? 'View profile…' : 'Edit profile…'), h('button', { class: 'btn small', onClick: () => editProfileModal(null, params, (np) => upd({ profile_id: np.id })) }, 'New profile from this…')),
       field('Scale', h('div', { class: 'tb' }, input({ type: 'number', value: p.scale, step: '0.01', disabled: p.locked, style: { width: '90px' }, onChange: e => upd({ scale: parseFloat(e.target.value) || 1 }) }), h('span', { class: 'rng' }, p.mesh ? `98%: ≈${fmt((p.corrected_grams || 0) * 0.98 ** 3)} g · 102%: ≈${fmt((p.corrected_grams || 0) * 1.02 ** 3)} g (cube law)` : ''))),
       field('Role', select(ROLES, p.role, { onChange: e => upd({ role: e.target.value }) })),
       field('Qty', input({ type: 'number', value: it.qty, step: '1', style: { width: '90px' }, onChange: e => api('PUT', `items/${it.id}`, { qty: parseFloat(e.target.value) || 1 }).then(refreshRobot).catch(fail) })),
@@ -708,7 +747,7 @@
       field('Walls', rng('walls', 2, 5, '1')), field('Top layers', rng('top', 3, 5, '1')), field('Bottom layers', rng('bottom', 3, 5, '1')), field('Infill %', rng('infill', 8, 40, '1')),
       h('p', { class: 'hint' }, 'Locked freezes profile, orientation and filament; the optimizer treats the part as fixed weight. Ranges bound what the optimizer may choose.')));
     // modifier regions
-    const modsCard = h('div', { class: 'card' }, h('h3', null, 'Modifier regions', h('div', { class: 'tb' }, h('button', { class: 'btn small', disabled: p.locked || !p.mesh, onClick: () => modifierModal(p, null) }, '＋ Box'))));
+    const modsCard = h('div', { class: 'card' }, h('h3', null, 'Modifier regions', h('div', { class: 'tb' }, h('button', { class: 'btn small', disabled: p.locked || !p.mesh, onClick: () => modifierModal(p, null) }, '＋ Box…'))));
     if ((p.modifiers || []).length) {
       const tb = h('tbody');
       for (const [i, md] of p.modifiers.entries()) {
@@ -720,7 +759,7 @@
     }
     modsCard.append(h('p', { class: 'hint' }, 'A box region with its own walls/infill (e.g. 100% around the weapon bolt pattern). Sliced for real as a modifier mesh in the active slicer. Coordinates are in the preview frame: x/y centred on the part, z from the bed.'));
     right.append(modsCard);
-    right.append(h('div', { class: 'card' }, h('h3', null, 'Weigh-ins', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => weighInModal(it) }, '＋ Add'))),
+    right.append(h('div', { class: 'card' }, h('h3', null, 'Weigh-ins', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => weighInModal(it) }, '＋ Add…'))),
       it.weigh_ins.length ? h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...[...it.weigh_ins].reverse().slice(0, 6).map(w => h('tr', null, h('td', { class: 'mono' }, w.date || ''), h('td', { class: 'num' }, fmt(w.grams, 2) + ' g'), h('td', { class: 'prof' }, w.profile_string || '')))))) : h('p', { class: 'hint' }, 'No weigh-ins yet. Enter the scale reading after printing; it calibrates this filament.'),
       it.needs_reweigh && h('p', { class: 'hint', style: { color: 'var(--warn)' } }, 'Profile, orientation or mesh changed since the last weigh-in.')));
   };
@@ -981,7 +1020,7 @@
       const d = input({ type: 'date', value: ev ? ev.date : today() }), t = input({ value: ev ? ev.title : '', placeholder: 'Event name' }), pl = input({ value: ev ? ev.placing || '' : '', placeholder: 'e.g. 1st' }), n = h('textarea', null, ev ? ev.notes || '' : '');
       modal(ev ? 'Edit entry' : 'New entry', h('div', null, field('Date', d), field('Event', t), field('Placing', pl), field('Notes', n)), [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { if (ev) await api('PUT', `events/${ev.id}`, { date: d.value, title: t.value, placing: pl.value, notes: n.value }); else await api('POST', `robots/${r.id}/events`, { date: d.value, title: t.value, placing: pl.value, notes: n.value }); render(); } }]);
     };
-    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Event log'), h('p', null, 'Competitions and milestones, with the sheet total snapshotted at each entry.')), h('div', { class: 'tb' }, h('button', { class: 'btn primary', onClick: () => add() }, '＋ Entry'))));
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Event log'), h('p', null, 'Competitions and milestones, with the sheet total snapshotted at each entry.')), h('div', { class: 'tb' }, h('button', { class: 'btn primary', onClick: () => add() }, '＋ Entry…'))));
     const card = h('div', { class: 'card' });
     if (!evs.length) card.append(h('p', { class: 'hint' }, 'Nothing logged yet.'));
     for (const ev of evs) card.append(h('div', { class: 'ev' }, h('div', { class: 'd' }, ev.date), h('div', null, h('b', null, ev.title, ev.placing ? ` · ${ev.placing}` : ''), h('span', null, ev.notes || ''), ev.total_snapshot_g != null && h('div', { class: 'rng' }, `sheet total at the time: ${fmt(ev.total_snapshot_g)} g`)),
@@ -997,7 +1036,7 @@
     const st = { q: S.cache.libq || '', cat: S.cache.libcat || '' };
     const search = input({ class: 'search', placeholder: 'Search…', value: st.q });
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Component library'), h('p', null, 'Shared across robots. Measured weights here propagate to every robot that uses the part.')),
-      h('div', { class: 'tb' }, search, h('button', { class: 'btn primary', onClick: () => compModal() }, '＋ Component'))));
+      h('div', { class: 'tb' }, search, h('button', { class: 'btn primary', onClick: () => compModal() }, '＋ Component…'))));
     const tabs = h('div', { class: 'sub-tabs' });
     const tw = h('div', { class: 'tw' });
     const draw = () => {
@@ -1041,7 +1080,7 @@
   V.filaments = function (m) {
     const st = S.state;
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Filaments & profiles'), h('p', null, 'Densities from Bambu Studio’s filament profiles; corrections from your scale. Profiles are Bambu Studio vocabulary and are mapped to PrusaSlicer when slicing.')),
-      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => filModal() }, '＋ Filament'), h('button', { class: 'btn primary', onClick: () => editProfileModal(null) }, '＋ Profile'))));
+      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => filModal() }, '＋ Filament…'), h('button', { class: 'btn primary', onClick: () => editProfileModal(null) }, '＋ Profile…'))));
     const ftb = h('tbody');
     for (const f of st.filaments) {
       ftb.append(h('tr', null, h('td', null, filChip(f), f.builtin && h('span', { class: 'src' }, 'Bambu')), h('td', null, f.material), h('td', { class: 'num' }, f.density), h('td', { class: 'num' }, f.flow), h('td', { class: 'num' }, f.max_vol_speed ?? 12),
@@ -1287,7 +1326,7 @@
       h('div', { class: 'tw', style: { maxHeight: '420px', overflow: 'auto' } }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Status'), h('th', null, 'Part'), h('th', null, 'Profile'), h('th', null, 'Purpose'), h('th', { class: 'num' }, 'Time'), h('th', { class: 'num' }, 'Result'))), qtb)), !j.jobs.length && h('p', { class: 'hint' }, 'No jobs yet.')));
     // right: cache, printers, data
     right.append(h('div', { class: 'card' }, h('h3', null, 'Cache'), h('dl', { class: 'kv' }, h('dt', null, 'Slices cached'), h('dd', null, j.cache.done), h('dt', null, 'Slicer time spent'), h('dd', null, secs(j.cache.time_s))), h('div', { class: 'tb', style: { marginTop: '8px' } }, h('button', { class: 'btn small', onClick: () => confirmModal('Clear all cached slice results? Parts will re-slice as needed.', async () => { await api('POST', 'jobs/clear_cache', {}); render(); }, 'Clear') }, 'Clear cache'))));
-    right.append(h('div', { class: 'card' }, h('h3', null, 'Printers', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => printerModal() }, '＋'))), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...st.printers.map(p => h('tr', null, h('td', null, h('b', null, p.name)), h('td', null, p.nozzles.join(' · ') + ' mm'), h('td', { class: 'rng' }, `${p.bed.x} × ${p.bed.y} × ${p.bed.z}`), h('td', null, h('button', { class: 'btn icon', onClick: () => printerModal(p) }, '✎'))))))),
+    right.append(h('div', { class: 'card' }, h('h3', null, 'Printers', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => printerModal(), title: 'Add a printer…', 'aria-label': 'Add a printer' }, '＋'))), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...st.printers.map(p => h('tr', null, h('td', null, h('b', null, p.name)), h('td', null, p.nozzles.join(' · ') + ' mm'), h('td', { class: 'rng' }, `${p.bed.x} × ${p.bed.y} × ${p.bed.z}`), h('td', null, h('button', { class: 'btn icon', onClick: () => printerModal(p) }, '✎'))))))),
       h('div', { class: 'field', style: { marginTop: '8px' } }, h('label', null, 'Default printer'), select(st.printers.map(p => [p.id, p.name]), st.settings.default_printer_id, { onChange: e => api('PUT', 'settings', { default_printer_id: +e.target.value }) })),
       h('div', { class: 'field' }, h('label', null, 'Default filament'), select(st.filaments.map(f => [f.id, f.name]), st.settings.default_filament_id, { onChange: e => api('PUT', 'settings', { default_filament_id: +e.target.value }) })),
       h('div', { class: 'field' }, h('label', null, 'Default profile'), select(st.profiles.map(p => [p.id, p.name]), st.settings.default_profile_id, { onChange: e => api('PUT', 'settings', { default_profile_id: +e.target.value }) }))));

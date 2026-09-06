@@ -85,10 +85,18 @@ tr.grp td, tr.sec-h td{background:var(--panel2);font-size:11px;letter-spacing:.0
 tr.sec-h .off{color:var(--ink3);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;margin-left:8px}
 tr.sum td{font-weight:600;background:var(--panel2)}
 td .sub{display:block;color:var(--ink3);font-size:11px;font-weight:400;white-space:normal;max-width:300px}
-td.ed{cursor:text}
-td.ed:hover{background:var(--panel2)}
-td.ed input,td.ed select{width:100%;min-width:60px;padding:2px 5px;font-size:13px}
-td.ed input.num{text-align:right;width:80px}
+td.ed{cursor:text;position:relative;outline:none}
+td.ed:hover,td.ed:focus-visible{background:var(--panel2);box-shadow:inset 0 0 0 1px var(--rule)}
+td.ed:focus-visible{box-shadow:inset 0 0 0 2px var(--accent)}
+td.ed:not(.editing):hover::after,td.ed:not(.editing):focus-visible::after{content:"✎";position:absolute;right:4px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--ink3);pointer-events:none}
+td.ed.editing{padding-top:2px;padding-bottom:2px;background:var(--panel)}
+td.ed input,td.ed select{box-sizing:border-box;height:26px;padding:0 5px;font-size:13px;line-height:1}
+td.ed input.num{text-align:right;font-variant-numeric:tabular-nums}
+td.ed input[type=number]{appearance:textfield;-moz-appearance:textfield}
+td.ed input[type=number]::-webkit-inner-spin-button,td.ed input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+/* what a click does: text cursor = edit in place, pointer = button / opens something */
+button,.btn,[role=button]:not(td.ed),summary,th.sortable,a{cursor:pointer}
+
 td.wrap{white-space:normal;max-width:280px}
 .pill{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;font-weight:600;letter-spacing:.02em;white-space:nowrap;vertical-align:middle}
 .pill.est{background:var(--slate-soft);color:var(--slate)}
