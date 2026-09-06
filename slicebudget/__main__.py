@@ -30,7 +30,7 @@ def main():
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
     if args.root:
-        os.environ["GRMLN_HOME"] = str(Path(args.root).resolve())
+        os.environ["MAKEWEIGHT_HOME"] = str(Path(args.root).resolve())
     from . import paths
     from .server import serve
     root = paths.data_root()
@@ -53,7 +53,7 @@ def main():
     httpd = serve(root, args.host, port)
     url = f"http://{args.host}:{port}/"
     from .log import log
-    log.info("GRMLN running at %s   (app in %s, data in %s)", url, paths.install_dir(), root / "data")
+    log.info("%s running at %s   (app in %s, data in %s)", paths.APP_NAME, url, paths.install_dir(), root / "data")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

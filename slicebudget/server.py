@@ -33,7 +33,7 @@ class App:
         self.mesh_dir.mkdir(parents=True, exist_ok=True)
         if not applog.log_file():
             applog.setup(self.data_dir)
-        log.info("GRMLN %s starting; data=%s; %s; python %s", applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
+        log.info("%s %s starting; data=%s; %s; python %s", __import__("slicebudget.paths", fromlist=["APP_NAME"]).APP_NAME, applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
         self.db = DB(self.data_dir / "slicebudget.db")
         self.events = Events()
         cores = os.cpu_count() or 2
@@ -374,6 +374,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404); return
         ctype = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
         data = f.read_bytes()
+        if f.name == "index.html":  # brand placeholders come from brand.json so a rename is a one-file change
+            from . import paths
+            data = data.replace(b"{{APP_NAME}}", paths.APP_NAME.encode()).replace(b"{{TAGLINE}}", (paths.BRAND.get("tagline") or "").encode())
         self.send_response(200)
         self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text/") or "javascript" in ctype else ""))
         self.send_header("Content-Length", str(len(data)))
@@ -397,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
-                "robots": self._robot_list(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "install_dir": str(__import__("slicebudget.paths", fromlist=["install_dir"]).install_dir()), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable(),
+                "robots": self._robot_list(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": __import__("slicebudget.paths", fromlist=["BRAND"]).BRAND, "install_dir": str(__import__("slicebudget.paths", fromlist=["install_dir"]).install_dir()), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable(),
                 "classes": CLASSES,
             })
         if path == "settings" and m == "PUT":

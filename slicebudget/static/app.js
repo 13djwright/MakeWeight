@@ -1,4 +1,4 @@
-/* GRMLN UI — vanilla JS single page app. */
+/* MakeWeight UI — vanilla JS single page app. (Brand strings come from /api/state .app / brand.json.) */
 (function () {
   'use strict';
   // ------------------------------------------------------------ utilities
@@ -1640,7 +1640,7 @@
       if (rid) await loadRobot(rid);
       if (!S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
       await render(); connectSSE();
-    } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the GRMLN service: ' + e.message)); }
+    } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the ' + document.title + ' service: ' + e.message)); }
   })();
   window.SB = { S, api, render, go };
 })();

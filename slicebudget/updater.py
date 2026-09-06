@@ -115,7 +115,7 @@ class Updater:
         out = []
         try:
             for sib in here.parent.iterdir():
-                if sib.is_dir() and sib != here and re.match(rf"^({APP}|{paths.LEGACY_NAME})-\d", sib.name):
+                if sib.is_dir() and sib != here and re.match(rf"^({'|'.join(map(re.escape, [APP, *paths.LEGACY_NAMES]))})-\d", sib.name):
                     out.append(str(sib))
         except OSError:
             pass
@@ -201,7 +201,7 @@ class Updater:
     @staticmethod
     def _launcher(dest: Path) -> Path | None:
         s = platform.system()
-        for n in ([f"{APP}.bat"] if s == "Windows" else [f"{APP}.command"] if s == "Darwin" else [f"{APP.lower()}.sh"]):
+        for n in ([f"{APP}.bat"] if s == "Windows" else [f"{APP}.command"] if s == "Darwin" else [f"{paths.APP_SLUG}.sh"]):
             if (dest / n).exists():
                 return dest / n
         return None

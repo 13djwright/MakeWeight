@@ -104,7 +104,7 @@ def version_of(cmd: list[str]) -> str | None:
 # ------------------------------------------------------------------ install
 def download(url: str, dest: Path, progress: Callable[[int, int], None] | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "SliceBudget/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "MakeWeight/1.0"})
     with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
@@ -155,7 +155,7 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
             if app is None:
                 listing = "; ".join(f"{mp}: {[x.name for x in Path(mp).iterdir()]}" for mp in mount_points if Path(mp).exists())
                 raise RuntimeError("No PrusaSlicer.app inside the disk image. Mounted at " + (listing or "nothing") +
-                                   ". You can also point GRMLN at an existing PrusaSlicer.app in Setup → 'Use a different install'.")
+                                   ". You can also point the app at an existing PrusaSlicer.app in Setup → 'Use a different install'.")
             dest = sd / app.name
             if dest.exists():
                 shutil.rmtree(dest)
@@ -180,7 +180,7 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
             raise RuntimeError(
                 "On Linux PrusaSlicer is distributed through Flathub or your distribution. Install it "
                 "(e.g. 'flatpak install flathub com.prusa3d.PrusaSlicer' or 'sudo apt install prusa-slicer') "
-                "or point GRMLN at an AppImage in Setup.")
+                "or point the app at an AppImage in Setup.")
     prog("Verifying", 0.95)
     cmd = locate()
     if not cmd:

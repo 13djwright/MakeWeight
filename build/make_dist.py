@@ -1,4 +1,4 @@
-"""Build per-platform GRMLN zips: embedded CPython (python-build-standalone) + wheels + app + launcher.
+"""Build per-platform app zips (name from slicebudget/brand.json): embedded CPython (python-build-standalone) + wheels + app + launcher.
 
 Usage:  python3 make_dist.py --out DIST_DIR [--targets windows-x86_64,macos-arm64,macos-x86_64,linux-x86_64]
 Needs network access to GitHub releases and PyPI. Pure stdlib + pip.
@@ -22,6 +22,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 APP_VERSION = json.loads((ROOT / "slicebudget" / "version.json").read_text())["version"] if (ROOT / "slicebudget" / "version.json").exists() else "0.1.0"
+_BRAND = json.loads((ROOT / "slicebudget" / "brand.json").read_text(encoding="utf-8"))
+APP = _BRAND["name"]; SLUG = _BRAND.get("slug") or APP.lower(); TAGLINE = _BRAND.get("tagline", "")
 
 TARGETS = {
     # name: (python-build-standalone triple, pip platform tags, site-packages relative path, launcher)
@@ -88,46 +90,49 @@ def install_wheels(wheels, site: Path):
 
 
 LAUNCHERS = {
-    "windows": ("GRMLN.bat", "\r\n".join([
-        "@echo off", "title GRMLN", "cd /d \"%~dp0\"",
-        "echo Starting GRMLN ... this window stays open while it runs. Close it to stop.",
+    "windows": (f"{APP}.bat", "\r\n".join([
+        "@echo off", f"title {APP}", "cd /d \"%~dp0\"",
+        f"echo Starting {APP} ... this window stays open while it runs. Close it to stop.",
         "\"%~dp0python\\python.exe\" -m slicebudget %*",
         "if errorlevel 1 pause", ""])),
-    "macos": ("GRMLN.command", "\n".join([
+    "macos": (f"{APP}.command", "\n".join([
         "#!/bin/bash", "cd \"$(dirname \"$0\")\"",
-        "echo \"Starting GRMLN ... keep this window open while it runs (Ctrl-C to stop).\"",
+        f"echo \"Starting {APP} ... keep this window open while it runs (Ctrl-C to stop).\"",
         "xattr -dr com.apple.quarantine python 2>/dev/null",
         "exec ./python/bin/python3 -m slicebudget \"$@\"", ""])),
-    "linux": ("grmln.sh", "\n".join([
+    "linux": (f"{SLUG}.sh", "\n".join([
         "#!/bin/bash", "cd \"$(dirname \"$0\")\"",
-        "echo \"Starting GRMLN ... keep this terminal open while it runs (Ctrl-C to stop).\"",
+        f"echo \"Starting {APP} ... keep this terminal open while it runs (Ctrl-C to stop).\"",
         "exec ./python/bin/python3 -m slicebudget \"$@\"", ""])),
 }
 
-README = """GRMLN {version}  -  every gram accounted for
+README = """{app} {version}  -  {tagline}
 ==================================================
 
 Start it:
-  Windows : double-click GRMLN.bat
-  macOS   : double-click GRMLN.command  (first time: right-click > Open, or run
+  Windows : double-click {app}.bat
+  macOS   : double-click {app}.command  (first time: right-click > Open, or run
             `xattr -dr com.apple.quarantine .` in this folder if macOS refuses)
-  Linux   : ./grmln.sh
+  Linux   : ./{slug}.sh
+Easier: the one-line installers in the README on GitHub (curl ... | sh  /  irm ... | iex) download and start the
+right zip for your machine without any macOS "unidentified developer" prompt.
 A browser tab opens at http://localhost:8765. The window that opened must stay open while you use it.
 
-First run: open "Jobs & setup" and click "Install Bambu Studio". GRMLN downloads Bambu Studio (230-470 MB depending
+First run: open "Jobs & setup" and click "Install Bambu Studio". {app} downloads Bambu Studio (230-470 MB depending
 on platform) into its data folder and slices with it headlessly, so weights and print times are exactly what Bambu
 Studio shows. PrusaSlicer is available as a fallback engine on the same page. Nothing is installed system-wide.
 Linux: Bambu Studio needs the GTK/WebKit system libraries (the Setup page names the apt command).
 
-Where your data is: NOT in this folder. GRMLN keeps its database, meshes, backups, logs and the slicer installs in
-your user data directory (Windows %LOCALAPPDATA%\\GRMLN, macOS ~/Library/Application Support/GRMLN, Linux
-~/.local/share/grmln). Jobs & setup shows the exact path.
+Where your data is: NOT in this folder. {app} keeps its database, meshes, backups, logs and the slicer installs in
+your user data directory (Windows %LOCALAPPDATA%\\{app}, macOS ~/Library/Application Support/{app}, Linux
+~/.local/share/{slug}). Jobs & setup shows the exact path.
 
-Updating: unzip the new version anywhere, start it, delete the old folder. That is all - the new version finds your
-data on its own. Coming from SliceBudget 0.4.x: the first start of GRMLN finds the old version's data/ folder next to
-it (or inside its own folder) and adopts it automatically.
+Updating: Jobs & setup > Updates installs new versions in place (data stays where it is), or unzip the new version
+anywhere, start it and delete the old folder - the new version finds your data on its own. Coming from GRMLN or
+SliceBudget: the first start of {app} adopts the old name's data folder (or an old version's data/ folder next to it)
+automatically.
 
-Portable mode: create an empty file named portable.txt in this folder before the first start and GRMLN keeps its data
+Portable mode: create an empty file named portable.txt in this folder before the first start and {app} keeps its data
 in here instead (USB-stick style).
 
 Tips: drop a Bambu Studio / PrusaSlicer .3mf project onto Printed parts to import every object with its settings and
@@ -138,7 +143,7 @@ has re-sliced; Undo/Redo (Ctrl/Cmd+Z) covers every edit; Calculators hold the be
 
 def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
     triple, tags, site_rel, launcher = TARGETS[name]
-    stage = cache.parent / "stage" / f"GRMLN-{APP_VERSION}-{name}"
+    stage = cache.parent / "stage" / f"{APP}-{APP_VERSION}-{name}"
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
@@ -169,10 +174,10 @@ def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
         vj = stage / "slicebudget" / "version.json"; d = json.loads(vj.read_text()); d["repo"] = REPO; vj.write_text(json.dumps(d) + "\n")
     fname, body = LAUNCHERS[launcher]
     (stage / fname).write_text(body, newline="")
-    (stage / "README.txt").write_text(README.format(version=APP_VERSION))
-    (stage / "LICENSES.txt").write_text("GRMLN bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nBambu Studio (AGPL-3.0, https://github.com/bambulab/BambuStudio) and/or PrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) are downloaded separately on first run.\n")
+    (stage / "README.txt").write_text(README.format(version=APP_VERSION, app=APP, slug=SLUG, tagline=TAGLINE))
+    (stage / "LICENSES.txt").write_text(f"{APP} bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nBambu Studio (AGPL-3.0, https://github.com/bambulab/BambuStudio) and/or PrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) are downloaded separately on first run.\n")
     # zip with executable bits for posix launchers
-    zpath = out_dir / f"GRMLN-{APP_VERSION}-{name}.zip"
+    zpath = out_dir / f"{APP}-{APP_VERSION}-{name}.zip"
     log(f"[{name}] zipping -> {zpath.name}")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in sorted(stage.rglob("*")):

@@ -1,5 +1,5 @@
 name: Release
-# Push a tag like v0.6.0 and this builds the four platform zips and publishes them as a GitHub Release.
+# Push a tag like v0.7.0 and this builds the four platform zips and publishes them as a GitHub Release.
 # The in-app updater and install.sh / install.ps1 read releases from this repository.
 on:
   push:

@@ -15,6 +15,8 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 
+from .paths import APP_NAME as _APP
+
 
 # ---------------------------------------------------------------- loading
 def load_mesh(path: str | Path, data: bytes | None = None) -> np.ndarray:
@@ -222,7 +224,7 @@ def load_3mf_objects(data: bytes) -> list[dict]:
 
 
 def slicer_settings_to_params(settings: dict, defaults: dict | None = None) -> dict:
-    """Bambu Studio / PrusaSlicer keys -> SliceBudget profile params (only what is present)."""
+    """Bambu Studio / PrusaSlicer keys -> app profile params (only what is present)."""
     src = dict(defaults or {}); src.update(settings or {})
     out = {}
 
@@ -402,7 +404,7 @@ def place_on_bed(tri: np.ndarray, center_xy=(0.0, 0.0)) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- writing
-def write_stl(tri: np.ndarray, path: str | Path, name: bytes = b"SliceBudget") -> None:
+def write_stl(tri: np.ndarray, path: str | Path, name: bytes = b"MakeWeight") -> None:
     tri = np.ascontiguousarray(tri, dtype=np.float32)
     n = len(tri)
     normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
@@ -423,7 +425,7 @@ def to_binary_stl_bytes(tri: np.ndarray) -> bytes:
     ln = np.linalg.norm(normals, axis=1, keepdims=True); ln[ln == 0] = 1
     rec = np.zeros(len(tri32), dtype=np.dtype([("n", "<f4", 3), ("v", "<f4", (3, 3)), ("a", "<u2")]))
     rec["n"] = (normals / ln).astype(np.float32); rec["v"] = tri32
-    buf.write(b"SliceBudget".ljust(80, b"\0")); buf.write(struct.pack("<I", len(tri32))); buf.write(rec.tobytes())
+    buf.write(_APP.encode().ljust(80, b"\0")); buf.write(struct.pack("<I", len(tri32))); buf.write(rec.tobytes())
     return buf.getvalue()
 
 
@@ -465,7 +467,7 @@ def prusa_3mf_with_modifiers(tri: np.ndarray, name: str, modifiers: list[dict]) 
     verts, faces = _indexed(all_tri, tol=1e-5)
     model = io.StringIO()
     model.write('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">\n')
-    model.write(' <metadata name="Application">SliceBudget</metadata>\n <resources>\n  <object id="1" type="model">\n   <mesh>\n    <vertices>\n')
+    model.write(' <metadata name="Application">' + _APP + '</metadata>\n <resources>\n  <object id="1" type="model">\n   <mesh>\n    <vertices>\n')
     for v in verts:
         model.write(f'     <vertex x="{v[0]:.5f}" y="{v[1]:.5f}" z="{v[2]:.5f}"/>\n')
     model.write('    </vertices>\n    <triangles>\n')
@@ -510,7 +512,7 @@ def bambu_3mf_with_modifiers(tri: np.ndarray, name: str, modifiers: list[dict], 
     root_id = nid
     model = io.StringIO()
     model.write('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">\n')
-    model.write(' <metadata name="Application">SliceBudget</metadata>\n <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n')
+    model.write(' <metadata name="Application">' + _APP + '</metadata>\n <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n')
     for (pid, subtype, pname, ptri, settings) in parts:
         verts, faces = _indexed(ptri, tol=1e-5)
         model.write(f'  <object id="{pid}" name="{escape(pname)}" type="model">\n   <mesh>\n    <vertices>\n')

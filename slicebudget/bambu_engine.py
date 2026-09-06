@@ -233,7 +233,7 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
                         zf.extract(info, target)
                     else:
                         raise RuntimeError(f"Could not unpack {info.filename}: {e}. The install folder path is {len(str(bd))} characters long; "
-                                           "Windows limits paths to 260 unless long paths are enabled — try moving GliceBudget to a shorter path such as C:\\SliceBudget.") from e
+                                           "Windows limits paths to 260 unless long paths are enabled — try moving the app to a shorter path such as C:\\MakeWeight.") from e
                 n += 1
                 if k % 500 == 0:
                     prog(f"Unpacking {k}/{len(infos)}", 0.85 + 0.08 * k / max(1, len(infos)))
@@ -396,8 +396,8 @@ class Presets:
         if mach_name not in cp:
             cp.append(mach_name)
         d["compatible_printers"] = cp
-        d["name"] = "GRMLN"
-        d["print_settings_id"] = "GRMLN"
+        d["name"] = "MakeWeight"
+        d["print_settings_id"] = "MakeWeight"
         return d
 
     def write(self, work: Path, params: dict, filament: dict, machine: str) -> tuple[Path, Path, Path]:

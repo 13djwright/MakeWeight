@@ -11,6 +11,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from . import meshio, orient, profiles
+from .paths import APP_NAME as _APP
 from .db import loads, now
 
 COLS = ["Qty", "Price", "Total", "Description", "Purpose / Notes", "Weight (g)", "Total (g)", "Measured (g)", "Source", "Dimensions", "Link"]
@@ -291,7 +292,7 @@ def bambu_3mf(app, det: dict) -> bytes:
         x += sx + 6; row_h = max(row_h, sy)
     model = io.StringIO()
     model.write('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">\n')
-    model.write(' <metadata name="Application">SliceBudget</metadata>\n <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n')
+    model.write(' <metadata name="Application">' + _APP + '</metadata>\n <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n')
     for (o, dx, dy) in placed:
         oid_, name, tri, params, ext, fname = o
         verts, faces = meshio._indexed(tri)
