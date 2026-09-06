@@ -835,6 +835,7 @@
     };
     let sweepCard = buildSweep(p);
     left.append(sweepCard);
+    const cur = p.slice;
     // background refresh while slices land: swap only the sweep card and the header status, never the viewer
     S.partRefresh = async () => {
       const p2 = await api('GET', `parts/${pid}`);
