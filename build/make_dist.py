@@ -74,6 +74,8 @@ def find_runtime_assets():
 
 
 def pip_download(platform_tags: list[str], dest: Path):
+    if dest.exists():
+        shutil.rmtree(dest)      # a cached older/newer wheel of the same package must not be installed alongside
     dest.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", "pip", "download", "--only-binary=:all:", "--python-version", PY_SERIES, "--implementation", "cp", "--abi", "cp312", "-d", str(dest), "--no-deps", "-q"]
     for t in platform_tags:
