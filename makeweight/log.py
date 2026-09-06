@@ -1,4 +1,4 @@
-"""One log for the whole app: data/logs/slicebudget.log (rotating), mirrored to the console.
+"""One log for the whole app: data/logs/<slug>.log (rotating), mirrored to the console.
 
 Everything that can fail on a machine we cannot see goes through here — installs, every slicer subprocess,
 job failures, HTTP 500s, unhandled thread exceptions — so the Diagnostics card can show it and the bundle can
@@ -19,7 +19,7 @@ import time
 import zipfile
 from pathlib import Path
 
-log = logging.getLogger("slicebudget")
+log = logging.getLogger("makeweight")
 _LOG_FILE: Path | None = None
 _RING: list[str] = []          # last lines, for the API even if the file is unreadable
 _RING_MAX = 2000
@@ -38,12 +38,17 @@ class _RingHandler(logging.Handler):
                 del _RING[: len(_RING) - _RING_MAX]
 
 
+def _slug() -> str:
+    from . import paths
+    return paths.APP_SLUG
+
+
 def setup(data_dir: Path) -> Path:
     """Call once at startup. Returns the log file path."""
     global _LOG_FILE
     logs = Path(data_dir) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    _LOG_FILE = logs / "slicebudget.log"
+    _LOG_FILE = logs / f"{_slug()}.log"
     fmt = logging.Formatter("%(asctime)s %(levelname)-5s %(threadName)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S")
     log.setLevel(logging.DEBUG)
     log.handlers.clear()
@@ -103,7 +108,7 @@ def environment(app=None) -> dict:
         "app_version": _app_version(), "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "os": platform.platform(), "machine": platform.machine(), "python": sys.version.split()[0], "executable": sys.executable,
         "data_root": str(root), "install_dir": str(paths.install_dir()), "portable": paths.is_portable(), "root_path_length": len(str(root)), "cwd": os.getcwd(),
-        "env": {k: os.environ.get(k) for k in ("MAKEWEIGHT_HOME", "GRMLN_HOME", "SLICEBUDGET_HOME", "SLICEBUDGET_PORT", "SSL_CERT_FILE", "PATH") if os.environ.get(k)},
+        "env": {k: os.environ.get(k) for k in ("MAKEWEIGHT_HOME", "MAKEWEIGHT_PORT", "SSL_CERT_FILE", "PATH") if os.environ.get(k)},
     }
     try:
         du = shutil.disk_usage(str(root))
@@ -144,7 +149,7 @@ def bundle(app=None) -> bytes:
         z.writestr("environment.json", json.dumps(environment(app), indent=2, default=str))
         z.writestr("recent.log", "\n".join(tail(2000)))
         if _LOG_FILE and _LOG_FILE.parent.exists():
-            for f in sorted(_LOG_FILE.parent.glob("slicebudget.log*")):
+            for f in sorted(_LOG_FILE.parent.glob(_LOG_FILE.name + "*")):
                 try:
                     z.write(f, f"logs/{f.name}")
                 except OSError:

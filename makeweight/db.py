@@ -1,4 +1,4 @@
-"""SQLite storage for MakeWeight (package name kept as slicebudget).
+"""SQLite storage for MakeWeight.
 
 One database file, WAL mode, a thin helper layer. Flexible per-row detail is kept
 as JSON text in *_json columns so the schema stays small.

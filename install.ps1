@@ -2,7 +2,7 @@
 #   irm https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.ps1 | iex
 # Downloads the latest release into %LOCALAPPDATA%\Programs\<App> (override with $env:MAKEWEIGHT_DIR), clears the
 # "downloaded from the internet" mark so SmartScreen stays quiet, and starts it.
-# $App / $Tagline mirror slicebudget/brand.json — run `python3 build/sync_brand.py` after changing that file.
+# $App / $Tagline mirror makeweight/brand.json — run `python3 build/sync_brand.py` after changing that file.
 $ErrorActionPreference = "Stop"
 $App = "MakeWeight"
 $Tagline = "make weight, with the numbers to prove it"

@@ -370,7 +370,7 @@
       { label: 'Bambu Studio process presets (zip of JSON)', onClick: dl('presets') },
       { label: 'Bambu Studio project (.3mf, beta)', onClick: dl('bambu3mf') },
       '-',
-      { label: 'Robot archive (.slicebudget.zip)', onClick: dl('archive') },
+      { label: 'Robot archive (.makeweight.zip)', onClick: dl('archive') },
     ]);
   }
 
@@ -416,7 +416,7 @@
       } }]);
   }
   function importArchive() {
-    const inp = h('input', { type: 'file', accept: '.zip,.slicebudget' });
+    const inp = h('input', { type: 'file', accept: '.zip,.makeweight' });
     inp.addEventListener('change', async () => {
       const f = inp.files[0]; if (!f) return;
       try { const r = await api('POST', 'import/archive', await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } }); await loadState(); await loadRobot(r.id); go('sheet'); toast('Imported ' + r.name); } catch (e) { fail(e); }
@@ -1513,7 +1513,7 @@
         const r = await api('GET', 'log?n=400');
         let lines = r.lines || [];
         if (lvl.value === 'warn') lines = lines.filter(l => / (WARN|ERROR|CRITICAL)\S* /.test(l));
-        logPre.textContent = lines.slice(-250).map(l => l.replace(' slicebudget:', '').replace(/ Thread-\d+ \(process_request_thread\)/, ' http')).join('\n') || '(empty)';
+        logPre.textContent = lines.slice(-250).map(l => l.replace(' makeweight:', '').replace(/ Thread-\d+ \(process_request_thread\)/, ' http')).join('\n') || '(empty)';
         logPre.scrollTop = logPre.scrollHeight;
         logPre.dataset.file = r.file || '';
       } catch (e) { logPre.textContent = 'could not load the log: ' + e.message; }
@@ -1525,7 +1525,7 @@
         h('button', { class: 'btn small primary', onClick: () => window.open('/api/diagnostics') }, 'Download diagnostics bundle'))),
       h('p', { class: 'hint', style: { marginTop: 0 } }, 'Installs, every slicer run, job failures and server errors are recorded here. If something fails, download the bundle (log + environment facts, no robot data) and send it along with the bug report.'),
       logPre,
-      h('p', { class: 'hint' }, 'Full log file: ', h('span', { class: 'mono', style: { fontSize: '11px' } }, (st.root || '') + '/data/logs/slicebudget.log')));
+      h('p', { class: 'hint' }, 'Full log file: ', h('span', { class: 'mono', style: { fontSize: '11px' } }, (st.root || '') + '/data/logs/' + (st.app ? st.app.slug : 'makeweight') + '.log')));
     left.append(diag);
     drawLog();
     if (S.logTimer) clearInterval(S.logTimer);

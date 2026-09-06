@@ -15,7 +15,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import bambu_engine, exports, log as applog, meshio, optimizer, orient, profiles, slicer_engine
+from . import bambu_engine, exports, log as applog, meshio, optimizer, orient, paths, profiles, slicer_engine
 from .log import log
 from .db import DB, loads, now
 from .jobs import Events, JobManager
@@ -33,8 +33,9 @@ class App:
         self.mesh_dir.mkdir(parents=True, exist_ok=True)
         if not applog.log_file():
             applog.setup(self.data_dir)
-        log.info("%s %s starting; data=%s; %s; python %s", __import__("slicebudget.paths", fromlist=["APP_NAME"]).APP_NAME, applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
-        self.db = DB(self.data_dir / "slicebudget.db")
+        log.info("%s %s starting; data=%s; %s; python %s", paths.APP_NAME, applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
+        paths.migrate_db_filename(self.data_dir, log)
+        self.db = DB(self.data_dir / paths.DB_FILE)
         self.events = Events()
         cores = os.cpu_count() or 2
         workers = self.db.setting("workers") or max(1, cores // 2)
@@ -235,16 +236,16 @@ class App:
     def backup(self) -> str:
         bdir = self.data_dir / "backups"
         bdir.mkdir(exist_ok=True)
-        name = time.strftime("slicebudget-%Y%m%d-%H%M%S")
+        name = time.strftime(f"{paths.APP_SLUG}-%Y%m%d-%H%M%S")
         tmp = bdir / (name + "-db")
         tmp.mkdir(exist_ok=True)
         import sqlite3
-        dst = sqlite3.connect(str(tmp / "slicebudget.db"))
+        dst = sqlite3.connect(str(tmp / paths.DB_FILE))
         self.db._conn.backup(dst); dst.close()
         shutil.copytree(self.mesh_dir, tmp / "meshes", dirs_exist_ok=True)
         out = shutil.make_archive(str(bdir / name), "zip", tmp)
         shutil.rmtree(tmp)
-        for old in sorted(bdir.glob("slicebudget-*.zip"))[:-30]:
+        for old in sorted(bdir.glob(f"{paths.APP_SLUG}-*.zip"))[:-30]:
             old.unlink()
         self.db.set_setting("last_backup", time.time())
         return out
@@ -288,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):  # quiet
-        if os.environ.get("SLICEBUDGET_DEBUG"):
+        if os.environ.get("MAKEWEIGHT_DEBUG"):
             super().log_message(fmt, *args)
 
     # -- plumbing
@@ -400,7 +401,7 @@ class Handler(BaseHTTPRequestHandler):
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
-                "robots": self._robot_list(), "update_repo": app.updater.repo(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": __import__("slicebudget.paths", fromlist=["BRAND"]).BRAND, "install_dir": str(__import__("slicebudget.paths", fromlist=["install_dir"]).install_dir()), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable(),
+                "robots": self._robot_list(), "update_repo": app.updater.repo(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": paths.BRAND, "install_dir": str(paths.install_dir()), "portable": paths.is_portable(),
                 "classes": CLASSES,
             })
         if path == "settings" and m == "PUT":
@@ -436,7 +437,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": f"Could not check for updates: {e}"}, 502 if "quiet" not in qs else 200)
         if path == "update/status" and m == "GET":
             return self._json({"state": app.updater.state, "latest": app.updater.latest, "current": current_version(), "target": update_target(),
-                               "repo": app.updater.repo(), "old_versions": app.updater.old_versions(), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable()})
+                               "repo": app.updater.repo(), "old_versions": app.updater.old_versions(), "portable": paths.is_portable()})
         if path == "update/start" and m == "POST":
             def stop():
                 try:
@@ -450,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
             n = int(qs.get("n") or 400)
             return self._json({"lines": applog.tail(n), "file": str(applog.log_file() or "")})
         if path == "diagnostics" and m == "GET":
-            return self._bytes(applog.bundle(app), "application/zip", f"slicebudget-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.zip")
+            return self._bytes(applog.bundle(app), "application/zip", f"{paths.APP_SLUG}-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.zip")
         if path == "environment" and m == "GET":
             return self._json(applog.environment(app))
         if path == "slicer/install" and m == "POST":
@@ -1144,7 +1145,7 @@ class Handler(BaseHTTPRequestHandler):
         if kind == "purchase":
             return self._bytes(exports.purchase_csv(det).encode("utf-8-sig"), "text/csv", f"{safe}-to-purchase.csv")
         if kind == "archive":
-            return self._bytes(exports.robot_archive(app, rid), "application/zip", f"{safe}.slicebudget.zip")
+            return self._bytes(exports.robot_archive(app, rid), "application/zip", f"{safe}.{paths.APP_SLUG}.zip")
         if kind == "bambu3mf":
             return self._bytes(exports.bambu_3mf(app, det), "application/vnd.ms-package.3dmanufacturing-3dmodel+xml", f"{safe}.3mf")
         if kind == "presets":

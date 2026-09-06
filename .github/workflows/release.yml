@@ -19,7 +19,7 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           python - "$TAG" "$GITHUB_REPOSITORY" <<'PY'
           import json, sys, pathlib
-          p = pathlib.Path("slicebudget/version.json"); d = json.loads(p.read_text())
+          p = pathlib.Path("makeweight/version.json"); d = json.loads(p.read_text())
           if sys.argv[1] and sys.argv[1][0].isdigit(): d["version"] = sys.argv[1]
           d["repo"] = sys.argv[2]; p.write_text(json.dumps(d) + "\n"); print(d)
           PY

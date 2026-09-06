@@ -186,7 +186,7 @@ def bambu_presets_zip(app, det: dict) -> bytes:
 def robot_archive(app, rid: int) -> bytes:
     db = app.db
     det = app.robot_detail(rid)
-    data = {"format": "slicebudget-robot", "version": 1, "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    data = {"format": "makeweight-robot", "version": 1, "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "robot": {k: det[k] for k in ("name", "weight_class_g", "class_name", "margin_g", "nozzle", "notes")},
             "sections": [], "events": db.q("SELECT date,title,placing,notes,total_snapshot_g FROM events WHERE robot_id=?", [rid]),
             "profiles": {}, "filaments": {}, "meshes": {}}
@@ -219,7 +219,7 @@ def robot_archive(app, rid: int) -> bytes:
 
 
 def import_archive(handler, data: bytes) -> dict:
-    """Recreate a robot from a .slicebudget.zip. Returns the new robot row."""
+    """Recreate a robot from a .makeweight.zip archive. Returns the new robot row."""
     app = handler.app; db = app.db
     z = zipfile.ZipFile(io.BytesIO(data))
     meta = json.loads(z.read("robot.json"))

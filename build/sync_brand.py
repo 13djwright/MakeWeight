@@ -1,7 +1,7 @@
-"""Propagate slicebudget/brand.json into the few files that cannot read it at runtime (installers, README title).
+"""Propagate makeweight/brand.json into the few files that cannot read it at runtime (installers, README title).
 
 Renaming the app:
-  1. edit slicebudget/brand.json  (move the old name into "legacy_names" so existing users' data is adopted)
+  1. edit makeweight/brand.json  (move the old name into "legacy_names" so existing users' data is adopted)
   2. python3 build/sync_brand.py
   3. commit; the next release ships zips/launchers/folders under the new name.
 Everything else (UI title, data directory, updater asset names, launcher names, README.txt inside the zip) reads
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-B = json.loads((ROOT / "slicebudget" / "brand.json").read_text(encoding="utf-8"))
+B = json.loads((ROOT / "makeweight" / "brand.json").read_text(encoding="utf-8"))
 APP, SLUG, TAG = B["name"], B.get("slug") or B["name"].lower(), B.get("tagline", "")
 ENV = re.sub(r"[^A-Z0-9]", "", APP.upper())
 

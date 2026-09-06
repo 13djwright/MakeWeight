@@ -1,4 +1,4 @@
-"""python -m slicebudget  — start the local service and open the browser."""
+"""python -m makeweight  — start the local service and open the browser."""
 from __future__ import annotations
 
 import argparse
@@ -23,8 +23,8 @@ def _ssl_certs():
 
 def main():
     _ssl_certs()
-    ap = argparse.ArgumentParser(prog="slicebudget")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("SLICEBUDGET_PORT", 8765)))
+    ap = argparse.ArgumentParser(prog="makeweight")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("MAKEWEIGHT_PORT", 8765)))
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--root", default=None, help="folder holding data/ and slicer/ (default: app folder)")
     ap.add_argument("--no-browser", action="store_true")

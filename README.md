@@ -30,7 +30,7 @@ Open Anyway).
 
 Jobs & setup → **Check for updates** → **Update now**. The app downloads the new version itself, starts it and hands
 over; your data is in your user data folder and untouched. Older version folders are listed on that page and are safe
-to delete. Coming from an older name (GRMLN, SliceBudget): the first start adopts that data folder automatically.
+to delete. Data from any earlier version (or an earlier name of the app) is adopted automatically on first start.
 
 ## First run
 
@@ -44,13 +44,13 @@ stamps the version and repository into the app, and publishes a Release with the
 
 ## Renaming the app
 
-The name lives in one place, `slicebudget/brand.json` (`name`, `slug`, `tagline`, `legacy_names`). Edit it, move the
+The name lives in one place, `makeweight/brand.json` (`name`, `slug`, `tagline`, `legacy_names`). Edit it, move the
 old name into `legacy_names`, run `python3 build/sync_brand.py`, commit. The UI, data directory, launchers, zip names,
 updater and installers all follow; existing users' data is adopted from the old name's folder on first start.
 
 ## Layout
 
-- `slicebudget/` — the app (Python 3.12 standard library + numpy + openpyxl; the package keeps its original name)
+- `makeweight/` — the app (Python 3.12 standard library + numpy + openpyxl)
 - `build/make_dist.py` — packages an embedded Python runtime + wheels + app + launcher per platform
 - `build/sync_brand.py` — pushes `brand.json` into the installers and this README's title
 - `install.sh`, `install.ps1` — curl / irm installers that read the latest Release

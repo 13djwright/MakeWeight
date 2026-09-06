@@ -1,4 +1,4 @@
-"""Build per-platform app zips (name from slicebudget/brand.json): embedded CPython (python-build-standalone) + wheels + app + launcher.
+"""Build per-platform app zips (name from makeweight/brand.json): embedded CPython (python-build-standalone) + wheels + app + launcher.
 
 Usage:  python3 make_dist.py --out DIST_DIR [--targets windows-x86_64,macos-arm64,macos-x86_64,linux-x86_64]
 Needs network access to GitHub releases and PyPI. Pure stdlib + pip.
@@ -21,8 +21,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-APP_VERSION = json.loads((ROOT / "slicebudget" / "version.json").read_text())["version"] if (ROOT / "slicebudget" / "version.json").exists() else "0.1.0"
-_BRAND = json.loads((ROOT / "slicebudget" / "brand.json").read_text(encoding="utf-8"))
+APP_VERSION = json.loads((ROOT / "makeweight" / "version.json").read_text())["version"] if (ROOT / "makeweight" / "version.json").exists() else "0.1.0"
+_BRAND = json.loads((ROOT / "makeweight" / "brand.json").read_text(encoding="utf-8"))
 APP = _BRAND["name"]; SLUG = _BRAND.get("slug") or APP.lower(); TAGLINE = _BRAND.get("tagline", "")
 
 TARGETS = {
@@ -43,7 +43,7 @@ def log(*a):
 
 
 def gh_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "SliceBudget-build", "Accept": "application/vnd.github+json"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP}-build", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read().decode())
 
@@ -52,7 +52,7 @@ def download(url, dest: Path):
     if dest.exists() and dest.stat().st_size > 0:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "SliceBudget-build"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP}-build"})
     with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f, 1 << 20)
     return dest
@@ -96,17 +96,17 @@ LAUNCHERS = {
     "windows": (f"{APP}.bat", "\r\n".join([
         "@echo off", f"title {APP}", "cd /d \"%~dp0\"",
         f"echo Starting {APP} ... this window stays open while it runs. Close it to stop.",
-        "\"%~dp0python\\python.exe\" -m slicebudget %*",
+        "\"%~dp0python\\python.exe\" -m makeweight %*",
         "if errorlevel 1 pause", ""])),
     "macos": (f"{APP}.command", "\n".join([
         "#!/bin/bash", "cd \"$(dirname \"$0\")\"",
         f"echo \"Starting {APP} ... keep this window open while it runs (Ctrl-C to stop).\"",
         "xattr -dr com.apple.quarantine python 2>/dev/null",
-        "exec ./python/bin/python3 -m slicebudget \"$@\"", ""])),
+        "exec ./python/bin/python3 -m makeweight \"$@\"", ""])),
     "linux": (f"{SLUG}.sh", "\n".join([
         "#!/bin/bash", "cd \"$(dirname \"$0\")\"",
         f"echo \"Starting {APP} ... keep this terminal open while it runs (Ctrl-C to stop).\"",
-        "exec ./python/bin/python3 -m slicebudget \"$@\"", ""])),
+        "exec ./python/bin/python3 -m makeweight \"$@\"", ""])),
 }
 
 README = """{app} {version}  -  {tagline}
@@ -131,9 +131,8 @@ your user data directory (Windows %LOCALAPPDATA%\\{app}, macOS ~/Library/Applica
 ~/.local/share/{slug}). Jobs & setup shows the exact path.
 
 Updating: Jobs & setup > Updates installs new versions in place (data stays where it is), or unzip the new version
-anywhere, start it and delete the old folder - the new version finds your data on its own. Coming from GRMLN or
-SliceBudget: the first start of {app} adopts the old name's data folder (or an old version's data/ folder next to it)
-automatically.
+anywhere, start it and delete the old folder - the new version finds your data on its own (including data left by an
+older version or an earlier name of the app).
 
 Portable mode: create an empty file named portable.txt in this folder before the first start and {app} keeps its data
 in here instead (USB-stick style).
@@ -172,9 +171,9 @@ def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
         if d.is_dir():
             shutil.rmtree(d, ignore_errors=True)
     log(f"[{name}] app")
-    shutil.copytree(ROOT / "slicebudget", stage / "slicebudget", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copytree(ROOT / "makeweight", stage / "makeweight", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     if REPO:
-        vj = stage / "slicebudget" / "version.json"; d = json.loads(vj.read_text()); d["repo"] = REPO; vj.write_text(json.dumps(d) + "\n")
+        vj = stage / "makeweight" / "version.json"; d = json.loads(vj.read_text()); d["repo"] = REPO; vj.write_text(json.dumps(d) + "\n")
     fname, body = LAUNCHERS[launcher]
     (stage / fname).write_text(body, newline="")
     (stage / "README.txt").write_text(README.format(version=APP_VERSION, app=APP, slug=SLUG, tagline=TAGLINE))

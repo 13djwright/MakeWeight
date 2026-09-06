@@ -3,7 +3,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.sh | sh
 # Downloads the latest release for this machine into ~/Applications/<App> (override with MAKEWEIGHT_DIR) and starts it.
 # Files fetched this way carry no macOS quarantine flag, so there is no "unidentified developer" prompt.
-# APP / SLUG mirror slicebudget/brand.json — run `python3 build/sync_brand.py` after changing that file.
+# APP / SLUG mirror makeweight/brand.json — run `python3 build/sync_brand.py` after changing that file.
 set -e
 APP="MakeWeight"
 SLUG="makeweight"
