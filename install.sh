@@ -1,4 +1,5 @@
 #!/bin/sh
+# Copyright (C) 2026 Devin Wright (13djwright) — SPDX-License-Identifier: GPL-3.0-or-later (see LICENSE)
 # Installer for macOS and Linux.
 #   curl -fsSL https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.sh | sh
 # Downloads the latest release for this machine into ~/Applications/<App> (override with MAKEWEIGHT_DIR) and starts it.

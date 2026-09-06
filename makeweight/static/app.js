@@ -1,3 +1,6 @@
+/* MakeWeight — make weight, with the numbers to prove it
+   Copyright (C) 2026 Devin Wright (13djwright)
+   SPDX-License-Identifier: GPL-3.0-or-later  (GNU GPL v3 or later; see the LICENSE file) */
 /* MakeWeight UI — vanilla JS single page app. (Brand strings come from /api/state .app / brand.json.) */
 (function () {
   'use strict';
@@ -343,7 +346,10 @@
       : h('span', null, h('b', { style: { color: 'var(--warn)' } }, 'No slicer installed'), h('br'), 'Open Jobs & setup');
     const versionLine = h('div', { style: { marginTop: '6px' } }, `${st.app ? st.app.name : ''} ${st.version}`,
       S.updateAvail ? h('a', { href: '#/jobs', class: 'pill ok', style: { marginLeft: '6px', textDecoration: 'none' }, title: 'A newer version is on GitHub — open Jobs & setup to install it' }, `↑ ${S.updateAvail} available`) : null);
-    nav.append(h('div', { class: 'foot' }, slicerLine, versionLine));
+    const a = st.app || {};
+    const legalLine = a.author ? h('div', { style: { marginTop: '4px' } }, `© ${a.copyright_year || ''} ${a.author}`, h('br'),
+      h('a', { href: a.repo_url || '#', target: '_blank', rel: 'noopener', style: { color: 'inherit' }, title: 'Free software under the GNU GPL v3 or later — source, license and issues on GitHub' }, `${a.license || 'GPL-3.0-or-later'} · source ↗`)) : null;
+    nav.append(h('div', { class: 'foot' }, slicerLine, versionLine, legalLine));
   }
   // Once a day, quietly ask GitHub whether a newer release exists (only when an update source is configured).
   async function autoUpdateCheck() {

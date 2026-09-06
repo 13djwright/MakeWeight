@@ -2,5 +2,12 @@
   "name": "MakeWeight",
   "slug": "makeweight",
   "tagline": "make weight, with the numbers to prove it",
-  "legacy_names": ["GRMLN", "SliceBudget"]
+  "legacy_names": [
+    "GRMLN",
+    "SliceBudget"
+  ],
+  "author": "Devin Wright (13djwright)",
+  "copyright_year": "2026",
+  "license": "GPL-3.0-or-later",
+  "repo_url": "https://github.com/13djwright/MakeWeight"
 }

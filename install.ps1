@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Devin Wright (13djwright) — SPDX-License-Identifier: GPL-3.0-or-later (see LICENSE)
 # Installer for Windows (PowerShell).
 #   irm https://raw.githubusercontent.com/13djwright/MakeWeight/main/install.ps1 | iex
 # Downloads the latest release into %LOCALAPPDATA%\Programs\<App> (override with $env:MAKEWEIGHT_DIR), clears the

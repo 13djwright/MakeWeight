@@ -54,3 +54,13 @@ updater and installers all follow; existing users' data is adopted from the old 
 - `build/make_dist.py` — packages an embedded Python runtime + wheels + app + launcher per platform
 - `build/sync_brand.py` — pushes `brand.json` into the installers and this README's title
 - `install.sh`, `install.ps1` — curl / irm installers that read the latest Release
+
+## License
+
+Copyright © 2026 Devin Wright (13djwright).
+
+MakeWeight is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later
+version — see [LICENSE](LICENSE). It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY.
+Every copy or derivative must keep this copyright notice and stay under the GPL. Bambu Studio and PrusaSlicer are
+separate programs (AGPL-3.0, downloaded on first run), not part of this distribution.

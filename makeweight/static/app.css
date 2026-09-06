@@ -1,3 +1,6 @@
+/* MakeWeight — make weight, with the numbers to prove it
+   Copyright (C) 2026 Devin Wright (13djwright)
+   SPDX-License-Identifier: GPL-3.0-or-later  (GNU GPL v3 or later; see the LICENSE file) */
 :root, :root[data-theme="light"]{
   --bg:#EEF0EC; --panel:#FFFFFF; --panel2:#F5F6F3; --ink:#1B1F24; --ink2:#4A5159; --ink3:#7F868E; --rule:#D7DBD5; --rule2:#E6E9E3;
   --accent:#D95F1B; --accent-ink:#B04B12; --accent-soft:#FBE9DD;

@@ -1,3 +1,9 @@
+# MakeWeight — make weight, with the numbers to prove it
+# Copyright (C) 2026 Devin Wright (13djwright)
+# SPDX-License-Identifier: GPL-3.0-or-later
+# This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+# License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any
+# later version. It is distributed WITHOUT ANY WARRANTY; see the LICENSE file for details.
 """Build per-platform app zips (name from makeweight/brand.json): embedded CPython (python-build-standalone) + wheels + app + launcher.
 
 Usage:  python3 make_dist.py --out DIST_DIR [--targets windows-x86_64,macos-arm64,macos-x86_64,linux-x86_64]
@@ -111,6 +117,7 @@ LAUNCHERS = {
 
 README = """{app} {version}  -  {tagline}
 ==================================================
+Copyright (C) {year} {author}. Free software, GNU GPL v3 or later - see LICENSE. Source: {repo}
 
 Start it:
   Windows : double-click {app}.bat
@@ -176,8 +183,9 @@ def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
         vj = stage / "makeweight" / "version.json"; d = json.loads(vj.read_text()); d["repo"] = REPO; vj.write_text(json.dumps(d) + "\n")
     fname, body = LAUNCHERS[launcher]
     (stage / fname).write_text(body, newline="")
-    (stage / "README.txt").write_text(README.format(version=APP_VERSION, app=APP, slug=SLUG, tagline=TAGLINE))
-    (stage / "LICENSES.txt").write_text(f"{APP} bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nBambu Studio (AGPL-3.0, https://github.com/bambulab/BambuStudio) and/or PrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) are downloaded separately on first run.\n")
+    (stage / "README.txt").write_text(README.format(version=APP_VERSION, app=APP, slug=SLUG, tagline=TAGLINE, year=_BRAND.get('copyright_year', ''), author=_BRAND.get('author', ''), repo=_BRAND.get('repo_url', '')))
+    shutil.copy2(ROOT / "LICENSE", stage / "LICENSE")
+    (stage / "LICENSES.txt").write_text(f"{APP} is Copyright (C) {_BRAND.get('copyright_year', '')} {_BRAND.get('author', '')} and is free software under the GNU General Public License v3 or later (see LICENSE; source: {_BRAND.get('repo_url', '')}).\n{APP} bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nBambu Studio (AGPL-3.0, https://github.com/bambulab/BambuStudio) and/or PrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) are downloaded separately on first run.\n")
     # zip with executable bits for posix launchers
     zpath = out_dir / f"{APP}-{APP_VERSION}-{name}.zip"
     log(f"[{name}] zipping -> {zpath.name}")
