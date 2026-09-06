@@ -31,6 +31,7 @@ TARGETS = {
     "linux-x86_64": ("x86_64-unknown-linux-gnu", ["manylinux_2_17_x86_64", "manylinux2014_x86_64", "manylinux_2_28_x86_64"], "python/lib/python3.12/site-packages", "linux"),
 }
 PY_SERIES = "3.12"
+REPO = ""
 WHEELS = ["numpy>=1.26,<3", "openpyxl>=3.1,<4", "et_xmlfile>=1.1", "certifi"]
 
 
@@ -164,6 +165,8 @@ def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
             shutil.rmtree(d, ignore_errors=True)
     log(f"[{name}] app")
     shutil.copytree(ROOT / "slicebudget", stage / "slicebudget", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if REPO:
+        vj = stage / "slicebudget" / "version.json"; d = json.loads(vj.read_text()); d["repo"] = REPO; vj.write_text(json.dumps(d) + "\n")
     fname, body = LAUNCHERS[launcher]
     (stage / fname).write_text(body, newline="")
     (stage / "README.txt").write_text(README.format(version=APP_VERSION))
@@ -195,7 +198,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--targets", default=",".join(TARGETS))
     ap.add_argument("--cache", default=str(HERE / "_cache"))
+    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""), help="owner/name the in-app updater should watch")
     a = ap.parse_args()
+    global REPO
+    REPO = a.repo
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     cache = Path(a.cache); cache.mkdir(parents=True, exist_ok=True)
     urls = find_runtime_assets()

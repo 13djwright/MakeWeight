@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/_cache/
+build/stage/
+dist/
+result.json
+.DS_Store

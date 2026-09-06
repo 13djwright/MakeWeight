@@ -1475,7 +1475,8 @@
         h('dt', null, 'Your data'), h('dd', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', textAlign: 'left' } }, st.root + '/data'),
         h('dt', null, 'App'), h('dd', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', textAlign: 'left' } }, st.install_dir || ''),
         h('dt', null, 'Version'), h('dd', null, st.version, st.portable ? h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'portable') : null)),
-      h('p', { class: 'hint' }, st.portable ? 'Portable mode: data lives inside the app folder (portable.txt is present).' : 'Data lives in your user folder, separate from the app. To update: unzip the new version anywhere and start it — it finds this data on its own. The old app folder can then be deleted.'),
+      h('p', { class: 'hint' }, st.portable ? 'Portable mode: data lives inside the app folder (portable.txt is present).' : 'Data lives in your user folder, separate from the app, so any version finds it. Update from here, or unzip a new version anywhere and start it.'),
+      updatePanel(st),
       h('div', { class: 'tb', style: { marginTop: '8px' } }, h('button', { class: 'btn small', onClick: async () => { const r = await api('POST', 'backup'); toast('Backup written: ' + r.file); } }, 'Back up now'), S.robot && h('button', { class: 'btn small', onClick: () => window.open(`/api/robots/${S.robotId}/export/archive`) }, 'Export robot archive'), h('button', { class: 'btn small', onClick: importArchive }, 'Import robot archive'))));
     // diagnostics: the log, live, and a bundle to send along with a bug report
     const logPre = h('pre', { class: 'log' }, 'loading…');
@@ -1503,6 +1504,49 @@
     if (S.logTimer) clearInterval(S.logTimer);
     S.logTimer = setInterval(() => { if (S.view === 'jobs' && document.body.contains(logPre)) drawLog(); else { clearInterval(S.logTimer); S.logTimer = null; } }, 4000);
   };
+  function updatePanel(st) {
+    const box = h('div', { class: 'upd' });
+    const repoIn = input({ value: st.settings.update_repo || '', placeholder: 'owner/repository on GitHub', style: { width: '260px' } });
+    repoIn.addEventListener('change', async () => { await api('PUT', 'settings', { update_repo: repoIn.value.trim() || null }); toast('Update source saved'); });
+    const status = h('div', { class: 'hint', style: { margin: '6px 0 0' } });
+    const prog = h('div', { class: 'progress', hidden: true }, h('i'));
+    const result = h('div');
+    const draw = (u) => {
+      result.textContent = '';
+      if (u && u.latest) {
+        const L = u.latest;
+        result.append(h('div', { class: 'callout' + (L.newer ? '' : ''), style: { marginTop: '8px' } },
+          h('b', null, L.newer ? `Version ${L.version} is available` : `You have the latest version (${L.version})`), L.published ? h('span', { class: 'rng' }, ` · released ${new Date(L.published).toLocaleDateString()}`) : null,
+          L.notes ? h('pre', { class: 'log', style: { maxHeight: '160px', marginTop: '6px' } }, L.notes) : null,
+          h('div', { class: 'tb', style: { marginTop: '8px' } },
+            L.newer && !u.portable ? h('button', { class: 'btn small primary', onClick: async () => { try { await api('POST', 'update/start'); } catch (e) { fail(e); } } }, `Update to ${L.version} now`) : null,
+            L.html_url ? h('a', { href: L.html_url, target: '_blank', rel: 'noopener', class: 'btn small' }, 'Release page ↗') : null)));
+      }
+      if (u && u.old_versions && u.old_versions.length) result.append(h('p', { class: 'hint' }, `Older versions still on disk (safe to delete): ${u.old_versions.join(', ')}`));
+    };
+    const check = async () => {
+      status.textContent = 'Checking GitHub…';
+      try { await api('POST', 'update/check'); const u = await api('GET', 'update/status'); status.textContent = ''; draw(u); }
+      catch (e) { status.textContent = e.message; }
+    };
+    box.append(h('div', { class: 'tb', style: { marginTop: '6px' } }, h('span', { class: 'rng' }, 'Update source'), repoIn, h('button', { class: 'btn small', onClick: check }, 'Check for updates')), status, prog, result);
+    api('GET', 'update/status').then(u => { if (u.state && u.state.status === 'running') { prog.hidden = false; prog.firstChild.style.width = (u.state.progress * 100) + '%'; status.textContent = u.state.message; } draw(u); }).catch(() => { });
+    S.updateWatch = (d) => {
+      if (!document.body.contains(box)) { S.updateWatch = null; return; }
+      prog.hidden = d.status !== 'running'; prog.firstChild.style.width = ((d.progress || 0) * 100) + '%'; status.textContent = d.message || '';
+      if (d.status === 'done') waitForNewVersion();
+    };
+    return box;
+  }
+  async function waitForNewVersion() {
+    const was = S.state.version;
+    toast('Updating — the new version is starting, this page will reload.');
+    for (let i = 0; i < 90; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok) { const j = await r.json(); if (j.version && j.version !== was) { location.reload(); return; } } } catch { }
+    }
+    toast('The new version did not come back on this address — check the window that opened.', true);
+  }
   function printerModal(p) {
     const name = input({ value: p?.name || '' }), noz = input({ value: p ? p.nozzles.join(', ') : '0.4, 0.6' }), bx = input({ type: 'number', value: p?.bed.x ?? 256, style: { width: '80px' } }), by = input({ type: 'number', value: p?.bed.y ?? 256, style: { width: '80px' } }), bz = input({ type: 'number', value: p?.bed.z ?? 256, style: { width: '80px' } });
     modal(p ? 'Edit printer' : 'New printer', h('div', null, field('Name', name), field('Nozzles (mm)', noz), field('Bed X × Y × Z', h('div', { class: 'tb' }, bx, '×', by, '×', bz))),
@@ -1567,6 +1611,7 @@
       let d; try { d = JSON.parse(ev.data); } catch { return; }
       if (d.type === 'queue') { S.state.slicer = Object.assign(S.state.slicer, d); renderShell(); }
       if (d.type === 'install') { S.state.install = d; if (S.view === 'jobs') { clearTimeout(timer); timer = setTimeout(render, 150); } if (d.status === 'done') { loadState().then(render); toast(d.message); } if (d.status === 'error') toast(d.message, true); }
+      if (d.type === 'update') { if (S.updateWatch) S.updateWatch(d); else if (d.status === 'done') waitForNewVersion(); }
       if (d.type === 'undo') { if (S.state) { S.state.undo = { undo: d.undo, redo: d.redo }; renderShell(); } }
       if (d.type === 'robot') { clearTimeout(timer); timer = setTimeout(async () => { await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => {}); render(); }, 200); }
       if (d.type === 'job' || d.type === 'line_item') {

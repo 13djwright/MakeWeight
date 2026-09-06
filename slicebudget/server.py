@@ -20,6 +20,7 @@ from .log import log
 from .db import DB, loads, now
 from .jobs import Events, JobManager
 from .undo import UndoManager
+from .updater import Updater, current_version, target as update_target
 
 STATIC = Path(__file__).parent / "static"
 
@@ -39,6 +40,8 @@ class App:
         workers = self.db.setting("workers") or max(1, cores // 2)
         self.jobs = JobManager(self.db, self.events, self.data_dir, workers=workers)
         self.undo = UndoManager(self.db, self.events)
+        self.updater = Updater(self.db, self.events)
+        self.httpd = None  # set by serve()
         from . import seed
         seed.ensure_seed(self.db)
         self.jobs.start()
@@ -390,7 +393,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "state":
             return self._json({
                 "slicer": app.jobs.queue_state(), "install": app.install_state, "engines": app.jobs.engine_status(), "undo": app.undo.state(),
-                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id", "appearance")},
+                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id", "appearance", "update_repo")},
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
@@ -422,6 +425,20 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 self.app.events.emit("robot", {"robot_id": act.get("robot_id")})
             return self._json({"done": act["label"] if act else None, **app.undo.state()})
+        if path == "update/check" and m == "POST":
+            return self._json(app.updater.check())
+        if path == "update/status" and m == "GET":
+            return self._json({"state": app.updater.state, "latest": app.updater.latest, "current": current_version(), "target": update_target(),
+                               "repo": app.updater.repo(), "old_versions": app.updater.old_versions(), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable()})
+        if path == "update/start" and m == "POST":
+            def stop():
+                try:
+                    if app.httpd is not None:
+                        app.httpd.shutdown(); app.httpd.server_close()
+                except Exception:  # noqa
+                    log.exception("httpd stop failed")
+            started = app.updater.start(stop)
+            return self._json({"started": started, "state": app.updater.state})
         if path == "log" and m == "GET":
             n = int(qs.get("n") or 400)
             return self._json({"lines": applog.tail(n), "file": str(applog.log_file() or "")})
@@ -1149,5 +1166,6 @@ def serve(root: Path, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTT
     app = App(root)
     Handler.app = app
     httpd = QuietServer((host, port), Handler)
+    app.httpd = httpd
     httpd.daemon_threads = True
     return httpd

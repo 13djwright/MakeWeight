@@ -1,0 +1,39 @@
+name: Release
+# Push a tag like v0.6.0 and this builds the four platform zips and publishes them as a GitHub Release.
+# The in-app updater and install.sh / install.ps1 read releases from this repository.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Stamp version and repository
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          python - "$TAG" "$GITHUB_REPOSITORY" <<'PY'
+          import json, sys, pathlib
+          p = pathlib.Path("slicebudget/version.json"); d = json.loads(p.read_text())
+          if sys.argv[1] and sys.argv[1][0].isdigit(): d["version"] = sys.argv[1]
+          d["repo"] = sys.argv[2]; p.write_text(json.dumps(d) + "\n"); print(d)
+          PY
+      - name: Build zips
+        run: python build/make_dist.py --out dist
+      - name: Installers next to the zips
+        run: |
+          sed "s#__REPO__#$GITHUB_REPOSITORY#" install.sh  > dist/install.sh
+          sed "s#__REPO__#$GITHUB_REPOSITORY#" install.ps1 > dist/install.ps1
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/install.sh
+            dist/install.ps1
+          generate_release_notes: true
