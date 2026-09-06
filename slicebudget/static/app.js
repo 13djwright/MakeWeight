@@ -1,4 +1,4 @@
-/* SliceBudget UI — vanilla JS single page app. */
+/* GRMLN UI — vanilla JS single page app. */
 (function () {
   'use strict';
   // ------------------------------------------------------------ utilities
@@ -36,6 +36,8 @@
     if (body instanceof ArrayBuffer || body instanceof Blob) { opts.body = body; }
     else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
     if (raw && raw.headers) Object.assign(opts.headers, raw.headers);
+    if (raw && raw.label) opts.headers['X-Undo-Label'] = encodeURIComponent(raw.label);
+    if (opts.headers['X-Undo-Label'] && /[^\x00-\xff]/.test(opts.headers['X-Undo-Label'])) opts.headers['X-Undo-Label'] = encodeURIComponent(opts.headers['X-Undo-Label']);
     const r = await fetch('/api/' + path, opts);
     if (raw && raw.blob) return r.blob();
     const j = await r.json().catch(() => ({}));
@@ -225,6 +227,72 @@
   }
   function go(view, param) { location.hash = '#/' + view + (param != null ? '/' + param : ''); }
 
+  // ------------------------------------------------------------ appearance (theme + colours)
+  const THEME_VARS = [['accent', 'Accent', 'Buttons, links, card titles, the printed-parts bar'], ['bg', 'Page background', ''], ['panel', 'Cards & inputs', ''], ['panel2', 'Table headers & hover', ''], ['ink', 'Text', ''], ['rule', 'Borders', ''], ['good', 'Under / measured', ''], ['bad', 'Over / errors', '']];
+  function hexToHsl(hex) { const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex); if (!m) return null; let [r, g, b] = m.slice(1).map(x => parseInt(x, 16) / 255); const mx = Math.max(r, g, b), mn = Math.min(r, g, b); let h = 0, s = 0; const l = (mx + mn) / 2; if (mx !== mn) { const d = mx - mn; s = l > .5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h /= 6; } return [h * 360, s * 100, l * 100]; }
+  function hsl(h, s, l) { return `hsl(${h.toFixed(0)} ${Math.max(0, Math.min(100, s)).toFixed(0)}% ${Math.max(0, Math.min(100, l)).toFixed(0)}%)`; }
+  function applyAppearance(a) {
+    a = a || {};
+    const root = document.documentElement;
+    if (a.theme === 'light' || a.theme === 'dark') root.setAttribute('data-theme', a.theme); else root.removeAttribute('data-theme');
+    // clear then set the overrides
+    for (const [k] of THEME_VARS) for (const v of ['--' + k, '--' + k + '-ink', '--' + k + '-soft', '--focus', '--sel', '--rule2', '--ink2', '--ink3']) root.style.removeProperty(v);
+    const dark = root.getAttribute('data-theme') === 'dark' || (!root.getAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
+    for (const [k, v] of Object.entries(a.colors || {})) {
+      if (!/^#[\da-f]{6}$/i.test(v)) continue;
+      root.style.setProperty('--' + k, v);
+      const c = hexToHsl(v); if (!c) continue; const [h, sat, l] = c;
+      if (k === 'accent') { root.style.setProperty('--accent-ink', hsl(h, sat, dark ? Math.min(85, l + 12) : Math.max(20, l - 12))); root.style.setProperty('--accent-soft', hsl(h, Math.min(90, sat), dark ? 18 : 92)); root.style.setProperty('--focus', v); root.style.setProperty('--sel', hsl(h, Math.min(60, sat), dark ? 15 : 96)); }
+      if (k === 'ink') { root.style.setProperty('--ink2', hsl(h, sat, dark ? l - 18 : l + 22)); root.style.setProperty('--ink3', hsl(h, sat, dark ? l - 36 : l + 42)); }
+      if (k === 'rule') root.style.setProperty('--rule2', hsl(h, sat, dark ? l - 4 : l + 5));
+      if (k === 'good' || k === 'bad') root.style.setProperty('--' + k + '-soft', hsl(h, Math.min(70, sat), dark ? 18 : 92));
+    }
+  }
+  function loadAppearance() { try { return JSON.parse(localStorage.getItem('sb.appearance') || 'null') || (S.state && S.state.settings && S.state.settings.appearance) || {}; } catch { return {}; } }
+  function saveAppearance(a) { try { localStorage.setItem('sb.appearance', JSON.stringify(a)); } catch { } api('PUT', 'settings', { appearance: a }).catch(() => { }); }
+  function appearanceModal() {
+    const a = Object.assign({ theme: 'system', colors: {} }, loadAppearance());
+    const themeSeg = h('div', { class: 'seg' });
+    let rows = [];
+    const drawSeg = () => { themeSeg.textContent = ''; for (const [v, l] of [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']]) themeSeg.append(h('button', { 'aria-pressed': String(a.theme === v), onClick: () => { a.theme = v; drawSeg(); applyAppearance(a); saveAppearance(a); rows.forEach((r, i) => { const k = THEME_VARS[i][0]; if (!a.colors[k]) r.querySelector('input').value = toHex(current(k)); }); } }, l)); };
+    drawSeg();
+    const current = k => getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim();
+    const toHex = c => { if (/^#[\da-f]{6}$/i.test(c)) return c; const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(c); if (!m) { const el = document.createElement('i'); el.style.color = c; document.body.append(el); const rgb = getComputedStyle(el).color; el.remove(); const mm = /(\d+),\s*(\d+),\s*(\d+)/.exec(rgb); return mm ? '#' + mm.slice(1).map(x => (+x).toString(16).padStart(2, '0')).join('') : '#888888'; } return '#' + m.slice(1).map(x => (+x).toString(16).padStart(2, '0')).join(''); };
+    rows = THEME_VARS.map(([k, label, desc]) => {
+      const pick = h('input', { type: 'color', value: toHex(a.colors[k] || current(k)), style: { width: '44px', height: '28px', padding: '2px' } });
+      const reset = h('button', { class: 'btn small', disabled: !a.colors[k], onClick: () => { delete a.colors[k]; applyAppearance(a); saveAppearance(a); pick.value = toHex(current(k)); reset.disabled = true; } }, 'Reset');
+      pick.addEventListener('input', () => { a.colors[k] = pick.value; applyAppearance(a); reset.disabled = false; });
+      pick.addEventListener('change', () => saveAppearance(a));
+      return field(label, h('div', { class: 'tb' }, pick, h('span', { class: 'rng' }, desc), reset));
+    });
+    modal('Appearance', h('div', null, field('Theme', themeSeg), h('p', { class: 'hint' }, 'Colours update live as you pick them; related shades (hover, borders, soft backgrounds) follow automatically. Saved for this browser and on the server.'), ...rows,
+      h('div', { class: 'tb', style: { marginTop: '10px' } }, h('button', { class: 'btn small', onClick: () => { a.colors = {}; applyAppearance(a); saveAppearance(a); rows.forEach((r, i) => { r.querySelector('input').value = toHex(current(THEME_VARS[i][0])); r.querySelector('button').disabled = true; }); } }, 'Reset all colours'))),
+      [{ label: 'Done', cls: 'primary' }], { width: '520px' });
+  }
+
+  // ------------------------------------------------------------ undo / redo
+  async function doUndo(kind) {
+    try {
+      const r = await api('POST', kind);
+      S.state.undo = { undo: r.undo, redo: r.redo };
+      if (r.done) toast(`${kind === 'undo' ? 'Undid' : 'Redid'}: ${r.done}`);
+      await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => { S.robotId = null; S.robot = null; });
+      await render();
+    } catch (e) { fail(e); }
+  }
+  document.addEventListener('keydown', e => {
+    const mod = e.ctrlKey || e.metaKey; if (!mod || e.altKey) return;
+    const t = e.target, typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    if (typing) return;  // let the browser undo text inside a field
+    if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); doUndo(e.shiftKey ? 'redo' : 'undo'); }
+    else if (e.key === 'y' || e.key === 'Y') { e.preventDefault(); doUndo('redo'); }
+  });
+  function toastUndo(msg) {
+    // an action toast with an inline Undo button (used after one-click deletes)
+    const el = h('div', { class: 'toast action' }, h('span', null, msg), h('button', { class: 'btn small', onClick: () => { el.remove(); doUndo('undo'); } }, 'Undo'));
+    $('#toasts').append(el); setTimeout(() => el.remove(), 8000);
+  }
+
   // ------------------------------------------------------------ shell
   function renderShell() {
     const st = S.state, r = S.robot;
@@ -250,7 +318,13 @@
     }
     // top actions
     const ta = $('#top-actions'); ta.textContent = '';
+    const u = st.undo || { undo: [], redo: [] };
+    const lastU = u.undo[u.undo.length - 1], lastR = u.redo[u.redo.length - 1];
+    ta.append(h('div', { class: 'seg undo' },
+      h('button', { disabled: !lastU, title: lastU ? `Undo ${lastU.label} (Ctrl/⌘+Z)` : 'Nothing to undo', 'aria-label': 'Undo', onClick: () => doUndo('undo') }, '↶ Undo'),
+      h('button', { disabled: !lastR, title: lastR ? `Redo ${lastR.label} (Ctrl/⌘+Shift+Z)` : 'Nothing to redo', 'aria-label': 'Redo', onClick: () => doUndo('redo') }, '↷ Redo')));
     if (r) ta.append(h('button', { class: 'btn ghost', onClick: e => exportMenu(e.currentTarget) }, 'Export ▾'));
+    ta.append(h('button', { class: 'btn ghost icon', title: 'Appearance: theme and colours', 'aria-label': 'Appearance', onClick: () => appearanceModal() }, '◐'));
     ta.append(h('span', { class: 'hint', style: { margin: 0 }, title: 'Every edit is saved to the local database immediately' }, 'Saved ✓'));
     // nav
     const nav = $('#nav'); nav.textContent = '';
@@ -359,7 +433,7 @@
         h('td', { class: 'num' }, s.counts ? fmt(s.subtotal) : `(${fmt(s.subtotal)})`), h('td', { colspan: 3 }),
         h('td', null, h('button', { class: 'btn icon', title: 'Section menu', onClick: e => sectionMenu(e.currentTarget, s) }, '⋯'))));
       for (const it of s.items) tb.append(lineRow(it, s));
-      if (!s.items.length) tb.append(h('tr', { class: 'dim' }, h('td', { colspan: 11, style: { textAlign: 'center' } }, h('button', { class: 'btn small ghost', onClick: () => addLineModal(s.id) }, '＋ add a line to ' + s.name + '…'))));
+      tb.append(newLineRow(s));
     }
     tb.append(h('tr', { class: 'sum' }, h('td'), h('td', null, 'Weigh-in total'), h('td'), h('td', { class: 'num' }, fmt(t.estimated_only)), h('td'), h('td'), h('td', { class: 'num' }, fmt(t.best_known)), h('td', { class: 'num' }, money(r.sections.reduce((a, s) => a + s.items.reduce((b, i) => b + (i.price || 0) * (i.qty || 0), 0), 0))), h('td', { colspan: 3 })));
     m.append(h('div', { class: 'tw' }, tbl));
@@ -395,7 +469,35 @@
     tr.append(edCell(it.price, v => upd({ price: v }), { type: 'number', cls: 'num', fmt: v => Number(v).toFixed(2), placeholder: '' }));
     tr.append(edCell(it.status || '', v => upd({ status: v || null }), { options: STATUSES, render: v => v ? h('span', { class: 'pill auto' }, v) : h('span', { style: { color: 'var(--ink3)' } }, '—') }));
     tr.append(h('td', null, h('span', { class: 'flag ' + (it.needs_reweigh ? '' : (it.measured_grams != null ? 'ok' : 'none')), title: it.needs_reweigh ? 'Needs re-weigh: changed since it was measured' : (it.measured_grams != null ? 'Measured' : 'Not measured') })));
-    tr.append(h('td', null, h('button', { class: 'btn icon', title: 'Line menu', onClick: e => lineMenu(e.currentTarget, it, s) }, '⋯')));
+    tr.append(h('td', { class: 'acts' },
+      h('button', { class: 'btn icon', title: 'More actions for this line', 'aria-label': 'Line menu', onClick: e => lineMenu(e.currentTarget, it, s) }, '⋯'),
+      h('button', { class: 'btn icon del', title: 'Delete line (undo with Ctrl/⌘+Z)', 'aria-label': 'Delete line', onClick: async () => { try { await api('DELETE', `items/${it.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description || 'line'}”`); } catch (e) { fail(e); } } }, '✕')));
+    return tr;
+  }
+  // the always-present empty row at the end of a section: type a description, press Enter (or Tab) and it becomes a line
+  function newLineRow(s) {
+    const qty = h('input', { type: 'number', value: 1, min: 0, step: 'any', class: 'num ghost-in', 'aria-label': `Quantity for a new line in ${s.name}` });
+    const desc = h('input', { type: 'text', placeholder: `Add a line to ${s.name}…`, class: 'ghost-in', 'aria-label': `New line in ${s.name}` });
+    const est = h('input', { type: 'number', placeholder: 'g', step: 'any', class: 'num ghost-in', 'aria-label': 'Estimated grams' });
+    let busy = false;
+    const commit = async (focusNext) => {
+      const d = desc.value.trim(); if (!d || busy) return; busy = true;
+      try {
+        await api('POST', `sections/${s.id}/items`, { description: d, qty: parseFloat(qty.value) || 1, est_grams: est.value === '' ? null : parseFloat(est.value) }, { label: `add “${d}”` });
+        S.cache.focusNewLine = focusNext ? s.id : null;
+        await refreshRobot();
+      } catch (e) { busy = false; fail(e); }
+    };
+    for (const inp of [qty, desc, est]) {
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(true); } else if (e.key === 'Escape') { desc.value = ''; est.value = ''; qty.value = 1; inp.blur(); } });
+    }
+    desc.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
+    est.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
+    const tr = h('tr', { class: 'new-row nosort' },
+      h('td', { class: 'num' }, qty), h('td', null, desc), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
+      h('td', { colspan: 6, class: 'rng' }, 'Enter adds the line · more fields via ⋯ after adding'),
+      h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'Add with all fields…', 'aria-label': 'Add a line with all fields', onClick: () => addLineModal(s.id) }, '⋯')));
+    if (S.cache.focusNewLine === s.id) { S.cache.focusNewLine = null; setTimeout(() => desc.focus(), 30); }
     return tr;
   }
   function lineMenu(anchor, it, s) {
@@ -411,7 +513,7 @@
     items.push('-');
     items.push({ label: 'Move to section ▸', onClick: () => modal('Move to section', select(r.sections.map(x => [x.id, x.name]), s.id, { id: 'mv-sec' }), [{ label: 'Cancel' }, { label: 'Move', cls: 'primary', onClick: async () => { await api('POST', `items/${it.id}/move`, { section_id: +$('#mv-sec').value }); await refreshRobot(); } }]) });
     if (!it.part) items.push({ label: 'Save to library as component', onClick: async () => { await api('POST', 'components', { name: it.description, category: s.name, link: it.link, price: it.price, dimensions: it.dimensions, grams: it.measured_grams ?? it.est_grams, grams_source: it.measured_grams != null ? 'measured' : 'manual' }); toast('Added to library'); } });
-    items.push('-', { label: 'Delete line', cls: 'danger', onClick: () => confirmModal(`Delete “${it.description}”?`, async () => { await api('DELETE', `items/${it.id}`); await refreshRobot(); }) });
+    items.push('-', { label: 'Delete line', cls: 'danger', onClick: async () => { try { await api('DELETE', `items/${it.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description || 'line'}”`); } catch (e) { fail(e); } } });
     menu(anchor, items);
   }
   function sectionMenu(anchor, s) {
@@ -557,7 +659,8 @@
         h('td', { class: 'num' }, ptime ? hms(ptime) : ''),
         h('td', { class: 'num' }, cost ? '$' + cost.toFixed(2) : ''),
         h('td', null, jobPill(j, p)),
-        h('td', null, h('button', { class: 'btn icon', onClick: e => partMenu(e.currentTarget, it, p) }, '⋯'))));
+        h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'More actions', 'aria-label': 'Part menu', onClick: e => partMenu(e.currentTarget, it, p) }, '⋯'),
+          h('button', { class: 'btn icon del', title: 'Delete part and its sheet line (undo with Ctrl/⌘+Z)', 'aria-label': 'Delete part', onClick: async () => { try { await api('DELETE', `parts/${p.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description}”`); } catch (e) { fail(e); } } }, '✕'))));
     }
     tb.append(h('tr', { class: 'sum' }, h('td', null, 'Printed total'), h('td', { class: 'num' }, parts.reduce((a, x) => a + x.it.qty, 0)), h('td', { colspan: 4 }), h('td', { class: 'num' }, fmt(tot)), h('td', { class: 'num' }, fmt(totC)), h('td'), h('td', { class: 'num' }, fmt(totBest)), h('td', { class: 'num' }, totTime ? hms(totTime) : ''), h('td', { class: 'num' }, totCost ? '$' + totCost.toFixed(2) : ''), h('td', { colspan: 2 })));
     m.append(h('div', { class: 'tw' }, tbl));
@@ -582,7 +685,7 @@
       { label: 'Add weigh-in…', onClick: () => weighInModal(it) },
       { label: p.mesh ? 'Replace mesh…' : 'Attach mesh…', onClick: () => attachMeshModal(it) },
       { label: 'Make a mirrored copy', onClick: () => api('POST', `parts/${p.id}/mirror_copy`, {}).then(refreshRobot).catch(fail) },
-      '-', { label: 'Delete part and line', cls: 'danger', onClick: () => confirmModal(`Delete “${it.description}”?`, async () => { await api('DELETE', `parts/${p.id}`); await refreshRobot(); }) },
+      '-', { label: 'Delete part and line', cls: 'danger', onClick: async () => { try { await api('DELETE', `parts/${p.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description}”`); } catch (e) { fail(e); } } },
     ]);
   }
   function applyProfileModal(parts) {
@@ -638,7 +741,7 @@
     const p = await api('GET', `parts/${pid}`); const st = S.state;
     const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(async () => { await refreshRobot(); await renderMain(); }).catch(fail);
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, it.description, p.locked && h('span', { class: 'pill lock', style: { marginLeft: '8px' } }, '🔒 locked')),
-      h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${p.mesh.watertight ? 'watertight' : 'not watertight'} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ' · mirrored' : ''}` : 'No mesh attached yet')),
+      h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ' · mirrored' : ''}` : 'No mesh attached yet')),
       h('div', { class: 'tb' },
         h('select', { onChange: e => go('part', e.target.value) }, ...all.map(x => h('option', { value: x.part.id, selected: x.part.id === pid }, x.description))),
         h('button', { class: 'btn', onClick: () => attachMeshModal(it) }, p.mesh ? 'Replace mesh…' : 'Attach mesh…'),
@@ -1330,7 +1433,11 @@
       h('div', { class: 'field', style: { marginTop: '8px' } }, h('label', null, 'Default printer'), select(st.printers.map(p => [p.id, p.name]), st.settings.default_printer_id, { onChange: e => api('PUT', 'settings', { default_printer_id: +e.target.value }) })),
       h('div', { class: 'field' }, h('label', null, 'Default filament'), select(st.filaments.map(f => [f.id, f.name]), st.settings.default_filament_id, { onChange: e => api('PUT', 'settings', { default_filament_id: +e.target.value }) })),
       h('div', { class: 'field' }, h('label', null, 'Default profile'), select(st.profiles.map(p => [p.id, p.name]), st.settings.default_profile_id, { onChange: e => api('PUT', 'settings', { default_profile_id: +e.target.value }) }))));
-    right.append(h('div', { class: 'card' }, h('h3', null, 'Data'), h('dl', { class: 'kv' }, h('dt', null, 'Location'), h('dd', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', textAlign: 'left' } }, st.root + '/data'), h('dt', null, 'Version'), h('dd', null, st.version)),
+    right.append(h('div', { class: 'card' }, h('h3', null, 'Data & updates'), h('dl', { class: 'kv' },
+        h('dt', null, 'Your data'), h('dd', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', textAlign: 'left' } }, st.root + '/data'),
+        h('dt', null, 'App'), h('dd', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', textAlign: 'left' } }, st.install_dir || ''),
+        h('dt', null, 'Version'), h('dd', null, st.version, st.portable ? h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'portable') : null)),
+      h('p', { class: 'hint' }, st.portable ? 'Portable mode: data lives inside the app folder (portable.txt is present).' : 'Data lives in your user folder, separate from the app. To update: unzip the new version anywhere and start it — it finds this data on its own. The old app folder can then be deleted.'),
       h('div', { class: 'tb', style: { marginTop: '8px' } }, h('button', { class: 'btn small', onClick: async () => { const r = await api('POST', 'backup'); toast('Backup written: ' + r.file); } }, 'Back up now'), S.robot && h('button', { class: 'btn small', onClick: () => window.open(`/api/robots/${S.robotId}/export/archive`) }, 'Export robot archive'), h('button', { class: 'btn small', onClick: importArchive }, 'Import robot archive'))));
     // diagnostics: the log, live, and a bundle to send along with a bug report
     const logPre = h('pre', { class: 'log' }, 'loading…');
@@ -1380,6 +1487,8 @@
       let d; try { d = JSON.parse(ev.data); } catch { return; }
       if (d.type === 'queue') { S.state.slicer = Object.assign(S.state.slicer, d); renderShell(); }
       if (d.type === 'install') { S.state.install = d; if (S.view === 'jobs') { clearTimeout(timer); timer = setTimeout(render, 150); } if (d.status === 'done') { loadState().then(render); toast(d.message); } if (d.status === 'error') toast(d.message, true); }
+      if (d.type === 'undo') { if (S.state) { S.state.undo = { undo: d.undo, redo: d.redo }; renderShell(); } }
+      if (d.type === 'robot') { clearTimeout(timer); timer = setTimeout(async () => { await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => {}); render(); }, 200); }
       if (d.type === 'job' || d.type === 'line_item') {
         clearTimeout(timer);
         timer = setTimeout(async () => {
@@ -1399,12 +1508,14 @@
         await new Promise(r => setTimeout(r, 500));
       }
       route();
+      applyAppearance(loadAppearance());
+      matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyAppearance(loadAppearance()));
       const saved = +localStorage.getItem('sb.robot');
       const rid = S.state.robots.find(r => r.id === saved && r.status === 'active') ? saved : (S.state.robots.find(r => r.status === 'active') || {}).id;
       if (rid) await loadRobot(rid);
       if (!S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
       await render(); connectSSE();
-    } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the SliceBudget service: ' + e.message)); }
+    } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the GRMLN service: ' + e.message)); }
   })();
   window.SB = { S, api, render, go };
 })();

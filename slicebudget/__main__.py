@@ -30,10 +30,19 @@ def main():
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
     if args.root:
-        os.environ["SLICEBUDGET_HOME"] = str(Path(args.root).resolve())
-    from . import slicer_engine
+        os.environ["GRMLN_HOME"] = str(Path(args.root).resolve())
+    from . import paths
     from .server import serve
-    root = slicer_engine.app_root()
+    root = paths.data_root()
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    from . import log as applog
+    applog.setup(root / "data")
+    try:
+        notes = paths.migrate_legacy_data(applog.log)
+        for n in notes:
+            applog.log.info("migration: %s", n)
+    except Exception:  # noqa
+        applog.log.exception("data migration failed")
     port = args.port
     # pick the next free port if busy (another instance is probably already running)
     for p in range(port, port + 20):
@@ -44,7 +53,7 @@ def main():
     httpd = serve(root, args.host, port)
     url = f"http://{args.host}:{port}/"
     from .log import log
-    log.info("SliceBudget running at %s   (data in %s)", url, root / "data")
+    log.info("GRMLN running at %s   (app in %s, data in %s)", url, paths.install_dir(), root / "data")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

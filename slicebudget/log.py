@@ -97,13 +97,13 @@ def run_logged(args: list[str], what: str, **kw):
 
 def environment(app=None) -> dict:
     """Facts about this machine and install that matter when something fails."""
-    from . import slicer_engine
+    from . import paths, slicer_engine
     root = slicer_engine.app_root()
     info = {
         "app_version": _app_version(), "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "os": platform.platform(), "machine": platform.machine(), "python": sys.version.split()[0], "executable": sys.executable,
-        "root": str(root), "root_path_length": len(str(root)), "cwd": os.getcwd(),
-        "env": {k: os.environ.get(k) for k in ("SLICEBUDGET_HOME", "SLICEBUDGET_PORT", "SSL_CERT_FILE", "PATH") if os.environ.get(k)},
+        "data_root": str(root), "install_dir": str(paths.install_dir()), "portable": paths.is_portable(), "root_path_length": len(str(root)), "cwd": os.getcwd(),
+        "env": {k: os.environ.get(k) for k in ("GRMLN_HOME", "SLICEBUDGET_HOME", "SLICEBUDGET_PORT", "SSL_CERT_FILE", "PATH") if os.environ.get(k)},
     }
     try:
         du = shutil.disk_usage(str(root))

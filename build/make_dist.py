@@ -1,4 +1,4 @@
-"""Build per-platform SliceBudget zips: embedded CPython (python-build-standalone) + wheels + app + launcher.
+"""Build per-platform GRMLN zips: embedded CPython (python-build-standalone) + wheels + app + launcher.
 
 Usage:  python3 make_dist.py --out DIST_DIR [--targets windows-x86_64,macos-arm64,macos-x86_64,linux-x86_64]
 Needs network access to GitHub releases and PyPI. Pure stdlib + pip.
@@ -87,49 +87,57 @@ def install_wheels(wheels, site: Path):
 
 
 LAUNCHERS = {
-    "windows": ("SliceBudget.bat", "\r\n".join([
-        "@echo off", "title SliceBudget", "cd /d \"%~dp0\"",
-        "echo Starting SliceBudget ... this window stays open while it runs. Close it to stop.",
+    "windows": ("GRMLN.bat", "\r\n".join([
+        "@echo off", "title GRMLN", "cd /d \"%~dp0\"",
+        "echo Starting GRMLN ... this window stays open while it runs. Close it to stop.",
         "\"%~dp0python\\python.exe\" -m slicebudget %*",
         "if errorlevel 1 pause", ""])),
-    "macos": ("SliceBudget.command", "\n".join([
+    "macos": ("GRMLN.command", "\n".join([
         "#!/bin/bash", "cd \"$(dirname \"$0\")\"",
-        "echo \"Starting SliceBudget ... keep this window open while it runs (Ctrl-C to stop).\"",
+        "echo \"Starting GRMLN ... keep this window open while it runs (Ctrl-C to stop).\"",
         "xattr -dr com.apple.quarantine python 2>/dev/null",
         "exec ./python/bin/python3 -m slicebudget \"$@\"", ""])),
-    "linux": ("slicebudget.sh", "\n".join([
+    "linux": ("grmln.sh", "\n".join([
         "#!/bin/bash", "cd \"$(dirname \"$0\")\"",
-        "echo \"Starting SliceBudget ... keep this terminal open while it runs (Ctrl-C to stop).\"",
+        "echo \"Starting GRMLN ... keep this terminal open while it runs (Ctrl-C to stop).\"",
         "exec ./python/bin/python3 -m slicebudget \"$@\"", ""])),
 }
 
-README = """SliceBudget {version}
-=================
+README = """GRMLN {version}  -  every gram accounted for
+==================================================
 
-1. Keep this folder together (it holds the app, its own Python runtime, and later your data).
-2. Start it:
-     Windows : double-click SliceBudget.bat
-     macOS   : double-click SliceBudget.command  (first time: right-click > Open, or run
-               `xattr -dr com.apple.quarantine .` in this folder if macOS refuses)
-     Linux   : ./slicebudget.sh
-   A browser tab opens at http://localhost:8765. The window that opened must stay open while you use it.
-3. First run: open "Jobs & setup" and click "Install Bambu Studio". SliceBudget downloads Bambu Studio
-   (230-470 MB depending on platform) into the slicer/ folder here and slices with it headlessly, so the
-   weights and print times are exactly what Bambu Studio shows. PrusaSlicer is available as a fallback
-   engine on the same page. Nothing is installed elsewhere on your computer.
-   Linux: Bambu Studio needs the GTK/WebKit system libraries (the Setup page names the apt command).
-4. Your data lives in data/ (SQLite database, mesh files, nightly backups). Back that folder up.
-5. Tips: drop a Bambu Studio / PrusaSlicer .3mf project onto Printed parts to import every object with its
-   settings; "Modifier regions" on a part slice a box with its own walls/infill for real; the Optimizer only
-   shows plans it has re-sliced; Calculators hold the belt / tip-speed / drive / battery formulas.
+Start it:
+  Windows : double-click GRMLN.bat
+  macOS   : double-click GRMLN.command  (first time: right-click > Open, or run
+            `xattr -dr com.apple.quarantine .` in this folder if macOS refuses)
+  Linux   : ./grmln.sh
+A browser tab opens at http://localhost:8765. The window that opened must stay open while you use it.
 
-Upgrading: unzip the new version next to the old one and move the data/ and slicer/ folders across.
+First run: open "Jobs & setup" and click "Install Bambu Studio". GRMLN downloads Bambu Studio (230-470 MB depending
+on platform) into its data folder and slices with it headlessly, so weights and print times are exactly what Bambu
+Studio shows. PrusaSlicer is available as a fallback engine on the same page. Nothing is installed system-wide.
+Linux: Bambu Studio needs the GTK/WebKit system libraries (the Setup page names the apt command).
+
+Where your data is: NOT in this folder. GRMLN keeps its database, meshes, backups, logs and the slicer installs in
+your user data directory (Windows %LOCALAPPDATA%\\GRMLN, macOS ~/Library/Application Support/GRMLN, Linux
+~/.local/share/grmln). Jobs & setup shows the exact path.
+
+Updating: unzip the new version anywhere, start it, delete the old folder. That is all - the new version finds your
+data on its own. Coming from SliceBudget 0.4.x: the first start of GRMLN finds the old version's data/ folder next to
+it (or inside its own folder) and adopts it automatically.
+
+Portable mode: create an empty file named portable.txt in this folder before the first start and GRMLN keeps its data
+in here instead (USB-stick style).
+
+Tips: drop a Bambu Studio / PrusaSlicer .3mf project onto Printed parts to import every object with its settings and
+filament; "Modifier regions" on a part slice a box with its own walls/infill for real; the Optimizer only shows plans it
+has re-sliced; Undo/Redo (Ctrl/Cmd+Z) covers every edit; Calculators hold the belt / tip-speed / drive / battery formulas.
 """
 
 
 def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
     triple, tags, site_rel, launcher = TARGETS[name]
-    stage = cache.parent / "stage" / f"SliceBudget-{APP_VERSION}-{name}"
+    stage = cache.parent / "stage" / f"GRMLN-{APP_VERSION}-{name}"
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
@@ -156,14 +164,12 @@ def build_target(name: str, runtime_url: str, out_dir: Path, cache: Path):
             shutil.rmtree(d, ignore_errors=True)
     log(f"[{name}] app")
     shutil.copytree(ROOT / "slicebudget", stage / "slicebudget", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    (stage / "data").mkdir(); (stage / "slicer").mkdir()
-    (stage / "data" / ".keep").write_text(""); (stage / "slicer" / ".keep").write_text("")
     fname, body = LAUNCHERS[launcher]
     (stage / fname).write_text(body, newline="")
     (stage / "README.txt").write_text(README.format(version=APP_VERSION))
-    (stage / "LICENSES.txt").write_text("SliceBudget bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nBambu Studio (AGPL-3.0, https://github.com/bambulab/BambuStudio) and/or PrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) are downloaded separately on first run.\n")
+    (stage / "LICENSES.txt").write_text("GRMLN bundles CPython (PSF license, python-build-standalone), numpy (BSD), openpyxl (MIT), et_xmlfile (MIT).\nBambu Studio (AGPL-3.0, https://github.com/bambulab/BambuStudio) and/or PrusaSlicer (AGPL-3.0, https://github.com/prusa3d/PrusaSlicer) are downloaded separately on first run.\n")
     # zip with executable bits for posix launchers
-    zpath = out_dir / f"SliceBudget-{APP_VERSION}-{name}.zip"
+    zpath = out_dir / f"GRMLN-{APP_VERSION}-{name}.zip"
     log(f"[{name}] zipping -> {zpath.name}")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in sorted(stage.rglob("*")):

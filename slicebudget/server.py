@@ -19,6 +19,7 @@ from . import bambu_engine, exports, log as applog, meshio, optimizer, orient, p
 from .log import log
 from .db import DB, loads, now
 from .jobs import Events, JobManager
+from .undo import UndoManager
 
 STATIC = Path(__file__).parent / "static"
 
@@ -29,13 +30,15 @@ class App:
         self.data_dir = self.root / "data"
         self.mesh_dir = self.data_dir / "meshes"
         self.mesh_dir.mkdir(parents=True, exist_ok=True)
-        applog.setup(self.data_dir)
-        log.info("SliceBudget %s starting; root=%s; %s; python %s", applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
+        if not applog.log_file():
+            applog.setup(self.data_dir)
+        log.info("GRMLN %s starting; data=%s; %s; python %s", applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
         self.db = DB(self.data_dir / "slicebudget.db")
         self.events = Events()
         cores = os.cpu_count() or 2
         workers = self.db.setting("workers") or max(1, cores // 2)
         self.jobs = JobManager(self.db, self.events, self.data_dir, workers=workers)
+        self.undo = UndoManager(self.db, self.events)
         from . import seed
         seed.ensure_seed(self.db)
         self.jobs.start()
@@ -330,7 +333,18 @@ class Handler(BaseHTTPRequestHandler):
             path = url.path
             qs = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
             if path.startswith("/api/"):
-                return self._api(method, path[5:].rstrip("/"), qs)
+                api_path = path[5:].rstrip("/")
+                if method in ("POST", "PUT", "DELETE") and not re.match(r"^(undo|redo|settings|slicer/|jobs|backup|log|diagnostics|meshes$|parts/\d+/(slice|orientation_sweep)$|robots/\d+/(optimize|slice_all)$|runs/\d+/cancel$|filaments/\d+/recalc$)", api_path):
+                    before = self.app.undo.snapshot()
+                    try:
+                        return self._api(method, api_path, qs)
+                    finally:
+                        try:
+                            hint = self.headers.get("X-Undo-Label")
+                            self.app.undo.record(before, method, api_path, urllib.parse.unquote(hint) if hint else None)
+                        except Exception:  # noqa
+                            log.exception("undo record failed")
+                return self._api(method, api_path, qs)
             return self._static(path)
         except KeyError as e:
             self._json({"error": f"not found: {e}"}, 404)
@@ -375,12 +389,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "state":
             return self._json({
-                "slicer": app.jobs.queue_state(), "install": app.install_state, "engines": app.jobs.engine_status(),
-                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id")},
+                "slicer": app.jobs.queue_state(), "install": app.install_state, "engines": app.jobs.engine_status(), "undo": app.undo.state(),
+                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id", "appearance")},
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
-                "robots": self._robot_list(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root),
+                "robots": self._robot_list(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "install_dir": str(__import__("slicebudget.paths", fromlist=["install_dir"]).install_dir()), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable(),
                 "classes": CLASSES,
             })
         if path == "settings" and m == "PUT":
@@ -396,6 +410,18 @@ class Handler(BaseHTTPRequestHandler):
                     # jobs queued for the other engine are re-keyed when they run; make sure workers are awake
                     app.jobs.start()
             return self._json({"ok": True, "slicer": app.jobs.queue_state()})
+        if path == "undo" and m == "GET":
+            return self._json(app.undo.state())
+        if path in ("undo", "redo") and m == "POST":
+            act = app.undo.do_undo() if path == "undo" else app.undo.do_redo()
+            if act:
+                for pid in app.undo.affected_parts(act):
+                    try:
+                        app.current_slice_for_part(pid)
+                    except Exception:  # noqa
+                        pass
+                self.app.events.emit("robot", {"robot_id": act.get("robot_id")})
+            return self._json({"done": act["label"] if act else None, **app.undo.state()})
         if path == "log" and m == "GET":
             n = int(qs.get("n") or 400)
             return self._json({"lines": applog.tail(n), "file": str(applog.log_file() or "")})

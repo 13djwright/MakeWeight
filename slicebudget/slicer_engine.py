@@ -29,13 +29,9 @@ class SlicerNotFound(Exception):
 
 
 def app_root() -> Path:
-    """Folder that holds slicer/, data/ etc. Override with SLICEBUDGET_HOME."""
-    env = os.environ.get("SLICEBUDGET_HOME")
-    if env:
-        return Path(env)
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+    """Folder that holds slicer/ and data/ (the user data directory, see paths.py)."""
+    from .paths import data_root
+    return data_root()
 
 
 def slicer_dir() -> Path:
@@ -159,7 +155,7 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
             if app is None:
                 listing = "; ".join(f"{mp}: {[x.name for x in Path(mp).iterdir()]}" for mp in mount_points if Path(mp).exists())
                 raise RuntimeError("No PrusaSlicer.app inside the disk image. Mounted at " + (listing or "nothing") +
-                                   ". You can also point SliceBudget at an existing PrusaSlicer.app in Setup → 'Use a different install'.")
+                                   ". You can also point GRMLN at an existing PrusaSlicer.app in Setup → 'Use a different install'.")
             dest = sd / app.name
             if dest.exists():
                 shutil.rmtree(dest)
@@ -184,7 +180,7 @@ def install(progress: Callable[[str, float], None] | None = None) -> list[str]:
             raise RuntimeError(
                 "On Linux PrusaSlicer is distributed through Flathub or your distribution. Install it "
                 "(e.g. 'flatpak install flathub com.prusa3d.PrusaSlicer' or 'sudo apt install prusa-slicer') "
-                "or point SliceBudget at an AppImage in Setup.")
+                "or point GRMLN at an AppImage in Setup.")
     prog("Verifying", 0.95)
     cmd = locate()
     if not cmd:
