@@ -34,7 +34,8 @@ TARGETS = {
 }
 PY_SERIES = "3.12"
 REPO = ""
-WHEELS = ["numpy>=1.26,<3", "openpyxl>=3.1,<4", "et_xmlfile>=1.1", "certifi"]
+WHEELS = ["numpy==2.5.2",  # pinned: 2.5.3 ships a 20 MB OpenBLAS on Windows
+           "openpyxl>=3.1,<4", "et_xmlfile>=1.1", "certifi"]
 
 
 def log(*a):
