@@ -352,7 +352,8 @@
       const last = +localStorage.getItem('sb.updateCheck') || 0;
       if (Date.now() - last < 20 * 3600e3) { const v = localStorage.getItem('sb.updateAvail'); if (v && v !== st.version) { S.updateAvail = v; renderShell(); } return; }
       localStorage.setItem('sb.updateCheck', String(Date.now()));
-      const r = await api('POST', 'update/check');
+      const r = await api('POST', 'update/check?quiet=1');
+      if (r.error) return;
       localStorage.setItem('sb.updateAvail', r.newer ? r.version : '');
       if (r.newer) { S.updateAvail = r.version; renderShell(); toast(`${st.app.name} ${r.version} is available — Jobs & setup → Update.`); }
     } catch (e) { /* offline or no repo: stay quiet */ }

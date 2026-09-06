@@ -429,7 +429,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.events.emit("robot", {"robot_id": act.get("robot_id")})
             return self._json({"done": act["label"] if act else None, **app.undo.state()})
         if path == "update/check" and m == "POST":
-            return self._json(app.updater.check())
+            try:
+                return self._json(app.updater.check())
+            except Exception as e:  # noqa — offline / no repo / GitHub down: a plain answer, not a 500 in the log
+                log.info("update check failed: %s", e)
+                return self._json({"error": f"Could not check for updates: {e}"}, 502 if "quiet" not in qs else 200)
         if path == "update/status" and m == "GET":
             return self._json({"state": app.updater.state, "latest": app.updater.latest, "current": current_version(), "target": update_target(),
                                "repo": app.updater.repo(), "old_versions": app.updater.old_versions(), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable()})
