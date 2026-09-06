@@ -618,7 +618,7 @@
         const mesh = res.meshes[0];
         if (it.part) await api('PUT', `parts/${it.part.id}`, { mesh_id: mesh.id, force: true });
         else await api('POST', `robots/${S.robotId}/parts`, { line_item_id: it.id, mesh_id: mesh.id });
-        await refreshRobot(); toast('Mesh attached; slicing…');
+        await refreshRobot(); if (S.view === 'part') await renderMain(); toast('Mesh attached; slicing…');
       } catch (e) { fail(e); }
     });
     inp.click();
@@ -860,6 +860,15 @@
     S.partRefresh = async (force = false) => {
       const p2 = await api('GET', `parts/${pid}`);
       if (S.view !== 'part' || !document.body.contains(sweepCard)) return;
+      // a new/replaced mesh or the current slice finishing changes the header, viewer, layer view and settings hint:
+      // rebuild the whole page (unless the user is mid-edit or has a dialog open — then wait for the next event)
+      const sig = x => `${x.mesh ? `${x.mesh.id}:${x.scale}:${x.mirror}` : ''}|${x.slice ? `${x.slice.id}:${x.slice.status === 'done'}` : ''}`;
+      if (sig(p2) !== sig(lastP) || S.partFullPending) {
+        if (!document.querySelector('#main input:focus, #main select:focus, #main textarea:focus, #main .editing, .modal-bg')) { S.partFullPending = false; await renderMain(); return; }
+        clearTimeout(S.partFullTimer);
+        S.partFullTimer = setTimeout(() => { if (S.partFullPending && S.view === 'part' && S.partRefresh) S.partRefresh().catch(() => {}); }, 2500);
+        S.partFullPending = true;
+      }
       lastP = p2;
       const nc = buildSweep(p2);
       if ((force || !busy(sweepCard)) && sweepCard.outerHTML !== nc.outerHTML) { sweepCard.replaceWith(nc); sweepCard = nc; }
@@ -1558,7 +1567,7 @@
   let rendering = false;
   async function renderMain() {
     const m = $('#main'); const sy = window.scrollY, st = m.scrollTop;
-    S.partRefresh = null;
+    S.partRefresh = null; S.partFullPending = false;
     m.textContent = '';
     const fn = V[S.view] || V.home;
     try { await fn(m); } catch (e) { m.append(h('div', { class: 'empty' }, 'Something went wrong: ' + e.message)); console.error(e); }
