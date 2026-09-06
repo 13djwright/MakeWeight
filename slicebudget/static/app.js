@@ -429,13 +429,13 @@
     const tbl = h('table', null, h('thead', null, h('tr', null, h('th', { class: 'num' }, 'Qty'), h('th', null, 'Description'), h('th', null, 'Purpose / notes'), h('th', { class: 'num' }, 'Estimated'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Best'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Status'), h('th', null, ''), h('th', null, ''))));
     const tb = h('tbody'); tbl.append(tb);
     for (const s of r.sections) {
-      tb.append(h('tr', { class: 'sec-h' }, h('td', { colspan: 6 }, s.name, !s.counts && h('span', { class: 'off' }, 'not counted toward weigh-in')),
+      tb.append(h('tr', { class: 'sec-h', dataset: { key: 's' + s.id } }, h('td', { colspan: 6 }, s.name, !s.counts && h('span', { class: 'off' }, 'not counted toward weigh-in')),
         h('td', { class: 'num' }, s.counts ? fmt(s.subtotal) : `(${fmt(s.subtotal)})`), h('td', { colspan: 3 }),
         h('td', null, h('button', { class: 'btn icon', title: 'Section menu', onClick: e => sectionMenu(e.currentTarget, s) }, '⋯'))));
       for (const it of s.items) tb.append(lineRow(it, s));
       tb.append(newLineRow(s));
     }
-    tb.append(h('tr', { class: 'sum' }, h('td'), h('td', null, 'Weigh-in total'), h('td'), h('td', { class: 'num' }, fmt(t.estimated_only)), h('td'), h('td'), h('td', { class: 'num' }, fmt(t.best_known)), h('td', { class: 'num' }, money(r.sections.reduce((a, s) => a + s.items.reduce((b, i) => b + (i.price || 0) * (i.qty || 0), 0), 0))), h('td', { colspan: 3 })));
+    tb.append(h('tr', { class: 'sum', dataset: { key: 'sum' } }, h('td'), h('td', null, 'Weigh-in total'), h('td'), h('td', { class: 'num' }, fmt(t.estimated_only)), h('td'), h('td'), h('td', { class: 'num' }, fmt(t.best_known)), h('td', { class: 'num' }, money(r.sections.reduce((a, s) => a + s.items.reduce((b, i) => b + (i.price || 0) * (i.qty || 0), 0), 0))), h('td', { colspan: 3 })));
     m.append(h('div', { class: 'tw' }, tbl));
     m.append(h('p', { class: 'hint' }, 'Cells with a text cursor (and a ✎ on hover) edit in place — Enter saves, Esc cancels; buttons ending in “…” open a dialog. Red dot = needs re-weigh (set automatically when a profile, mesh or library weight changes after a measurement). Grey rows are excluded from the total (e.g. an assembly line supersedes them).'));
   };
@@ -445,7 +445,7 @@
   function lineRow(it, s) {
     const upd = (patch) => api('PUT', `items/${it.id}`, patch).then(refreshRobot);
     const p = it.part;
-    const tr = h('tr', { class: (!it.counted ? 'dim ' : '') + (p && p.locked ? 'locked' : '') });
+    const tr = h('tr', { class: (!it.counted ? 'dim ' : '') + (p && p.locked ? 'locked' : ''), dataset: { key: 'i' + it.id } });
     tr.append(edCell(it.qty, v => upd({ qty: v }), { type: 'number', cls: 'num', fmt: v => Number(v) % 1 ? v : String(v) }));
     // description
     const descCell = edCell(it.description, v => upd({ description: v }), { render: v => h('span', null, v || h('i', { style: { color: 'var(--ink3)' } }, 'untitled'), p && p.locked && h('span', { class: 'pill lock', style: { marginLeft: '6px' } }, '🔒'), p && h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.filament ? p.filament.name : ''}` : 'printed part · no mesh attached', p.role ? ` · ${p.role}` : '')) });
@@ -463,7 +463,7 @@
       tr.append(edCell(it.est_grams, v => upd({ est_grams: v }), { type: 'number', cls: 'num', render: v => h('span', null, fmt(v), h('span', { class: 'src' }, it.est_source || 'manual')) }));
     }
     // measured
-    tr.append(h('td', { class: 'num ed', title: 'Add a weigh-in', onClick: () => weighInModal(it) }, it.measured_grams != null ? fmt(it.measured_grams) : h('span', { style: { color: 'var(--ink3)' } }, '—'), it.weigh_ins.length > 1 && h('span', { class: 'src' }, `×${it.weigh_ins.length}`)));
+    tr.append(h('td', { class: 'num ed dlg', title: 'Add a weigh-in…', onClick: () => weighInModal(it) }, it.measured_grams != null ? fmt(it.measured_grams) : h('span', { style: { color: 'var(--ink3)' } }, '—'), it.weigh_ins.length > 1 && h('span', { class: 'src' }, `×${it.weigh_ins.length}`)));
     tr.append(h('td', { class: 'num' }, fmt(it.best_grams)));
     tr.append(h('td', { class: 'num', style: { fontWeight: 600 } }, fmt(it.total_grams)));
     tr.append(edCell(it.price, v => upd({ price: v }), { type: 'number', cls: 'num', fmt: v => Number(v).toFixed(2), placeholder: '' }));
@@ -493,7 +493,7 @@
     }
     desc.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
     est.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
-    const tr = h('tr', { class: 'new-row nosort' },
+    const tr = h('tr', { class: 'new-row nosort', dataset: { key: 'n' + s.id } },
       h('td', { class: 'num' }, qty), h('td', null, desc), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
       h('td', { colspan: 6, class: 'rng' }, 'Enter adds the line · more fields via ⋯ after adding'),
       h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'Add with all fields…', 'aria-label': 'Add a line with all fields', onClick: () => addLineModal(s.id) }, '⋯')));
@@ -645,7 +645,7 @@
       const ptime = j && j.status === 'done' && j.print_time_s ? j.print_time_s * it.qty : null; if (ptime) totTime += ptime;
       const cost = g != null && p.filament && p.filament.cost_per_kg ? g / 1000 * p.filament.cost_per_kg * it.qty : null; if (cost) totCost += cost;
       const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(refreshRobot).catch(fail);
-      tb.append(h('tr', { class: p.locked ? 'locked' : '' },
+      tb.append(h('tr', { class: p.locked ? 'locked' : '', dataset: { key: 'p' + p.id } },
         h('td', null, h('a', { href: '#/part/' + p.id, style: { color: 'inherit', fontWeight: 600, textDecoration: 'none' } }, it.description), h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.mesh.bbox ? p.mesh.bbox.size.map(v => v.toFixed(0)).join('×') + ' mm' : ''} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³` : h('span', { style: { color: 'var(--warn)' } }, 'no mesh attached'))),
         h('td', { class: 'num' }, it.qty),
         p.locked ? h('td', null, filChip(p.filament)) : h('td', { class: 'ed' }, select(st.filaments.map(f => [f.id, f.name]), p.filament_id, { onChange: e => upd({ filament_id: +e.target.value }) })),
@@ -662,7 +662,7 @@
         h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'More actions', 'aria-label': 'Part menu', onClick: e => partMenu(e.currentTarget, it, p) }, '⋯'),
           h('button', { class: 'btn icon del', title: 'Delete part and its sheet line (undo with Ctrl/⌘+Z)', 'aria-label': 'Delete part', onClick: async () => { try { await api('DELETE', `parts/${p.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description}”`); } catch (e) { fail(e); } } }, '✕'))));
     }
-    tb.append(h('tr', { class: 'sum' }, h('td', null, 'Printed total'), h('td', { class: 'num' }, parts.reduce((a, x) => a + x.it.qty, 0)), h('td', { colspan: 4 }), h('td', { class: 'num' }, fmt(tot)), h('td', { class: 'num' }, fmt(totC)), h('td'), h('td', { class: 'num' }, fmt(totBest)), h('td', { class: 'num' }, totTime ? hms(totTime) : ''), h('td', { class: 'num' }, totCost ? '$' + totCost.toFixed(2) : ''), h('td', { colspan: 2 })));
+    tb.append(h('tr', { class: 'sum', dataset: { key: 'sum' } }, h('td', null, 'Printed total'), h('td', { class: 'num' }, parts.reduce((a, x) => a + x.it.qty, 0)), h('td', { colspan: 4 }), h('td', { class: 'num' }, fmt(tot)), h('td', { class: 'num' }, fmt(totC)), h('td'), h('td', { class: 'num' }, fmt(totBest)), h('td', { class: 'num' }, totTime ? hms(totTime) : ''), h('td', { class: 'num' }, totCost ? '$' + totCost.toFixed(2) : ''), h('td', { colspan: 2 })));
     m.append(h('div', { class: 'tw' }, tbl));
     if (!parts.length) m.append(h('p', { class: 'empty' }, 'No printed parts yet. Drop STL files above.'));
     m.append(h('p', { class: 'hint' }, '“× corr.” is the slicer figure times this filament’s scale-derived correction. “Total” uses your measured weight where you have one, otherwise the corrected slicer estimate.'));
@@ -792,45 +792,59 @@
     } else canvas.replaceWith(h('div', { class: 'drop' }, 'Attach a mesh to preview and slice this part'));
 
     // orientation sweep + slices table
-    const jobs = p.jobs || [];
-    const orientJobs = jobs.filter(j => j.purpose === 'orient');
-    const sweepRows = h('tbody');
-    const cur = p.slice;
-    const seen = new Set();
-    const curVer = (S.state.slicer && S.state.slicer.slicer) || '';
-    const engLabel = v => !v ? '' : v.startsWith('bambu-') ? 'Bambu Studio ' + v.slice(6) : 'PrusaSlicer ' + v.split('+')[0];
-    // one row per profile+filament, preferring a result from the active slicer over an older engine's
-    const rows = jobs.filter(j => j.purpose !== 'orient' && j.orient_key === (cur ? cur.orient_key : j.orient_key))
-      .sort((a, b) => ((b.slicer_version === curVer) - (a.slicer_version === curVer)) || (b.id - a.id))
-      .filter(j => { const k = j.profile_hash + j.filament_key; if (seen.has(k)) return false; seen.add(k); return true; });
-    rows.sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9));
-    // rows sliced with a different filament than the part uses now are shown, but greyed
-    const fk = j => (j.filament_key || '').split('|');
-    const sameFil = j => { if (!p.filament) return true; const k = fk(j); return Math.abs(parseFloat(k[0]) - p.filament.density) < 1e-4 && Math.abs(parseFloat(k[1] || 1) - (p.filament.flow || 1)) < 1e-4 && (k.length < 5 || k[4] === (p.filament.name || '').replace(/\|/g, '/')); };
-    const stale = rows.filter(j => j.status === 'done' && ((curVer && j.slicer_version !== curVer) || !sameFil(j)));
-    for (const j of rows) {
-      const pr = j.profile_json ? JSON.parse(j.profile_json) : null;
-      const isCur = cur && j.cache_key === cur.cache_key;
-      const otherEng = j.status === 'done' && curVer && j.slicer_version !== curVer;
-      const otherFil = j.status === 'done' && !sameFil(j);
-      const why = [otherEng && `sliced with ${engLabel(j.slicer_version)} (active: ${engLabel(curVer)})`, otherFil && `sliced with filament ${fk(j)[4] || fk(j)[0] + ' g/cm³'} (part uses ${p.filament ? p.filament.name : '?'})`].filter(Boolean).join('; ');
-      sweepRows.append(h('tr', { class: (isCur ? 'sel ' : '') + (otherEng || otherFil ? 'dim' : ''), title: why },
-        h('td', null, h('span', { class: 'prof' }, pr ? profString(pr) : '?'), isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current'), otherEng && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, engLabel(j.slicer_version).split(' ')[0]), otherFil && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, 'other filament')),
-        h('td', { class: 'num', style: { fontWeight: 600 } }, j.status === 'done' ? fmt(j.grams, 2) : h('span', { class: 'pill ' + (j.status === 'error' ? 'bad' : 'warn'), title: j.error }, j.status)),
-        h('td', { class: 'num' }, j.status === 'done' && p.filament ? fmt(j.grams * (p.filament.correction.factor || 1), 2) : ''),
-        h('td', { class: 'num', style: { color: cur && cur.grams != null && j.grams != null ? (j.grams > cur.grams ? 'var(--bad)' : 'var(--good)') : '' } }, cur && cur.grams != null && j.grams != null && !isCur ? signed(j.grams - cur.grams, 2) : ''),
-        h('td', { class: 'num' }, j.print_time_s ? hms(j.print_time_s) : ''),
-        h('td', { class: 'num' }, j.time_s ? secs(j.time_s) : (j.status === 'done' ? 'cached' : '')),
-        h('td', null, !isCur && pr && !p.locked && h('button', { class: 'btn small', onClick: () => applyParamsAsProfile(p, pr) }, 'Apply'))));
-    }
-    left.append(h('div', { class: 'card', style: { marginTop: '12px' } }, h('h3', null, 'Profile sweep · real slices · this orientation', h('div', { class: 'tb' },
-      stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer and this part’s filament', onClick: async () => { try { for (const j of stale) { const pr = JSON.parse(j.profile_json); await api('POST', `parts/${p.id}/slice`, { params: pr }); } render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
-      h('button', { class: 'btn small', onClick: () => customSliceModal(p) }, '＋ Slice a profile…'),
-      h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
-      h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),
-      h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Profile'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th'))), sweepRows)),
-      !rows.length && h('p', { class: 'hint' }, 'No slices yet for this orientation.'),
-      orientJobs.length ? h('div', null, h('h3', { style: { marginTop: '14px' } }, 'Orientation sweep · current profile'), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...orientJobs.filter((j, i, a) => a.findIndex(x => x.orient_key === j.orient_key) === i).sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9)).map(j => h('tr', null, h('td', { class: 'mono' }, j.orient_key.split('|')[0].replace('q', 'quat ')), h('td', { class: 'num' }, j.status === 'done' ? fmt(j.grams, 2) + ' g' : j.status), h('td', null, j.status === 'done' && !p.locked && h('button', { class: 'btn small', onClick: () => upd({ orient: { mode: 'manual', quat: j.orient_key.split('|')[0].slice(1).split(',').map(Number), label: 'from sweep' } }) }, 'Use')))))))) : null));
+    const buildSweep = (p) => {
+      const jobs = p.jobs || [];
+      const orientJobs = jobs.filter(j => j.purpose === 'orient');
+      const sweepRows = h('tbody');
+      const cur = p.slice;
+      const seen = new Set();
+      const curVer = (S.state.slicer && S.state.slicer.slicer) || '';
+      const engLabel = v => !v ? '' : v.startsWith('bambu-') ? 'Bambu Studio ' + v.slice(6) : 'PrusaSlicer ' + v.split('+')[0];
+      // one row per profile+filament, preferring a result from the active slicer over an older engine's
+      const rows = jobs.filter(j => j.purpose !== 'orient' && j.orient_key === (cur ? cur.orient_key : j.orient_key))
+        .sort((a, b) => ((b.slicer_version === curVer) - (a.slicer_version === curVer)) || (b.id - a.id))
+        .filter(j => { const k = j.profile_hash + j.filament_key; if (seen.has(k)) return false; seen.add(k); return true; });
+      rows.sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9));
+      // rows sliced with a different filament than the part uses now are shown, but greyed
+      const fk = j => (j.filament_key || '').split('|');
+      const sameFil = j => { if (!p.filament) return true; const k = fk(j); return Math.abs(parseFloat(k[0]) - p.filament.density) < 1e-4 && Math.abs(parseFloat(k[1] || 1) - (p.filament.flow || 1)) < 1e-4 && (k.length < 5 || k[4] === (p.filament.name || '').replace(/\|/g, '/')); };
+      const stale = rows.filter(j => j.status === 'done' && ((curVer && j.slicer_version !== curVer) || !sameFil(j)));
+      for (const j of rows) {
+        const pr = j.profile_json ? JSON.parse(j.profile_json) : null;
+        const isCur = cur && j.cache_key === cur.cache_key;
+        const otherEng = j.status === 'done' && curVer && j.slicer_version !== curVer;
+        const otherFil = j.status === 'done' && !sameFil(j);
+        const why = [otherEng && `sliced with ${engLabel(j.slicer_version)} (active: ${engLabel(curVer)})`, otherFil && `sliced with filament ${fk(j)[4] || fk(j)[0] + ' g/cm³'} (part uses ${p.filament ? p.filament.name : '?'})`].filter(Boolean).join('; ');
+        sweepRows.append(h('tr', { class: (isCur ? 'sel ' : '') + (otherEng || otherFil ? 'dim' : ''), title: why },
+          h('td', null, h('span', { class: 'prof' }, pr ? profString(pr) : '?'), isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current'), otherEng && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, engLabel(j.slicer_version).split(' ')[0]), otherFil && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, 'other filament')),
+          h('td', { class: 'num', style: { fontWeight: 600 } }, j.status === 'done' ? fmt(j.grams, 2) : h('span', { class: 'pill ' + (j.status === 'error' ? 'bad' : 'warn'), title: j.error }, j.status)),
+          h('td', { class: 'num' }, j.status === 'done' && p.filament ? fmt(j.grams * (p.filament.correction.factor || 1), 2) : ''),
+          h('td', { class: 'num', style: { color: cur && cur.grams != null && j.grams != null ? (j.grams > cur.grams ? 'var(--bad)' : 'var(--good)') : '' } }, cur && cur.grams != null && j.grams != null && !isCur ? signed(j.grams - cur.grams, 2) : ''),
+          h('td', { class: 'num' }, j.print_time_s ? hms(j.print_time_s) : ''),
+          h('td', { class: 'num' }, j.time_s ? secs(j.time_s) : (j.status === 'done' ? 'cached' : '')),
+          h('td', null, !isCur && pr && !p.locked && h('button', { class: 'btn small', onClick: () => applyParamsAsProfile(p, pr) }, 'Apply'))));
+      }
+      return h('div', { class: 'card sweep', style: { marginTop: '12px' } }, h('h3', null, 'Profile sweep · real slices · this orientation', h('div', { class: 'tb' },
+        stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer and this part’s filament', onClick: async () => { try { for (const j of stale) { const pr = JSON.parse(j.profile_json); await api('POST', `parts/${p.id}/slice`, { params: pr }); } render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
+        h('button', { class: 'btn small', onClick: () => customSliceModal(p) }, '＋ Slice a profile…'),
+        h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
+        h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),
+        h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Profile'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th'))), sweepRows)),
+        !rows.length && h('p', { class: 'hint' }, 'No slices yet for this orientation.'),
+        orientJobs.length ? h('div', null, h('h3', { style: { marginTop: '14px' } }, 'Orientation sweep · current profile'), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...orientJobs.filter((j, i, a) => a.findIndex(x => x.orient_key === j.orient_key) === i).sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9)).map(j => h('tr', null, h('td', { class: 'mono' }, j.orient_key.split('|')[0].replace('q', 'quat ')), h('td', { class: 'num' }, j.status === 'done' ? fmt(j.grams, 2) + ' g' : j.status), h('td', null, j.status === 'done' && !p.locked && h('button', { class: 'btn small', onClick: () => upd({ orient: { mode: 'manual', quat: j.orient_key.split('|')[0].slice(1).split(',').map(Number), label: 'from sweep' } }) }, 'Use')))))))) : null);
+    };
+    let sweepCard = buildSweep(p);
+    left.append(sweepCard);
+    // background refresh while slices land: swap only the sweep card and the header status, never the viewer
+    S.partRefresh = async () => {
+      const p2 = await api('GET', `parts/${pid}`);
+      if (S.view !== 'part' || !document.body.contains(sweepCard)) return;
+      const nc = buildSweep(p2);
+      if (!busy(sweepCard) && sweepCard.outerHTML !== nc.outerHTML) { sweepCard.replaceWith(nc); sweepCard = nc; }
+      const oldCall = previewCard.querySelector('.callout.bad'); const err = p2.slice && p2.slice.status === 'error';
+      if (oldCall && !err) oldCall.remove();
+      else if (!oldCall && err) previewCard.append(h('div', { class: 'callout bad' }, h('b', null, 'This orientation did not slice. '), p2.slice.error || 'The slicer failed.'));
+    };
 
     // right column: settings
     const prof = p.profile, params = prof ? prof.params : null;
@@ -1423,7 +1437,7 @@
     const qtb = h('tbody');
     for (const x of j.jobs) {
       const pr = x.profile_json ? JSON.parse(x.profile_json) : null;
-      qtb.append(h('tr', null, h('td', null, h('span', { class: 'dot ' + x.status }), x.status), h('td', null, x.part_name || `part #${x.part_id}`), h('td', { class: 'prof' }, pr ? profString(pr) : ''), h('td', null, x.purpose || ''), h('td', { class: 'num' }, x.status === 'running' ? secs((Date.now() / 1000) - x.started) : (x.time_s != null ? secs(x.time_s) : '')), h('td', { class: 'num' }, x.grams != null ? fmt(x.grams, 2) + ' g' : (x.error ? h('span', { class: 'err', title: x.error }, x.error.slice(0, 60)) : ''))));
+      qtb.append(h('tr', { dataset: { key: 'j' + x.id } }, h('td', null, h('span', { class: 'dot ' + x.status }), x.status), h('td', null, x.part_name || `part #${x.part_id}`), h('td', { class: 'prof' }, pr ? profString(pr) : ''), h('td', null, x.purpose || ''), h('td', { class: 'num' }, x.status === 'running' ? secs((Date.now() / 1000) - x.started) : (x.time_s != null ? secs(x.time_s) : '')), h('td', { class: 'num' }, x.grams != null ? fmt(x.grams, 2) + ' g' : (x.error ? h('span', { class: 'err', title: x.error }, x.error.slice(0, 60)) : ''))));
     }
     left.append(h('div', { class: 'card' }, h('h3', null, `Queue · ${j.state.running} running · ${j.state.queued} queued`, h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => api('POST', 'jobs/cancel', {}).then(render) }, 'Cancel queued'), h('button', { class: 'btn small', onClick: () => api('POST', 'jobs/retry_errors', {}).then(render) }, 'Retry errors'))),
       h('div', { class: 'tw', style: { maxHeight: '420px', overflow: 'auto' } }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Status'), h('th', null, 'Part'), h('th', null, 'Profile'), h('th', null, 'Purpose'), h('th', { class: 'num' }, 'Time'), h('th', { class: 'num' }, 'Result'))), qtb)), !j.jobs.length && h('p', { class: 'hint' }, 'No jobs yet.')));
@@ -1472,12 +1486,54 @@
   }
 
   // ------------------------------------------------------------ render loop
-  async function refreshRobot(rerender = true) { if (S.robotId) await loadRobot(S.robotId); renderShell(); if (rerender && ['sheet', 'parts'].includes(S.view)) await renderMain(); }
+  async function refreshRobot(rerender = true) { if (S.robotId) await loadRobot(S.robotId); renderShell(); if (rerender && ['sheet', 'parts'].includes(S.view)) await softRender(); }
   let rendering = false;
   async function renderMain() {
-    const m = $('#main'); m.textContent = '';
+    const m = $('#main'); const sy = window.scrollY, st = m.scrollTop;
+    S.partRefresh = null;
+    m.textContent = '';
     const fn = V[S.view] || V.home;
     try { await fn(m); } catch (e) { m.append(h('div', { class: 'empty' }, 'Something went wrong: ' + e.message)); console.error(e); }
+    requestAnimationFrame(() => { window.scrollTo(0, sy); m.scrollTop = st; });
+  }
+  // Background refresh (slice results landing while you work): re-render into a detached tree and patch only what
+  // changed, keeping scroll position, open menus and any cell you are editing.
+  const busy = el => el.matches(':focus-within') || el.querySelector('.editing, :focus');
+  function patchRows(oldTb, newTb) {
+    const oldMap = new Map([...oldTb.children].filter(r => r.dataset.key).map(r => [r.dataset.key, r]));
+    let prev = null;
+    for (const nr of [...newTb.children]) {
+      const k = nr.dataset.key; const or = k ? oldMap.get(k) : null;
+      let node = nr;
+      if (or) { node = (busy(or) || or.outerHTML === nr.outerHTML) ? or : nr; oldMap.delete(k); if (node === nr) or.replaceWith(nr); }
+      const want = prev ? prev.nextSibling : oldTb.firstChild;
+      if (want !== node) oldTb.insertBefore(node, want);
+      prev = node;
+    }
+    for (const r of oldMap.values()) r.remove();
+    let tail = prev ? prev.nextSibling : oldTb.firstChild;
+    while (tail) { const nx = tail.nextSibling; if (!tail.dataset.key) tail.remove(); tail = nx; }
+  }
+  function morph(oldRoot, newRoot) {
+    const olds = [...oldRoot.children], news = [...newRoot.children];
+    for (let i = 0; i < news.length; i++) {
+      const n = news[i], o = olds[i];
+      if (!o) { oldRoot.append(n); continue; }
+      const ot = o.querySelector(':scope > table > tbody'), nt = n.querySelector(':scope > table > tbody');
+      if (ot && nt && o.tagName === n.tagName && o.className === n.className) { patchRows(ot, nt); continue; }
+      if (o.tagName === n.tagName && o.className === n.className && o.outerHTML === n.outerHTML) continue;
+      if (busy(o)) continue;
+      o.replaceWith(n);
+    }
+    for (let i = news.length; i < olds.length; i++) olds[i].remove();
+  }
+  async function softRender() {
+    if (S.view === 'part' && S.partRefresh) { try { await S.partRefresh(); return; } catch (e) { console.error(e); } }
+    if (!['sheet', 'parts', 'jobs', 'library', 'optimizer'].includes(S.view)) return renderMain();
+    if (document.querySelector('.modal-bg')) return;                    // never yank the page under a dialog
+    const tmp = h('div');
+    try { await (V[S.view] || V.home)(tmp); } catch (e) { console.error(e); return; }
+    morph($('#main'), tmp);
   }
   async function render() { renderShell(); await renderMain(); }
   function connectSSE() {
@@ -1494,7 +1550,7 @@
         timer = setTimeout(async () => {
           if (S.robotId) await loadRobot(S.robotId);
           renderShell();
-          if (['sheet', 'parts', 'part', 'jobs'].includes(S.view) || (S.view === 'optimizer' && S.pollRun)) renderMain();
+          if (['sheet', 'parts', 'part', 'jobs'].includes(S.view) || (S.view === 'optimizer' && S.pollRun)) softRender();
         }, 400);
       }
     };
