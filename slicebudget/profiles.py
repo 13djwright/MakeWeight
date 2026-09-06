@@ -8,7 +8,7 @@ import json
 BAMBU_DEFAULTS = {
     0.4: {
         "layer_height": 0.20, "first_layer_height": 0.20,
-        "walls": 2, "top": 5, "bottom": 3, "top_min_thickness": 1.0, "bottom_min_thickness": 0.0,
+        "walls": 2, "top": 5, "bottom": 3, "top_min_thickness": 0.0, "bottom_min_thickness": 0.0,
         "infill": 15, "pattern": "cubic",
         "line_widths": {"outer": 0.42, "inner": 0.45, "infill": 0.45, "solid": 0.42, "top": 0.42, "first": 0.50},
         "infill_wall_overlap": 15, "one_wall_top": True, "min_sparse_area": 15.0, "thin_walls": False,
@@ -16,7 +16,7 @@ BAMBU_DEFAULTS = {
     },
     0.6: {
         "layer_height": 0.30, "first_layer_height": 0.30,
-        "walls": 2, "top": 3, "bottom": 3, "top_min_thickness": 0.8, "bottom_min_thickness": 0.0,
+        "walls": 2, "top": 3, "bottom": 3, "top_min_thickness": 0.0, "bottom_min_thickness": 0.0,
         "infill": 15, "pattern": "cubic",
         "line_widths": {"outer": 0.62, "inner": 0.62, "infill": 0.62, "solid": 0.62, "top": 0.62, "first": 0.62},
         "infill_wall_overlap": 15, "one_wall_top": True, "min_sparse_area": 15.0, "thin_walls": False,

@@ -682,7 +682,18 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 2:
                 if m == "GET":
                     v = app._part_view(p)
-                    v["jobs"] = db.q("SELECT * FROM slice_jobs WHERE part_id=? ORDER BY id DESC LIMIT 200", [pid])
+                    jobs = db.q("SELECT * FROM slice_jobs WHERE part_id=? ORDER BY id DESC LIMIT 300", [pid])
+                    # name the profile each job used (by parameter hash) so the sweep table can say "Chassis 5W" rather than a bare string
+                    by_hash = {}
+                    for pr in db.q("SELECT id, name, params_json FROM profiles"):
+                        by_hash.setdefault(profiles.profile_hash(loads(pr["params_json"], {})), pr["name"])
+                    for j in jobs:
+                        params = loads(j.get("profile_json"), None)
+                        j["profile_name"] = by_hash.get(profiles.profile_hash(params)) if params else None
+                        fk = (j.get("filament_key") or "").split("|")
+                        j["filament_name"] = fk[4] if len(fk) > 4 else (f"{fk[0]} g/cm³" if fk and fk[0] else "")
+                        j["engine"] = "Bambu Studio" if (j.get("slicer_version") or "").startswith("bambu-") else "PrusaSlicer"
+                    v["jobs"] = jobs
                     return self._json(v)
                 if m == "PUT":
                     return self._json(self._update_part(pid, self._jbody()))
@@ -770,6 +781,13 @@ class Handler(BaseHTTPRequestHandler):
                 rows = db.q("SELECT j.*, p.robot_id, li.description part_name FROM slice_jobs j LEFT JOIN printed_parts p ON p.id=j.part_id LEFT JOIN line_items li ON li.id=p.line_item_id WHERE j.status IN ('queued','running') OR j.id IN (SELECT id FROM slice_jobs ORDER BY id DESC LIMIT 40) ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, j.priority, j.id DESC LIMIT 120")
             stats = db.one("SELECT COUNT(*) n, COALESCE(SUM(time_s),0) t FROM slice_jobs WHERE status='done'")
             return self._json({"jobs": rows, "state": app.jobs.queue_state(), "cache": {"done": stats["n"], "time_s": stats["t"]}})
+        if path == "jobs/delete" and m == "POST":
+            ids = [int(i) for i in (self._jbody().get("ids") or [])]
+            if ids:
+                db.x(f"DELETE FROM slice_jobs WHERE status IN ('done','error','cancelled') AND id IN ({','.join('?' for _ in ids)})", ids)
+            return self._json({"ok": True, "deleted": len(ids)})
+        if re.match(r"^jobs/\d+$", path) and m == "DELETE":
+            jid = int(path.split("/")[1]); db.x("DELETE FROM slice_jobs WHERE id=? AND status IN ('done','error','cancelled')", [jid]); return self._json({"ok": True})
         if path == "jobs/cancel" and m == "POST":
             b = self._jbody(); app.jobs.cancel_queued(b.get("run_id"), b.get("part_id")); return self._json({"ok": True})
         if path == "jobs/clear_cache" and m == "POST":

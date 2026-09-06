@@ -77,9 +77,24 @@ def refresh_builtin_filaments(db: DB) -> int:
     return n
 
 
+def zero_min_thickness(db: DB) -> int:
+    """One-time (v2): layer counts mean exactly what they say — no hidden 'minimum shell thickness' rule."""
+    if (db.setting("profiles_v") or 1) >= 2:
+        return 0
+    n = 0
+    for r in db.q("SELECT * FROM profiles"):
+        params = json.loads(r["params_json"] or "{}")
+        if params.get("top_min_thickness") or params.get("bottom_min_thickness"):
+            params["top_min_thickness"] = 0.0; params["bottom_min_thickness"] = 0.0
+            db.update("profiles", r["id"], {"params_json": json.dumps(params)}); n += 1
+    db.set_setting("profiles_v", 2)
+    return n
+
+
 def ensure_seed(db: DB) -> None:
     if db.setting("seeded_v1"):
         refresh_builtin_filaments(db)
+        zero_min_thickness(db)
         return
     with db.transaction():
         for name, nozzles, bed in PRINTERS:
@@ -89,6 +104,7 @@ def ensure_seed(db: DB) -> None:
             fil_ids[name] = db.insert("filaments", {"name": name, "material": mat, "density": dens, "flow": flow, "color": color,
                                                      "cost_per_kg": cost, "max_vol_speed": mvs, "correction_json": "{}", "builtin": 1})
         db.set_setting("filaments_v", 2)
+        db.set_setting("profiles_v", 2)
         prof_ids = {}
         for nozzle in (0.4, 0.6):
             params = profiles.default_params(nozzle)

@@ -795,53 +795,74 @@
     const buildSweep = (p) => {
       const jobs = p.jobs || [];
       const orientJobs = jobs.filter(j => j.purpose === 'orient');
-      const sweepRows = h('tbody');
       const cur = p.slice;
-      const seen = new Set();
       const curVer = (S.state.slicer && S.state.slicer.slicer) || '';
       const engLabel = v => !v ? '' : v.startsWith('bambu-') ? 'Bambu Studio ' + v.slice(6) : 'PrusaSlicer ' + v.split('+')[0];
-      // one row per profile+filament, preferring a result from the active slicer over an older engine's
-      const rows = jobs.filter(j => j.purpose !== 'orient' && j.orient_key === (cur ? cur.orient_key : j.orient_key))
-        .sort((a, b) => ((b.slicer_version === curVer) - (a.slicer_version === curVer)) || (b.id - a.id))
-        .filter(j => { const k = j.profile_hash + j.filament_key; if (seen.has(k)) return false; seen.add(k); return true; });
-      rows.sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9));
-      // rows sliced with a different filament than the part uses now are shown, but greyed
-      const fk = j => (j.filament_key || '').split('|');
-      const sameFil = j => { if (!p.filament) return true; const k = fk(j); return Math.abs(parseFloat(k[0]) - p.filament.density) < 1e-4 && Math.abs(parseFloat(k[1] || 1) - (p.filament.flow || 1)) < 1e-4 && (k.length < 5 || k[4] === (p.filament.name || '').replace(/\|/g, '/')); };
-      const stale = rows.filter(j => j.status === 'done' && ((curVer && j.slicer_version !== curVer) || !sameFil(j)));
-      for (const j of rows) {
-        const pr = j.profile_json ? JSON.parse(j.profile_json) : null;
-        const isCur = cur && j.cache_key === cur.cache_key;
-        const otherEng = j.status === 'done' && curVer && j.slicer_version !== curVer;
-        const otherFil = j.status === 'done' && !sameFil(j);
-        const why = [otherEng && `sliced with ${engLabel(j.slicer_version)} (active: ${engLabel(curVer)})`, otherFil && `sliced with filament ${fk(j)[4] || fk(j)[0] + ' g/cm³'} (part uses ${p.filament ? p.filament.name : '?'})`].filter(Boolean).join('; ');
-        sweepRows.append(h('tr', { class: (isCur ? 'sel ' : '') + (otherEng || otherFil ? 'dim' : ''), title: why },
-          h('td', null, h('span', { class: 'prof' }, pr ? profString(pr) : '?'), isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current'), otherEng && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, engLabel(j.slicer_version).split(' ')[0]), otherFil && h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, 'other filament')),
+      // one row per exact result (profile + filament + engine); newest wins for identical cache keys
+      const seen = new Set();
+      const all = jobs.filter(j => j.purpose !== 'orient' && j.orient_key === (cur ? cur.orient_key : j.orient_key))
+        .sort((a, b) => b.id - a.id).filter(j => { if (seen.has(j.cache_key)) return false; seen.add(j.cache_key); return true; })
+        .map(j => { const pr = j.profile_json ? JSON.parse(j.profile_json) : {}; return { j, pr, prof: j.profile_name || 'custom', fil: j.filament_name || '—', eng: engLabel(j.slicer_version).split(' ')[0] || '—' }; });
+      // ---- filters (remembered per part)
+      const F = S.cache.sweepF = S.cache.sweepF || {}; const f = F[p.id] = F[p.id] || {};
+      const cols = [['prof', 'Profile', r => r.prof], ['walls', 'Walls', r => r.pr.walls], ['top', 'Top', r => r.pr.top], ['bottom', 'Bottom', r => r.pr.bottom], ['infill', 'Infill %', r => r.pr.infill], ['pattern', 'Pattern', r => r.pr.pattern], ['fil', 'Filament', r => r.fil], ['eng', 'Engine', r => r.eng]];
+      const distinct = get => [...new Set(all.map(get).filter(v => v !== undefined && v !== null))].sort((x, y) => typeof x === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true }));
+      const rows = all.filter(r => cols.every(([k, , get]) => f[k] == null || f[k] === '' || String(get(r)) === String(f[k])));
+      const active = cols.filter(([k]) => f[k] != null && f[k] !== '').length;
+      const filterBar = h('div', { class: 'filters' },
+        ...cols.map(([k, label, get]) => { const vals = distinct(get); if (vals.length < 2 && !f[k]) return null; return h('label', { class: 'flt' }, h('span', null, label), select([['', 'Any'], ...vals.map(v => [v, String(v)])], f[k] ?? '', { onChange: e => { f[k] = e.target.value; redrawSweep(); } })); }),
+        active ? h('button', { class: 'btn small', onClick: () => { F[p.id] = {}; redrawSweep(); } }, `Clear filters (${active})`) : null,
+        h('span', { class: 'rng', style: { marginLeft: 'auto' } }, `${rows.length} of ${all.length} result${all.length === 1 ? '' : 's'}`));
+      // ---- selection for batch delete
+      const sel = S.cache.sweepSel = S.cache.sweepSel || new Set();
+      const deletable = r => !(cur && r.j.cache_key === cur.cache_key) && r.j.status !== 'running' && r.j.status !== 'queued';
+      const delRows = async (ids) => { if (!ids.length) return; try { await api('POST', 'jobs/delete', { ids }); ids.forEach(i => sel.delete(i)); toast(`Removed ${ids.length} result${ids.length > 1 ? 's' : ''}`); await S.partRefresh(true); } catch (e) { fail(e); } };
+      const selVisible = rows.filter(r => sel.has(r.j.id));
+      const master = h('input', { type: 'checkbox', title: 'Select all shown', checked: rows.length > 0 && rows.filter(deletable).every(r => sel.has(r.j.id)), onChange: e => { for (const r of rows) if (deletable(r)) { if (e.target.checked) sel.add(r.j.id); else sel.delete(r.j.id); } redrawSweep(); } });
+      const stale = rows.filter(r => r.j.status === 'done' && curVer && r.j.slicer_version !== curVer);
+      const sweepRows = h('tbody');
+      for (const r of rows) {
+        const { j, pr } = r;
+        const isCur = cur && j.cache_key === cur.cache_key, other = j.status === 'done' && curVer && j.slicer_version !== curVer;
+        sweepRows.append(h('tr', { class: (isCur ? 'sel ' : '') + (other ? 'dim' : ''), title: other ? `Sliced with ${engLabel(j.slicer_version)}; the active engine is ${engLabel(curVer)}` : '' },
+          h('td', null, h('input', { type: 'checkbox', checked: sel.has(j.id), disabled: !deletable(r), title: isCur ? 'The current result cannot be removed' : '', onChange: e => { if (e.target.checked) sel.add(j.id); else sel.delete(j.id); redrawSweep(); } })),
+          h('td', null, r.prof === 'custom' ? h('span', { class: 'rng' }, 'custom') : r.prof, isCur && h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'current')),
+          h('td', { class: 'prof' }, profString(pr)),
+          h('td', null, r.fil),
+          h('td', null, h('span', { class: 'pill ' + (other ? 'warn' : 'ver') }, r.eng)),
           h('td', { class: 'num', style: { fontWeight: 600 } }, j.status === 'done' ? fmt(j.grams, 2) : h('span', { class: 'pill ' + (j.status === 'error' ? 'bad' : 'warn'), title: j.error }, j.status)),
           h('td', { class: 'num' }, j.status === 'done' && p.filament ? fmt(j.grams * (p.filament.correction.factor || 1), 2) : ''),
           h('td', { class: 'num', style: { color: cur && cur.grams != null && j.grams != null ? (j.grams > cur.grams ? 'var(--bad)' : 'var(--good)') : '' } }, cur && cur.grams != null && j.grams != null && !isCur ? signed(j.grams - cur.grams, 2) : ''),
           h('td', { class: 'num' }, j.print_time_s ? hms(j.print_time_s) : ''),
           h('td', { class: 'num' }, j.time_s ? secs(j.time_s) : (j.status === 'done' ? 'cached' : '')),
-          h('td', null, !isCur && pr && !p.locked && h('button', { class: 'btn small', onClick: () => applyParamsAsProfile(p, pr) }, 'Apply'))));
+          h('td', { class: 'acts' }, !isCur && !p.locked && h('button', { class: 'btn small', title: 'Make this the part’s profile (creates or reuses a matching profile)', onClick: () => applyParamsAsProfile(p, pr) }, 'Apply'),
+            deletable(r) && h('button', { class: 'btn icon del', title: 'Remove this result', 'aria-label': 'Remove result', onClick: () => delRows([j.id]) }, '✕'))));
       }
-      return h('div', { class: 'card sweep', style: { marginTop: '12px' } }, h('h3', null, 'Profile sweep · real slices · this orientation', h('div', { class: 'tb' },
-        stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer and this part’s filament', onClick: async () => { try { for (const j of stale) { const pr = JSON.parse(j.profile_json); await api('POST', `parts/${p.id}/slice`, { params: pr }); } render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
+      return h('div', { class: 'card sweep', style: { marginTop: '12px' } }, h('h3', null, 'Slice results · this orientation', h('div', { class: 'tb' },
+        selVisible.length ? h('button', { class: 'btn small', onClick: () => delRows(selVisible.map(r => r.j.id)) }, `Remove selected (${selVisible.length})`) : null,
+        rows.filter(deletable).length && (active || rows.length > 1) ? h('button', { class: 'btn small', onClick: () => confirmModal(`Remove the ${rows.filter(deletable).length} results shown (the current one stays)?`, () => delRows(rows.filter(deletable).map(r => r.j.id)), 'Remove') }, 'Remove all shown…') : null,
+        stale.length ? h('button', { class: 'btn small', title: 'Re-run the greyed rows with the active slicer and this part’s filament', onClick: async () => { try { for (const r of stale) await api('POST', `parts/${p.id}/slice`, { params: r.pr }); render(); } catch (e) { fail(e); } } }, `Re-slice ${stale.length} old row${stale.length > 1 ? 's' : ''}`) : null,
         h('button', { class: 'btn small', onClick: () => customSliceModal(p) }, '＋ Slice a profile…'),
         h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
         h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),
-        h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Profile'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th'))), sweepRows)),
-        !rows.length && h('p', { class: 'hint' }, 'No slices yet for this orientation.'),
+        all.length > 1 ? filterBar : null,
+        h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', { class: 'nosort' }, master), h('th', null, 'Profile'), h('th', null, 'Settings'), h('th', null, 'Filament'), h('th', null, 'Engine'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th', { class: 'nosort' }))), sweepRows)),
+        !rows.length && h('p', { class: 'hint' }, all.length ? 'No results match these filters.' : 'No slices yet for this orientation.'),
+        h('p', { class: 'hint' }, 'Every row is a real slice. “Settings” is walls · top/bottom layers · infill · layer height. Grey rows came from a different slicer engine. Remove rows you no longer need; the current result cannot be removed.'),
         orientJobs.length ? h('div', null, h('h3', { style: { marginTop: '14px' } }, 'Orientation sweep · current profile'), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...orientJobs.filter((j, i, a) => a.findIndex(x => x.orient_key === j.orient_key) === i).sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9)).map(j => h('tr', null, h('td', { class: 'mono' }, j.orient_key.split('|')[0].replace('q', 'quat ')), h('td', { class: 'num' }, j.status === 'done' ? fmt(j.grams, 2) + ' g' : j.status), h('td', null, j.status === 'done' && !p.locked && h('button', { class: 'btn small', onClick: () => upd({ orient: { mode: 'manual', quat: j.orient_key.split('|')[0].slice(1).split(',').map(Number), label: 'from sweep' } }) }, 'Use')))))))) : null);
     };
+    const redrawSweep = () => { const nc = buildSweep(lastP); sweepCard.replaceWith(nc); sweepCard = nc; };
+    let lastP = p;
     let sweepCard = buildSweep(p);
     left.append(sweepCard);
     const cur = p.slice;
     // background refresh while slices land: swap only the sweep card and the header status, never the viewer
-    S.partRefresh = async () => {
+    S.partRefresh = async (force = false) => {
       const p2 = await api('GET', `parts/${pid}`);
       if (S.view !== 'part' || !document.body.contains(sweepCard)) return;
+      lastP = p2;
       const nc = buildSweep(p2);
-      if (!busy(sweepCard) && sweepCard.outerHTML !== nc.outerHTML) { sweepCard.replaceWith(nc); sweepCard = nc; }
+      if ((force || !busy(sweepCard)) && sweepCard.outerHTML !== nc.outerHTML) { sweepCard.replaceWith(nc); sweepCard = nc; }
       const oldCall = previewCard.querySelector('.callout.bad'); const err = p2.slice && p2.slice.status === 'error';
       if (oldCall && !err) oldCall.remove();
       else if (!oldCall && err) previewCard.append(h('div', { class: 'callout bad' }, h('b', null, 'This orientation did not slice. '), p2.slice.error || 'The slicer failed.'));
@@ -920,10 +941,12 @@
     const mk = (k, attrs) => f[k] = input(Object.assign({ type: 'number', value: P[k], style: { width: '110px' }, disabled: opts.readonly }, attrs));
     const body = h('div', null,
       field('Wall loops', mk('walls', { step: '1', min: 0 })), field('Top layers', mk('top', { step: '1', min: 0 })), field('Bottom layers', mk('bottom', { step: '1', min: 0 })),
+      field('Min top shell (mm)', h('div', { class: 'tb' }, mk('top_min_thickness', { step: '0.1', min: 0 }), h('span', { class: 'rng' }, '0 = the layer count is exact. Bambu Studio’s stock profiles use 1.0 (= 5 layers at 0.2 mm).'))),
+      field('Min bottom shell (mm)', h('div', { class: 'tb' }, mk('bottom_min_thickness', { step: '0.1', min: 0 }), h('span', { class: 'rng' }, '0 = exact'))),
       field('Sparse infill %', mk('infill', { step: '1', min: 0, max: 100 })), field('Pattern', f.pattern = select(PATTERNS, P.pattern, { disabled: opts.readonly, style: { width: '160px' } })),
       field('Layer height', mk('layer_height', { step: '0.02' })), field('Nozzle', f.nozzle = select([[0.4, '0.4 mm'], [0.6, '0.6 mm']], P.nozzle, { disabled: opts.readonly, style: { width: '110px' } })),
       h('details', null, h('summary', { style: { cursor: 'pointer', color: 'var(--ink2)', fontSize: '13px', margin: '8px 0' } }, 'Advanced (Bambu defaults)'),
-        field('First layer height', mk('first_layer_height', { step: '0.02' })), field('Top min thickness', mk('top_min_thickness', { step: '0.1' })), field('Bottom min thickness', mk('bottom_min_thickness', { step: '0.1' })),
+        field('First layer height', mk('first_layer_height', { step: '0.02' })),
         field('Infill/wall overlap %', mk('infill_wall_overlap', { step: '1' })), field('Min sparse area mm²', mk('min_sparse_area', { step: '1' })),
         field('One wall on top', f.one_wall_top = h('input', { type: 'checkbox', checked: !!P.one_wall_top, disabled: opts.readonly })),
         field('Thin walls', f.thin_walls = h('input', { type: 'checkbox', checked: !!P.thin_walls, disabled: opts.readonly })),
@@ -931,7 +954,7 @@
         ...['outer', 'inner', 'infill', 'solid', 'top', 'first'].map(k => field(`Line width · ${k}`, f['lw_' + k] = input({ type: 'number', value: P.line_widths[k], step: '0.01', style: { width: '110px' }, disabled: opts.readonly })))));
     // live note about Bambu's "layers or thickness, whichever is more" rule — the usual reason two slicers disagree
     const shellNote = h('div', { class: 'callout', hidden: true });
-    body.insertBefore(shellNote, body.children[3]);
+    body.insertBefore(shellNote, body.children[5]);
     const updNote = () => {
       const lh = parseFloat(f.layer_height.value) || 0.2, t = parseInt(f.top.value) || 0, b = parseInt(f.bottom.value) || 0;
       const tm = parseFloat(f.top_min_thickness.value) || 0, bm = parseFloat(f.bottom_min_thickness.value) || 0;
@@ -951,7 +974,7 @@
       return out;
     };
     // when nozzle changes, reset line widths to that nozzle's defaults
-    f.nozzle.addEventListener('change', () => { const d = f.nozzle.value === '0.6' ? { outer: .62, inner: .62, infill: .62, solid: .62, top: .62, first: .62, lh: .3, tm: .8, top: 3 } : { outer: .42, inner: .45, infill: .45, solid: .42, top: .42, first: .5, lh: .2, tm: 1.0, top: 5 }; for (const k of ['outer', 'inner', 'infill', 'solid', 'top', 'first']) f['lw_' + k].value = d[k]; f.layer_height.value = d.lh; f.first_layer_height.value = d.lh; f.top_min_thickness.value = d.tm; f.top.value = d.top; });
+    f.nozzle.addEventListener('change', () => { const d = f.nozzle.value === '0.6' ? { outer: .62, inner: .62, infill: .62, solid: .62, top: .62, first: .62, lh: .3, tm: 0, top: 3 } : { outer: .42, inner: .45, infill: .45, solid: .42, top: .42, first: .5, lh: .2, tm: 0, top: 5 }; for (const k of ['outer', 'inner', 'infill', 'solid', 'top', 'first']) f['lw_' + k].value = d[k]; f.layer_height.value = d.lh; f.first_layer_height.value = d.lh; f.top_min_thickness.value = d.tm; f.top.value = d.top; });
     return { body, read };
   }
   function editProfileModal(prof, baseParams, onCreated) {
@@ -1213,7 +1236,7 @@
     }
     m.append(h('div', { class: 'grid2' },
       h('div', { class: 'card' }, h('h3', null, 'Filaments'), h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Filament'), h('th', null, 'Material'), h('th', { class: 'num' }, 'ρ g/cm³'), h('th', { class: 'num' }, 'Flow'), h('th', { class: 'num', title: 'Max volumetric speed (mm³/s) — caps print speed, affects time only' }, 'mm³/s'), h('th', { class: 'num' }, 'Correction'), h('th', { class: 'num' }, '$/kg'), h('th'))), ftb)), h('p', { class: 'hint' }, 'Correction = median of (measured ÷ sliced) over weighed parts using the filament. Shown estimates are slicer × correction.')),
-      h('div', { class: 'card' }, h('h3', null, 'Profiles'), h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Nozzle'), h('th', null, 'String'), h('th', null, 'Notes'), h('th'))), ptb)), h('p', { class: 'hint' }, 'Built-in profiles reproduce Bambu Studio’s system defaults (with cubic instead of grid). Bambu’s top-shell thickness rule is applied: 5 layers or 1.0 mm, whichever is more.'),
+      h('div', { class: 'card' }, h('h3', null, 'Profiles'), h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Nozzle'), h('th', null, 'String'), h('th', null, 'Notes'), h('th'))), ptb)), h('p', { class: 'hint' }, 'Built-in profiles reproduce Bambu Studio’s system defaults (with cubic instead of grid). Layer counts are exact (min shell thickness 0); set a min shell thickness on a profile if you want Bambu Studio’s “1.0 mm or N layers, whichever is more” behaviour.'),
         h('p', { class: 'hint' }, h('b', null, 'Checking against Bambu Studio: '), 'with identical settings the two slicers agree on weight within about 1% (chassis 78.5 vs 78.9 g; forks 24.3 vs 24.1 g). If Bambu shows less, compare Top shell thickness (Bambu’s 1.0 mm turns 2 top layers into 5 unless set to 0), the filament’s flow ratio (Bambu’s Generic PLA is 0.98, not 1.0) and density. Print time is PrusaSlicer’s estimate with Bambu speeds and limits — expect it to run 5–15% longer than Bambu Studio’s.'))));
   };
   function filModal(f) {

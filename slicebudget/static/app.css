@@ -130,13 +130,14 @@ td.wrap{white-space:normal;max-width:280px}
 .cols{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:16px;align-items:start}
 @media (max-width:1100px){.cols{grid-template-columns:1fr}}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:stretch}
-.grid2>.card{margin-top:0}
-.cols>div>.card:first-child{margin-top:0}
 @media (max-width:1000px){.grid2{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:14px 16px;min-width:0}
-.card h3{margin:0 0 10px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;display:flex;align-items:center;gap:8px}
+.card h3{margin:0 0 10px;min-height:26px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;display:flex;align-items:center;gap:8px}
 .card h3 .tb{margin-left:auto}
 .card + .card{margin-top:12px}
+.grid2 > .card + .card{margin-top:0}
+.cols > div > * + *{margin-top:12px}
+.cols > div > .card + .card{margin-top:12px}
 .kv{display:grid;grid-template-columns:1fr auto;gap:6px 14px;font-size:13px;margin:0}
 .kv dt{color:var(--ink2)}.kv dd{margin:0;font-variant-numeric:tabular-nums;text-align:right}
 .field{display:grid;grid-template-columns:120px 1fr;gap:8px 12px;align-items:center;font-size:13px;margin:6px 0}
@@ -258,3 +259,6 @@ tr:not(:hover) td.acts .btn.del{opacity:.35}
 td.ed:has(> select),td.ed:has(> input){padding-right:8px;cursor:default}
 td.ed:has(> select)::after,td.ed:has(> input)::after{display:none}
 td.ed.dlg{cursor:pointer} td.ed.dlg:not(.editing)::after{content:"⚖"}
+.filters{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:0 0 8px;padding:8px 10px;background:var(--panel2);border:1px solid var(--rule);border-radius:6px}
+.filters .flt{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--ink2)}
+.filters .flt select{padding:2px 20px 2px 6px;font-size:12px;height:24px}
