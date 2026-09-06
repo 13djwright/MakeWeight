@@ -400,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
-                "robots": self._robot_list(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": __import__("slicebudget.paths", fromlist=["BRAND"]).BRAND, "install_dir": str(__import__("slicebudget.paths", fromlist=["install_dir"]).install_dir()), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable(),
+                "robots": self._robot_list(), "update_repo": app.updater.repo(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": __import__("slicebudget.paths", fromlist=["BRAND"]).BRAND, "install_dir": str(__import__("slicebudget.paths", fromlist=["install_dir"]).install_dir()), "portable": __import__("slicebudget.paths", fromlist=["is_portable"]).is_portable(),
                 "classes": CLASSES,
             })
         if path == "settings" and m == "PUT":

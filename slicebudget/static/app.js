@@ -338,7 +338,24 @@
     nav.append(h('div', { class: 'sec' }, 'Library'), item('library', 'Components'), item('filaments', 'Filaments & profiles'));
     nav.append(h('div', { class: 'sec' }, 'Tool'), item('calc', 'Calculators'), item('jobs', 'Jobs & setup', st.slicer.slicer ? null : '!', 'warn'));
     const q = st.slicer;
-    nav.append(h('div', { class: 'foot' }, q.slicer ? h('span', null, h('b', null, (q.slicer_label || q.slicer).split('+')[0]), h('br'), `${q.workers} worker${q.workers > 1 ? 's' : ''} · ${q.running} running · ${q.queued} queued`) : h('span', null, h('b', { style: { color: 'var(--warn)' } }, 'PrusaSlicer not installed'), h('br'), 'Open Jobs & setup')));
+    const slicerLine = q.slicer
+      ? h('span', null, h('b', null, (q.slicer_label || q.slicer).split('+')[0]), h('br'), `${q.workers} worker${q.workers > 1 ? 's' : ''} · ${q.running} running · ${q.queued} queued`)
+      : h('span', null, h('b', { style: { color: 'var(--warn)' } }, 'No slicer installed'), h('br'), 'Open Jobs & setup');
+    const versionLine = h('div', { style: { marginTop: '6px' } }, `${st.app ? st.app.name : ''} ${st.version}`,
+      S.updateAvail ? h('a', { href: '#/jobs', class: 'pill ok', style: { marginLeft: '6px', textDecoration: 'none' }, title: 'A newer version is on GitHub — open Jobs & setup to install it' }, `↑ ${S.updateAvail} available`) : null);
+    nav.append(h('div', { class: 'foot' }, slicerLine, versionLine));
+  }
+  // Once a day, quietly ask GitHub whether a newer release exists (only when an update source is configured).
+  async function autoUpdateCheck() {
+    try {
+      const st = S.state; if (!st || !st.update_repo) return;
+      const last = +localStorage.getItem('sb.updateCheck') || 0;
+      if (Date.now() - last < 20 * 3600e3) { const v = localStorage.getItem('sb.updateAvail'); if (v && v !== st.version) { S.updateAvail = v; renderShell(); } return; }
+      localStorage.setItem('sb.updateCheck', String(Date.now()));
+      const r = await api('POST', 'update/check');
+      localStorage.setItem('sb.updateAvail', r.newer ? r.version : '');
+      if (r.newer) { S.updateAvail = r.version; renderShell(); toast(`${st.app.name} ${r.version} is available — Jobs & setup → Update.`); }
+    } catch (e) { /* offline or no repo: stay quiet */ }
   }
 
   function exportMenu(anchor) {
@@ -1648,7 +1665,7 @@
       const rid = S.state.robots.find(r => r.id === saved && r.status === 'active') ? saved : (S.state.robots.find(r => r.status === 'active') || {}).id;
       if (rid) await loadRobot(rid);
       if (!S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
-      await render(); connectSSE();
+      await render(); connectSSE(); setTimeout(autoUpdateCheck, 3000);
     } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the ' + document.title + ' service: ' + e.message)); }
   })();
   window.SB = { S, api, render, go };
