@@ -59,7 +59,9 @@ def fetch_latest(repo: str) -> dict:
     """{version, tag, notes, url, asset, published, html_url} for the newest release that has this platform's zip."""
     if not repo or "/" not in repo:
         raise RuntimeError("No update source configured. Set the GitHub repository (owner/name) on this page.")
-    req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases?per_page=10", headers={**_UA, "Accept": "application/vnd.github+json"})
+    # a full URL is treated as a releases feed in GitHub's JSON shape (self-hosting / testing)
+    url = repo if repo.startswith(("http://", "https://", "file://")) else f"https://api.github.com/repos/{repo}/releases?per_page=10"
+    req = urllib.request.Request(url, headers={**_UA, "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=30) as r:
         rels = json.loads(r.read().decode())
     if not isinstance(rels, list):
@@ -87,6 +89,7 @@ class Updater:
         self.events = events
         self.state = {"status": "idle", "message": "", "progress": 0.0}
         self.latest: dict | None = None
+        self.launch_path: Path | None = None
         self._thread: threading.Thread | None = None
 
     def repo(self) -> str:
@@ -187,13 +190,10 @@ class Updater:
             if launcher is None:
                 raise RuntimeError(f"Unpacked to {dest} but found no launcher inside")
             log.info("update: unpacked to %s; handing over to %s", dest, launcher)
+            self.launch_path = launcher
             self._set(status="done", message=f"{APP} {info['version']} is starting — this page reconnects by itself.", progress=1.0, new_dir=str(dest))
             time.sleep(0.8)          # let the browser receive that event
-            httpd_stop()             # free the port first, so the new version binds the same one
-            self._launch(launcher)
-            time.sleep(1.5)
-            log.info("update: old version exiting")
-            os._exit(0)
+            httpd_stop()             # the main thread returns from serve_forever, launches launch_path and exits
         except Exception as e:  # noqa
             log.exception("update failed")
             self._set(status="error", message=str(e))
@@ -207,7 +207,7 @@ class Updater:
         return None
 
     @staticmethod
-    def _launch(launcher: Path):
+    def launch(launcher: Path):
         s = platform.system()
         cwd = str(launcher.parent)
         quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

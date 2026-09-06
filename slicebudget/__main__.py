@@ -62,6 +62,18 @@ def main():
         pass
     finally:
         httpd.server_close()
+    # a finished self-update asked us to hand over: the port is free now, start the new version and leave
+    app = getattr(httpd.RequestHandlerClass, "app", None)
+    launch = getattr(getattr(app, "updater", None), "launch_path", None)
+    if launch:
+        from .updater import Updater
+        log.info("update: starting %s and exiting", launch)
+        try:
+            Updater.launch(launch)
+        except Exception:  # noqa
+            log.exception("update: could not start the new version")
+        import time
+        time.sleep(1.0)
 
 
 if __name__ == "__main__":
