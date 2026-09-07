@@ -67,7 +67,11 @@
         else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
       }
     };
-    const close = () => { bg.remove(); document.removeEventListener('keydown', onKey, true); if (opts.onClose) opts.onClose(); if (opener && opener.focus && document.body.contains(opener)) opener.focus(); };
+    const close = () => {
+      bg.remove(); document.removeEventListener('keydown', onKey, true); if (opts.onClose) opts.onClose(); if (opener && opener.focus && document.body.contains(opener)) opener.focus();
+      // a refresh that arrived while this dialog was open (its own Save, a slice landing) was held back — run it now
+      if (S.renderPending && !document.querySelector('.modal-bg')) { S.renderPending = false; softRender().catch(console.error); }
+    };
     const dlg = h('div', { class: 'modal', style: opts.width ? { width: opts.width } : null, role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: '-1' },
       h('header', null, h('h2', null, title), h('button', { class: 'btn icon x', onClick: close, 'aria-label': 'Close' }, '✕')),
       h('div', { class: 'body' }, body),
@@ -1652,7 +1656,7 @@
   async function softRender() {
     if (S.view === 'part' && S.partRefresh) { try { await S.partRefresh(); return; } catch (e) { console.error(e); } }
     if (!['sheet', 'parts', 'jobs', 'library', 'optimizer'].includes(S.view)) return renderMain();
-    if (document.querySelector('.modal-bg')) return;                    // never yank the page under a dialog
+    if (document.querySelector('.modal-bg')) { S.renderPending = true; return; }   // never yank the page under a dialog — redraw when it closes
     const tmp = h('div');
     try { await (V[S.view] || V.home)(tmp); } catch (e) { console.error(e); return; }
     morph($('#main'), tmp);
