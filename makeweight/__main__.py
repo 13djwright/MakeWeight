@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import socket
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -50,6 +52,25 @@ def main():
     except Exception:  # noqa
         applog.log.exception("data migration failed")
     port = args.port
+    no_browser = args.no_browser
+    # started by the self-updater? then take over the previous version's port and leave the user's tab alone
+    marker = root / "updates" / "handover.json"
+    try:
+        if marker.exists():
+            h = json.loads(marker.read_text(encoding="utf-8"))
+            marker.unlink(missing_ok=True)
+            if time.time() - float(h.get("ts") or 0) < 300:
+                if h.get("port"):
+                    port = int(h["port"])
+                no_browser = no_browser or bool(h.get("no_browser"))
+                applog.log.info("update handover from %s: reusing port %s, not opening a browser", h.get("from"), port)
+                for _ in range(60):                       # the old process is still letting go of the socket
+                    with socket.socket() as s:
+                        if s.connect_ex((args.host, port)) != 0:
+                            break
+                    time.sleep(0.25)
+    except Exception:  # noqa
+        applog.log.exception("handover marker unreadable")
     # pick the next free port if busy (another instance is probably already running)
     for p in range(port, port + 20):
         with socket.socket() as s:
@@ -60,7 +81,7 @@ def main():
     url = f"http://{args.host}:{port}/"
     from .log import log
     log.info("%s running at %s   (app in %s, data in %s)", paths.APP_NAME, url, paths.install_dir(), root / "data")
-    if not args.no_browser:
+    if not no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
@@ -78,7 +99,6 @@ def main():
             Updater.launch(launch)
         except Exception:  # noqa
             log.exception("update: could not start the new version")
-        import time
         time.sleep(1.0)
 
 

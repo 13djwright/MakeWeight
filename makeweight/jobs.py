@@ -84,8 +84,9 @@ def modifier_settings(md: dict, engine: str = "prusa") -> dict:
     return out
 
 
-def cache_key(mesh_sha: str, okey: str, phash: str, slicer_version: str) -> str:
-    return hashlib.sha1(f"{mesh_sha}|{okey}|{phash}|{slicer_version}|{profiles.MAPPING_VERSION}".encode()).hexdigest()
+def cache_key(mesh_sha: str, okey: str, phash: str, slicer_version: str, machine: str = "") -> str:
+    """Identity of a slice result. The printer (P1S/H2D) is part of it: its process base differs, not just its speeds."""
+    return hashlib.sha1(f"{mesh_sha}|{okey}|{phash}|{slicer_version}|{profiles.MAPPING_VERSION}|{machine}".encode()).hexdigest()
 
 
 def filament_key(filament: dict, machine: str) -> str:
@@ -209,8 +210,8 @@ class JobManager:
         okey = part_okey(part)
         phash = profiles.profile_hash(params, filament)
         ver = self.slicer_version or "none"
-        ck = cache_key(mesh["sha256"], okey, phash, ver)
         machine = self.machine_for_part(part)
+        ck = cache_key(mesh["sha256"], okey, phash, ver, machine)
         fkey = filament_key(filament, machine)
         existing = self.db.one("SELECT * FROM slice_jobs WHERE cache_key=? AND status IN ('done','queued','running') ORDER BY status='done' DESC, id DESC LIMIT 1", [ck])
         if existing:
@@ -242,7 +243,7 @@ class JobManager:
         if not mesh or not self.slicer_version:
             return None
         okey = part_okey(part)
-        ck = cache_key(mesh["sha256"], okey, profiles.profile_hash(params, filament), self.slicer_version)
+        ck = cache_key(mesh["sha256"], okey, profiles.profile_hash(params, filament), self.slicer_version, self.machine_for_part(part))
         return self.db.one("SELECT * FROM slice_jobs WHERE cache_key=? AND status='done' ORDER BY id DESC LIMIT 1", [ck])
 
     def queue_state(self) -> dict:
@@ -288,7 +289,7 @@ class JobManager:
                 if job.get("slicer_version") != self.slicer_version and self.slicer_version:
                     # queued before the slicer was installed: re-key so the cache finds it later
                     upd["slicer_version"] = self.slicer_version
-                    upd["cache_key"] = cache_key(job["mesh_sha"], job["orient_key"], job["profile_hash"], self.slicer_version)
+                    upd["cache_key"] = cache_key(job["mesh_sha"], job["orient_key"], job["profile_hash"], self.slicer_version, (job.get("filament_key") or "").split("|")[3:4] and (job.get("filament_key") or "").split("|")[3] or "")
                 self.db.update("slice_jobs", job["id"], upd)
             except Exception as e:  # noqa
                 self.db.update("slice_jobs", job["id"], {"status": "error", "finished": now(), "error": str(e)[:1000]})
@@ -306,7 +307,7 @@ class JobManager:
         okey = part_okey(part)
         mods = loads(part.get("modifiers_json"), []) or []
         engine = self.engine if mods else ""
-        tag = f"{mesh['sha256']}|{okey}|{engine}|{center[0]:g},{center[1]:g}" if mods else f"{mesh['sha256']}|{okey}"
+        tag = f"{mesh['sha256']}|{okey}|{engine}|{center[0]:g},{center[1]:g}" if mods else f"{mesh['sha256']}|{okey}|{center[0]:g},{center[1]:g}"
         name = hashlib.sha1(tag.encode()).hexdigest()[:20] + (".3mf" if mods else ".stl")
         out = self.work_dir / "oriented" / name
         if not out.exists():

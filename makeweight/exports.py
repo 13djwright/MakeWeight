@@ -10,13 +10,17 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import re
 import time
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+import numpy as np
+
 from . import meshio, orient, profiles
+from .log import log
 from .paths import APP_NAME as _APP
 from .db import loads, now
 
@@ -272,74 +276,207 @@ def import_archive(handler, data: bytes) -> dict:
 
 
 # ------------------------------------------------------------------ 3MF
+def _object_overrides(params: dict) -> dict:
+    """Per-object Bambu keys for one part's profile (what Bambu Studio shows under the object's settings)."""
+    if not params:
+        return {}
+    p = profiles.normalize(params)
+    lw = p.get("line_widths") or {}
+    out = {
+        "wall_loops": str(int(p["walls"])), "top_shell_layers": str(int(p["top"])), "bottom_shell_layers": str(int(p["bottom"])),
+        "top_shell_thickness": f"{p['top_min_thickness']:g}", "bottom_shell_thickness": f"{p['bottom_min_thickness']:g}",
+        "sparse_infill_density": f"{p['infill']:g}%", "sparse_infill_pattern": profiles.bambu_pattern(p),
+        "layer_height": f"{p['layer_height']:g}", "initial_layer_print_height": f"{p['first_layer_height']:g}",
+        "infill_wall_overlap": f"{p['infill_wall_overlap']:g}%", "only_one_wall_top": "1" if p.get("one_wall_top") else "0",
+        "minimum_sparse_infill_area": f"{p.get('min_sparse_area', 15):g}", "infill_direction": f"{p.get('infill_direction', 45):g}",
+        "detect_thin_wall": "1" if p.get("thin_walls") else "0", "filter_out_gap_fill": "0" if p.get("gap_fill", True) else "100",
+    }
+    if lw:
+        out.update({"line_width": f"{lw['outer']:g}", "outer_wall_line_width": f"{lw['outer']:g}", "inner_wall_line_width": f"{lw['inner']:g}",
+                    "sparse_infill_line_width": f"{lw['infill']:g}", "internal_solid_infill_line_width": f"{lw['solid']:g}",
+                    "top_surface_line_width": f"{lw['top']:g}", "initial_layer_line_width": f"{lw['first']:g}"})
+    return out
+
+
 def bambu_3mf(app, det: dict) -> bytes:
-    """A 3MF with every printed part oriented and arranged, plus Bambu per-object settings (beta)."""
+    """A Bambu Studio project: one plate per printed line (all copies of that line on its plate), every object carrying
+    its own walls / shells / infill / layer settings, modifier regions as modifier parts, the robot's filaments as the
+    project's filament list, and a full project_settings.config (printer, default process, filaments) built from the
+    same presets the app slices with — so opening it in Bambu Studio needs no re-entering of parameters."""
+    from . import bambu_engine
     db = app.db
-    objects = []  # (id, name, tri, params, filament_idx)
-    oid = 1
-    fil_names = []
-    for s in det["sections"]:
-        for it in s["items"]:
-            p = it.get("part")
-            if not p or not p.get("mesh"):
+    jobs = app.jobs
+    presets = jobs.presets if jobs.engine == "bambu" else None
+    if presets is None:
+        res = bambu_engine.resources_dir(bambu_engine.locate(db.setting("bambu_path")))
+        presets = bambu_engine.Presets(res) if res else None
+    robot = db.get("robots", det["id"]) or {}
+    printer = db.get("printers", robot["printer_id"]) if robot.get("printer_id") else db.one("SELECT * FROM printers ORDER BY builtin DESC, id LIMIT 1")
+    machine = profiles.machine_key(printer["name"] if printer else None)
+    nozzle = f"{float(robot.get('nozzle') or 0.4):g}"
+    # bed size → plate grid
+    bed_w, bed_d = 256.0, 256.0
+    if presets:
+        try:
+            area = presets.machine_for(machine, nozzle).get("printable_area") or []
+            xs = [float(a.split("x")[0]) for a in area]; ys = [float(a.split("x")[1]) for a in area]
+            bed_w, bed_d = max(xs) - min(xs), max(ys) - min(ys)
+        except Exception:  # noqa
+            pass
+    # collect printed lines
+    lines = []          # (item, part, tri_oriented, params, filament row, mesh row)
+    fil_rows: list[dict] = []
+    for sec in det["sections"]:
+        for it in sec["items"]:
+            pt = it.get("part")
+            if not pt or not pt.get("mesh"):
                 continue
-            m = db.get("meshes", p["mesh"]["id"])
+            m = db.get("meshes", pt["mesh"]["id"])
             tri = meshio.load_mesh(meshio.mesh_path(m))
-            t = orient.apply_orientation(tri, p["orient"], float(p.get("scale") or 1.0), bool(p.get("mirror")))
-            fname = (p.get("filament") or {}).get("name") or "filament"
-            if fname not in fil_names:
-                fil_names.append(fname)
-            for k in range(int(it["qty"] or 1)):
-                oid += 1
-                objects.append((oid, f"{it['description']}{' #' + str(k + 1) if it['qty'] > 1 else ''}", t, (p.get("profile") or {}).get("params") or {}, fil_names.index(fname) + 1, m["filename"]))
-    # arrange in a grid on a 250x250 plate
-    placed = []
-    x = y = 10.0; row_h = 0.0
-    for o in objects:
-        lo, hi = meshio.bbox(o[2]); sx, sy = hi[0] - lo[0], hi[1] - lo[1]
-        if x + sx > 246 and x > 10:
-            x = 10.0; y += row_h + 6; row_h = 0.0
-        placed.append((o, x - lo[0], y - lo[1]))
-        x += sx + 6; row_h = max(row_h, sy)
+            t = orient.apply_orientation(tri, pt["orient"], float(pt.get("scale") or 1.0), bool(pt.get("mirror")))
+            fil = db.get("filaments", pt["filament_id"]) if pt.get("filament_id") else None
+            if fil and all(f["id"] != fil["id"] for f in fil_rows):
+                fil_rows.append(fil)
+            lines.append((it, pt, t, (pt.get("profile") or {}).get("params") or {}, fil, m))
+    if not fil_rows:
+        f0 = db.one("SELECT * FROM filaments ORDER BY builtin DESC, id LIMIT 1")
+        if f0:
+            fil_rows.append(f0)
+    fil_index = {f["id"]: i + 1 for i, f in enumerate(fil_rows)}
+    n_plates = max(1, len(lines))
+    cols = max(1, math.ceil(math.sqrt(n_plates)))
+    stride_x, stride_y = bed_w * 1.1, bed_d * 1.1          # Bambu Studio's logical plate gap is 1/10 of the plate
+
+    bs_version = str(bambu_engine.version_of(jobs.slicer_cmd) or "") if jobs.engine == "bambu" and jobs.slicer_cmd else ""
+    bs_version = bs_version or "02.08.02.61"
     model = io.StringIO()
     model.write('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">\n')
-    model.write(' <metadata name="Application">' + _APP + '</metadata>\n <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n')
-    for (o, dx, dy) in placed:
-        oid_, name, tri, params, ext, fname = o
-        verts, faces = meshio._indexed(tri)
-        model.write(f'  <object id="{oid_}" name="{escape(name)}" type="model">\n   <mesh>\n    <vertices>\n')
+    # Bambu Studio only applies Metadata/project_settings.config when the file announces itself as a Bambu project
+    model.write(f' <metadata name="Application">BambuStudio-{escape(bs_version)}</metadata>\n <metadata name="BambuStudio:3mfVersion">1</metadata>\n')
+    model.write(f' <metadata name="Title">{escape(det.get("name") or "robot")}</metadata>\n <metadata name="Description">Exported by {_APP}</metadata>\n <metadata name="CreationDate">{time.strftime("%Y-%m-%d")}</metadata>\n <resources>\n')
+    cfg = io.StringIO()
+    cfg.write('<?xml version="1.0" encoding="UTF-8"?>\n<config>\n')
+    plates: list[list[tuple[int, int]]] = []      # per plate: [(object_id, identify_id)]
+    build_items: list[tuple[int, float, float]] = []
+    nid = 1
+
+    def write_mesh(oid: int, name: str, tri):
+        verts, faces = meshio._indexed(tri, tol=1e-5)
+        model.write(f'  <object id="{oid}" name="{escape(name)}" type="model">\n   <mesh>\n    <vertices>\n')
         for v in verts:
-            model.write(f'     <vertex x="{v[0]:.4f}" y="{v[1]:.4f}" z="{v[2]:.4f}"/>\n')
+            model.write(f'     <vertex x="{v[0]:.5f}" y="{v[1]:.5f}" z="{v[2]:.5f}"/>\n')
         model.write('    </vertices>\n    <triangles>\n')
         for f in faces:
             model.write(f'     <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"/>\n')
         model.write('    </triangles>\n   </mesh>\n  </object>\n')
+
+    for plate_i, (it, pt, t, params, fil, m) in enumerate(lines):
+        row, col = divmod(plate_i, cols)
+        ox, oy = col * stride_x, -row * stride_y
+        qty = max(1, int(round(float(it.get("qty") or 1))))
+        lo, hi = meshio.bbox(t); size = hi - lo
+        # copies side by side, the group centred on the plate; the part frame is x/y-centred, z from the bed
+        tc = t - np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
+        gap = 8.0
+        per_row = max(1, int((bed_w - 20) // (size[0] + gap))) if size[0] + gap < bed_w - 20 else 1
+        rows_n = math.ceil(qty / per_row)
+        gw = min(qty, per_row) * (size[0] + gap) - gap; gh = rows_n * (size[1] + gap) - gap
+        mods = pt.get("modifiers") or []
+        overrides = _object_overrides(params)
+        plate_objs = []
+        for k in range(qty):
+            r_, c_ = divmod(k, per_row)
+            cx = ox + bed_w / 2 - gw / 2 + c_ * (size[0] + gap) + size[0] / 2
+            cy = oy + bed_d / 2 - gh / 2 + r_ * (size[1] + gap) + size[1] / 2
+            name = f"{it['description']}{' #' + str(k + 1) if qty > 1 else ''}"
+            parts = [(nid, "normal_part", m.get("filename") or name, tc, {})]
+            nid += 1
+            for md in mods:
+                if md.get("min") and md.get("max"):
+                    from .jobs import modifier_settings
+                    parts.append((nid, "modifier_part", md.get("name") or "modifier", meshio.box_mesh(md["min"], md["max"]), modifier_settings(md, "bambu")))
+                    nid += 1
+            for (pid, subtype, pname, ptri, settings) in parts:
+                write_mesh(pid, pname, ptri)
+            root = nid; nid += 1
+            model.write(f'  <object id="{root}" name="{escape(name)}" type="model">\n   <components>\n')
+            for (pid, *_r) in parts:
+                model.write(f'    <component objectid="{pid}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n')
+            model.write('   </components>\n  </object>\n')
+            build_items.append((root, cx, cy))
+            cfg.write(f'  <object id="{root}">\n    <metadata key="name" value="{escape(name)}"/>\n    <metadata key="extruder" value="{fil_index.get((fil or {}).get("id"), 1)}"/>\n')
+            for key, v in overrides.items():
+                cfg.write(f'    <metadata key="{key}" value="{escape(str(v))}"/>\n')
+            for (pid, subtype, pname, ptri, settings) in parts:
+                cfg.write(f'    <part id="{pid}" subtype="{subtype}">\n      <metadata key="name" value="{escape(pname)}"/>\n      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n')
+                if subtype == "normal_part":
+                    cfg.write(f'      <metadata key="source_file" value="{escape(m.get("filename") or pname)}"/>\n')
+                for sk, sv in settings.items():
+                    cfg.write(f'      <metadata key="{escape(str(sk))}" value="{escape(str(sv))}"/>\n')
+                cfg.write('    </part>\n')
+            cfg.write('  </object>\n')
+            plate_objs.append((root, root * 100 + k))
+        plates.append(plate_objs)
     model.write(' </resources>\n <build>\n')
-    for (o, dx, dy) in placed:
-        model.write(f'  <item objectid="{o[0]}" transform="1 0 0 0 1 0 0 0 1 {dx:.4f} {dy:.4f} 0" printable="1"/>\n')
+    for (oid, cx, cy) in build_items:
+        model.write(f'  <item objectid="{oid}" transform="1 0 0 0 1 0 0 0 1 {cx:.4f} {cy:.4f} 0" printable="1"/>\n')
     model.write(' </build>\n</model>\n')
-    cfg = io.StringIO()
-    cfg.write('<?xml version="1.0" encoding="UTF-8"?>\n<config>\n')
-    for (o, dx, dy) in placed:
-        oid_, name, tri, params, ext, fname = o
-        cfg.write(f'  <object id="{oid_}">\n    <metadata key="name" value="{escape(name)}"/>\n    <metadata key="extruder" value="{ext}"/>\n')
-        if params:
-            keys = {"wall_loops": params.get("walls"), "top_shell_layers": params.get("top"), "bottom_shell_layers": params.get("bottom"),
-                    "sparse_infill_density": f"{params.get('infill'):g}%" if params.get("infill") is not None else None, "sparse_infill_pattern": params.get("pattern"),
-                    "layer_height": params.get("layer_height"), "top_shell_thickness": params.get("top_min_thickness"), "bottom_shell_thickness": params.get("bottom_min_thickness")}
-            for k, v in keys.items():
-                if v is not None:
-                    cfg.write(f'    <metadata key="{k}" value="{escape(str(v))}"/>\n')
-        cfg.write(f'    <part id="{oid_}" subtype="normal_part">\n      <metadata key="name" value="{escape(fname)}"/>\n      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n      <metadata key="source_file" value="{escape(fname)}"/>\n    </part>\n  </object>\n')
-    cfg.write('  <plate>\n    <metadata key="plater_id" value="1"/>\n    <metadata key="plater_name" value=""/>\n    <metadata key="locked" value="false"/>\n')
-    for (o, dx, dy) in placed:
-        cfg.write(f'    <model_instance>\n      <metadata key="object_id" value="{o[0]}"/>\n      <metadata key="instance_id" value="0"/>\n      <metadata key="identify_id" value="{o[0] * 10}"/>\n    </model_instance>\n')
-    cfg.write('  </plate>\n</config>\n')
+    for i, objs in enumerate(plates or [[]]):
+        name = escape(lines[i][0]["description"]) if i < len(lines) else ""
+        cfg.write(f'  <plate>\n    <metadata key="plater_id" value="{i + 1}"/>\n    <metadata key="plater_name" value="{name}"/>\n    <metadata key="locked" value="false"/>\n')
+        for (oid, ident) in objs:
+            cfg.write(f'    <model_instance>\n      <metadata key="object_id" value="{oid}"/>\n      <metadata key="instance_id" value="0"/>\n      <metadata key="identify_id" value="{ident}"/>\n    </model_instance>\n')
+        cfg.write('  </plate>\n')
+    cfg.write('</config>\n')
+
+    # project settings: the presets the app slices with, in Bambu's project shape (filament keys as per-filament arrays)
+    project = None
+    if presets:
+        try:
+            dp_id = robot.get("profile_id") or db.setting("default_profile_id")
+            default_prof = db.get("profiles", int(dp_id)) if dp_id else None
+            if default_prof is None:
+                default_prof = db.one("SELECT * FROM profiles ORDER BY builtin DESC, id LIMIT 1")
+            dparams = loads((default_prof or {}).get("params_json"), {}) if default_prof else {}
+            mach = presets.machine_for(machine, nozzle)
+            proc = presets.process_for(dparams or profiles.default_params(float(nozzle)), machine)
+            fils = [presets.filament_for(f, machine, nozzle) for f in fil_rows]
+            project = {}
+            SKIP = ("name", "from", "inherits", "instantiation", "type", "setting_id", "compatible_printers", "compatible_printers_condition",
+                    "description", "include", "filament_id")           # preset bookkeeping, not config — Bambu rejects the file on a type mismatch
+            for src in (mach, proc):
+                for k, v in src.items():
+                    if k in SKIP:
+                        continue
+                    project[k] = v
+            fkeys = set().union(*[set(f.keys()) for f in fils]) if fils else set()
+            for k in sorted(fkeys):
+                if k in SKIP:
+                    continue
+                vals = []
+                for f in fils:
+                    v = f.get(k)
+                    vals.append((v[0] if isinstance(v, list) and v else v) if v is not None else (fils[0].get(k)[0] if isinstance(fils[0].get(k), list) and fils[0].get(k) else ""))
+                project[k] = [str(x) for x in vals]
+            project["filament_settings_id"] = [str(f.get("name") or "filament") for f in fil_rows]
+            variant = str((mach.get("printer_extruder_variant") or mach.get("extruder_variant_list") or ["Direct Drive Standard"])[0]).split(",")[0]
+            project["filament_self_index"] = [str(i + 1) for i in range(len(fil_rows))]
+            project["filament_extruder_variant"] = [str(variant)] * len(fil_rows)
+            project["filament_colour"] = [str(f.get("color") or "#8FBC8F") for f in fil_rows]
+            project["print_settings_id"] = f"{_APP} {profiles.profile_string(dparams)}" if dparams else f"{_APP} default"
+            project["printer_settings_id"] = mach.get("name") or ""
+            project["version"] = bs_version
+            project["name"] = "project_settings"; project["from"] = "project"
+        except Exception as e:  # noqa
+            log.warning("3MF export: project_settings.config skipped: %s", e)
+            project = None
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n <Default Extension="config" ContentType="text/xml"/>\n</Types>\n')
         z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>\n')
         z.writestr("3D/3dmodel.model", model.getvalue())
         z.writestr("Metadata/model_settings.config", cfg.getvalue())
-        z.writestr("Metadata/filaments.txt", "\n".join(f"Extruder {i + 1}: {n}" for i, n in enumerate(fil_names)))
+        if project:
+            z.writestr("Metadata/project_settings.config", json.dumps(project, indent=1, ensure_ascii=False))
+        z.writestr("Metadata/filaments.txt", "\n".join(f"Filament {i + 1}: {f.get('name')} ({f.get('density')} g/cm3, flow {f.get('flow')})" for i, f in enumerate(fil_rows)))
     return buf.getvalue()

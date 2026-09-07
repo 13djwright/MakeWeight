@@ -96,6 +96,7 @@ class Updater:
         self.state = {"status": "idle", "message": "", "progress": 0.0}
         self.latest: dict | None = None
         self.launch_path: Path | None = None
+        self.port: int | None = None
         self._thread: threading.Thread | None = None
 
     def repo(self) -> str:
@@ -197,6 +198,11 @@ class Updater:
                 raise RuntimeError(f"Unpacked to {dest} but found no launcher inside")
             log.info("update: unpacked to %s; handing over to %s", dest, launcher)
             self.launch_path = launcher
+            # tell the new version how we were running so it comes back on the same address without opening a second tab
+            try:
+                (tmp / "handover.json").write_text(json.dumps({"port": self.port, "no_browser": True, "ts": time.time(), "from": current_version()}), encoding="utf-8")
+            except OSError as e:
+                log.warning("update: could not write handover marker: %s", e)
             self._set(status="done", message=f"{APP} {info['version']} is starting — this page reconnects by itself.", progress=1.0, new_dir=str(dest))
             time.sleep(0.8)          # let the browser receive that event
             httpd_stop()             # the main thread returns from serve_forever, launches launch_path and exits
@@ -232,8 +238,8 @@ class Updater:
                              creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "DETACHED_PROCESS", 0), **quiet)
         elif s == "Darwin":
             # Terminal runs the .command in a new window, same as a double-click (no quarantine, so no Gatekeeper).
-            # Terminal cannot pass arguments, so a plain start is only used when there are none.
-            r = subprocess.run(["open", "-a", "Terminal", str(launcher)], capture_output=True, text=True) if not args else subprocess.CompletedProcess([], 1)
+            # Terminal cannot pass arguments; port and "no browser" travel through the handover marker instead.
+            r = subprocess.run(["open", "-a", "Terminal", str(launcher)], capture_output=True, text=True)
             if r.returncode != 0:
                 subprocess.Popen(["bash", str(launcher), *args], cwd=cwd, start_new_session=True, **quiet)
         else:

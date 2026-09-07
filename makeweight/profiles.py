@@ -131,7 +131,7 @@ MACHINES = {
             "travel_accel": 10000, "first_accel": 500, "max_accel": 20000, "max_accel_travel": 9000, "max_feed": 1000,
             "max_feed_z": 30, "max_feed_e": 50, "jerk": 9, "jerk_z": 3, "jerk_e": 2.5, "bed": (350, 320), "height": 325},
 }
-MAPPING_VERSION = "m3"  # bump when the settings mapping changes in a way that should invalidate cached slices (m3: rectilinear → zig-zag for Bambu; line pattern at 100 %)
+MAPPING_VERSION = "m4"  # bump when the settings mapping changes in a way that should invalidate cached slices (m4: real printer start/end G-code templates)
 
 
 def machine_key(printer_name: str | None) -> str:

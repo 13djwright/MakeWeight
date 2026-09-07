@@ -7,6 +7,7 @@
 """HTTP API + static UI. Standard library only."""
 from __future__ import annotations
 
+import io
 import json
 import mimetypes
 import os
@@ -470,6 +471,10 @@ class Handler(BaseHTTPRequestHandler):
                         app.httpd.shutdown(); app.httpd.server_close()
                 except Exception:  # noqa
                     log.exception("httpd stop failed")
+            try:
+                app.updater.port = app.httpd.server_address[1] if app.httpd is not None else None
+            except Exception:  # noqa
+                app.updater.port = None
             started = app.updater.start(stop)
             return self._json({"started": started, "state": app.updater.state})
         if path == "log" and m == "GET":
@@ -635,6 +640,8 @@ class Handler(BaseHTTPRequestHandler):
                     db.x("UPDATE line_items SET est_grams=?, est_source='library' WHERE component_id=?", [float(b["grams"]), cid])
                 return self._json(db.get("components", cid))
         if parts[0] == "filaments":
+            if len(parts) == 2 and parts[1] == "import" and m == "POST":
+                return self._json(self._import_filaments(self._body(), urllib.parse.unquote(self.headers.get("X-Filename") or "")))
             if len(parts) == 1 and m == "POST":
                 b = self._jbody()
                 fid = db.insert("filaments", {"name": b["name"], "material": b.get("material"), "density": float(b["density"]), "flow": float(b.get("flow") or 1.0),
@@ -1034,6 +1041,50 @@ class Handler(BaseHTTPRequestHandler):
         self.app.current_slice_for_part(pid)
         db.update("robots", rid, {"updated": now()})
         return self.app._part_view(db.get("printed_parts", pid))
+
+    def _import_filaments(self, data: bytes, fname: str) -> dict:
+        """Filaments from a Bambu Studio export: a filament preset .json (Export → Export preset bundle / filament) or a
+        .3mf project (every filament in its project_settings.config). Same name + same numbers → reused, not duplicated."""
+        db = self.app.db
+        found: list[dict] = []
+        if fname.lower().endswith(".3mf") or data[:2] == b"PK":
+            import zipfile as _zf
+            with _zf.ZipFile(io.BytesIO(data)) as z:
+                names = z.namelist()
+                if "Metadata/project_settings.config" not in names:
+                    raise ValueError("This .3mf has no project settings (not a Bambu Studio project).")
+                ps = json.loads(z.read("Metadata/project_settings.config").decode("utf-8", "replace"))
+            n = len(ps.get("filament_settings_id") or [])
+            for i in range(n):
+                pf = meshio.bambu_project_filament(ps, i + 1)
+                if pf:
+                    found.append(pf)
+        else:
+            try:
+                j = json.loads(data.decode("utf-8-sig", "replace"))
+            except Exception:
+                raise ValueError("Expected a Bambu Studio filament preset (.json) or a .3mf project.")
+            presets = j if isinstance(j, list) else [j]
+            for pr in presets:
+                if not isinstance(pr, dict) or not (pr.get("filament_density") or pr.get("type") == "filament"):
+                    continue
+                first = lambda k, d=None: (pr.get(k)[0] if isinstance(pr.get(k), list) and pr.get(k) else pr.get(k, d))  # noqa
+                name = str(pr.get("name") or (first("filament_settings_id") or "Imported filament")).split(" @")[0].strip()
+                found.append({"name": name, "material": str(first("filament_type") or "PLA"), "density": float(first("filament_density") or 1.24),
+                              "flow": float(first("filament_flow_ratio") or 1.0), "max_vol_speed": float(first("filament_max_volumetric_speed") or 12),
+                              "cost_per_kg": float(first("filament_cost") or 0) or None})
+        if not found:
+            raise ValueError("No filament settings found in that file.")
+        created, reused = [], []
+        for pf in found:
+            row = db.one("SELECT * FROM filaments WHERE name=? AND ABS(density-?)<1e-4 AND ABS(flow-?)<1e-4", [pf["name"], pf["density"], pf["flow"]])
+            if row:
+                reused.append(self.app._filament_view(row)); continue
+            fid = db.insert("filaments", {"name": pf["name"], "material": pf.get("material") or "PLA", "density": pf["density"], "flow": pf["flow"],
+                                          "color": None, "cost_per_kg": pf.get("cost_per_kg"), "notes": f"Imported from {fname or 'Bambu Studio'}",
+                                          "max_vol_speed": pf.get("max_vol_speed") or 12, "correction_json": "{}", "builtin": 0})
+            created.append(self.app._filament_view(db.get("filaments", fid)))
+        return {"created": created, "reused": reused}
 
     def _import_3mf(self, rid: int, data: bytes, fname: str) -> dict:
         """One printed part per 3MF object; per-object slicer settings become the starting profile."""

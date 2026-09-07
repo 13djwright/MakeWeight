@@ -351,12 +351,13 @@
       h('a', { href: a.repo_url || '#', target: '_blank', rel: 'noopener', style: { color: 'inherit' }, title: 'Free software under the GNU GPL v3 or later — source, license and issues on GitHub' }, `${a.license || 'GPL-3.0-or-later'} · source ↗`)) : null;
     nav.append(h('div', { class: 'foot' }, slicerLine, versionLine, legalLine));
   }
-  // Once a day, quietly ask GitHub whether a newer release exists (only when an update source is configured).
+  // Quietly ask GitHub whether a newer release exists: shortly after the page opens and then every hour while it stays
+  // open, but never more than once per 6 hours across tabs/restarts (only when an update source is configured).
   async function autoUpdateCheck() {
     try {
       const st = S.state; if (!st || !st.update_repo) return;
       const last = +localStorage.getItem('sb.updateCheck') || 0;
-      if (Date.now() - last < 20 * 3600e3) { const v = localStorage.getItem('sb.updateAvail'); if (v && v !== st.version) { S.updateAvail = v; renderShell(); } return; }
+      if (Date.now() - last < 6 * 3600e3) { const v = localStorage.getItem('sb.updateAvail'); if (v && v !== st.version) { S.updateAvail = v; renderShell(); } return; }
       localStorage.setItem('sb.updateCheck', String(Date.now()));
       const r = await api('POST', 'update/check?quiet=1');
       if (r.error) return;
@@ -374,7 +375,7 @@
       '-',
       { label: 'Print sheet (HTML, printable)', onClick: dl('printsheet') },
       { label: 'Bambu Studio process presets (zip of JSON)', onClick: dl('presets') },
-      { label: 'Bambu Studio project (.3mf, beta)', onClick: dl('bambu3mf') },
+      { label: 'Bambu Studio project (.3mf — one plate per part, settings on each object)', onClick: dl('bambu3mf') },
       '-',
       { label: 'Robot archive (.makeweight.zip)', onClick: dl('archive') },
     ]);
@@ -1254,10 +1255,27 @@
   }
 
   // ---------------------------------------------------------------- filaments & profiles
+  function importFilaments() {
+    const inp = h('input', { type: 'file', accept: '.json,.3mf', multiple: true });
+    inp.addEventListener('change', async () => {
+      let made = 0, kept = 0;
+      for (const f of inp.files) {
+        try {
+          const r = await api('POST', 'filaments/import', await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } });
+          made += r.created.length; kept += r.reused.length;
+        } catch (e) { fail(e); }
+      }
+      await loadState(); renderMain();
+      toast(`${made} filament${made === 1 ? '' : 's'} imported${kept ? ` · ${kept} already in the library` : ''}`);
+    });
+    inp.click();
+  }
   V.filaments = function (m) {
     const st = S.state;
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Filaments & profiles'), h('p', null, 'Densities from Bambu Studio’s filament profiles; corrections from your scale. Profiles are Bambu Studio vocabulary and are mapped to PrusaSlicer when slicing.')),
-      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => filModal() }, '＋ Filament…'), h('button', { class: 'btn primary', onClick: () => editProfileModal(null) }, '＋ Profile…'))));
+      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => filModal() }, '＋ Filament…'),
+        h('button', { class: 'btn', title: 'Pick a filament preset exported from Bambu Studio (.json) or any Bambu Studio project (.3mf): density, flow ratio and max volumetric speed are taken from it', onClick: () => importFilaments() }, 'Import from Bambu Studio…'),
+        h('button', { class: 'btn primary', onClick: () => editProfileModal(null) }, '＋ Profile…'))));
     const ftb = h('tbody');
     for (const f of st.filaments) {
       ftb.append(h('tr', null, h('td', null, filChip(f), f.builtin && h('span', { class: 'src' }, 'Bambu')), h('td', null, f.material), h('td', { class: 'num' }, f.density), h('td', { class: 'num' }, f.flow), h('td', { class: 'num' }, f.max_vol_speed ?? 12),
@@ -1675,7 +1693,7 @@
       const rid = S.state.robots.find(r => r.id === saved && r.status === 'active') ? saved : (S.state.robots.find(r => r.status === 'active') || {}).id;
       if (rid) await loadRobot(rid);
       if (!S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
-      await render(); connectSSE(); setTimeout(autoUpdateCheck, 3000);
+      await render(); connectSSE(); setTimeout(autoUpdateCheck, 3000); setInterval(autoUpdateCheck, 3600e3);
     } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the ' + document.title + ' service: ' + e.message)); }
   })();
   window.SB = { S, api, render, go };

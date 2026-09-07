@@ -368,8 +368,36 @@ class Presets:
         base["name"] = name or base.get("name")
         return base
 
+    _GCODE_TEMPLATES = ("machine_start_gcode", "machine_end_gcode", "change_filament_gcode", "layer_change_gcode",
+                        "time_lapse_gcode", "wrapping_detection_gcode")
+
+    def _chain(self, kind: str, name: str) -> list[str]:
+        """The preset and its ancestors, nearest first."""
+        out = []
+        while name and (self.bbl / kind / (name + ".json")).exists() and name not in out:
+            out.append(name)
+            name = json.loads((self.bbl / kind / (name + ".json")).read_text(encoding="utf-8")).get("inherits") or ""
+        return out
+
     def machine_for(self, machine: str, nozzle: str) -> dict:
-        return self.load("machine", _MACHINE.get(machine, _MACHINE["P1S"]).format(n=nozzle))
+        """Flattened machine preset. Since Bambu Studio 2.0 the G-code templates (start/end/layer change …) live in
+        sibling files named "<preset> template <key>.json", found by walking up the inheritance chain; without them the
+        generic 22-line start G-code from fdm_machine_common is used, whose purge line extrudes a different amount than
+        the real printer's — a fixed ~0.05 g offset against Bambu Studio's own numbers."""
+        name = _MACHINE.get(machine, _MACHINE["P1S"]).format(n=nozzle)
+        d = self.load("machine", name)
+        for key in self._GCODE_TEMPLATES:
+            for anc in self._chain("machine", name):
+                t = self.bbl / "machine" / f"{anc} template {key}.json"
+                if t.exists():
+                    try:
+                        v = json.loads(t.read_text(encoding="utf-8")).get(key)
+                    except Exception:  # noqa
+                        v = None
+                    if v:
+                        d[key] = v
+                    break
+        return d
 
     def process_for(self, params: dict, machine: str) -> dict:
         from . import profiles
