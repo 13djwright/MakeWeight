@@ -1620,8 +1620,16 @@
     m.textContent = '';
     const fn = V[S.view] || V.home;
     try { await fn(m); } catch (e) { m.append(h('div', { class: 'empty' }, 'Something went wrong: ' + e.message)); console.error(e); }
-    requestAnimationFrame(() => { window.scrollTo(0, sy); m.scrollTop = st; });
+    requestAnimationFrame(() => { window.scrollTo(0, sy); m.scrollTop = st; fitTables(); });
   }
+  // Tables keep sticky column headers as long as they fit their card; one that is wider scrolls sideways instead.
+  function fitTables() {
+    for (const w of document.querySelectorAll('#main .tw')) {
+      w.classList.remove('wide');
+      if (w.scrollWidth > w.clientWidth + 1) w.classList.add('wide');
+    }
+  }
+  window.addEventListener('resize', () => { clearTimeout(S.fitTimer); S.fitTimer = setTimeout(fitTables, 150); });
   // Background refresh (slice results landing while you work): re-render into a detached tree and patch only what
   // changed, keeping scroll position, open menus and any cell you are editing.
   const busy = el => el.matches(':focus-within') || el.querySelector('.editing, :focus');
@@ -1660,6 +1668,7 @@
     const tmp = h('div');
     try { await (V[S.view] || V.home)(tmp); } catch (e) { console.error(e); return; }
     morph($('#main'), tmp);
+    fitTables();
   }
   async function render() { renderShell(); await renderMain(); }
   function connectSSE() {

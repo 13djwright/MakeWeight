@@ -77,15 +77,18 @@ select{padding-right:22px}
 .side .foot{margin-top:auto;font-size:12px;color:var(--ink3);padding:8px 10px;line-height:1.5}
 .side .foot b{color:var(--ink2);font-weight:600}
 
-.screen{padding:16px 20px 40px;overflow:auto;min-width:0}
+.screen{padding:0 20px 40px;overflow:auto;min-width:0}
+.screen > :first-child{margin-top:16px}  /* top gap as content, not padding, so sticky table headers sit flush with the top */
 .head{display:flex;align-items:flex-end;gap:14px;margin-bottom:14px;flex-wrap:wrap}
 .head h1{font-size:20px;margin:0;font-weight:700}
 .head p{margin:0;color:var(--ink2);font-size:13px}
 .head .tb{margin-left:auto}
 
-.tw{overflow-x:auto;border:1px solid var(--rule);border-radius:8px;background:var(--panel)}
+.tw{overflow:clip;border:1px solid var(--rule);border-radius:8px;background:var(--panel)}  /* clip, not auto/hidden: those make .tw a scroll container and defeat the sticky <th> */
+.tw.wide{overflow-x:auto}  /* set by fitTables(): a table wider than its card scrolls sideways (and gives up the sticky header) */
+td select{max-width:210px}
 table{border-collapse:collapse;width:100%;font-size:13px}
-th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);font-weight:600;text-align:left;padding:8px 10px;border-bottom:1px solid var(--rule);background:var(--panel2);white-space:nowrap;position:sticky;top:0;z-index:1}
+th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);font-weight:600;text-align:left;padding:8px 10px;border-bottom:1px solid var(--rule);background:var(--panel2);white-space:nowrap;position:sticky;top:0;z-index:2;box-shadow:0 1px 0 var(--rule)}
 td{padding:6px 8px;border-bottom:1px solid var(--rule2);vertical-align:middle;white-space:nowrap}
 tr:last-child td{border-bottom:0}
 tr.sel td{background:var(--sel)}
