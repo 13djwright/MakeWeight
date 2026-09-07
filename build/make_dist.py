@@ -49,9 +49,22 @@ def log(*a):
 
 
 def gh_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": f"{APP}-build", "Accept": "application/vnd.github+json"})
+    hdr = {"User-Agent": f"{APP}-build", "Accept": "application/vnd.github+json"}
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if tok:
+        hdr["Authorization"] = f"Bearer {tok}"      # unauthenticated api.github.com is 60 requests/hour per IP — shared CI runners hit that
+    req = urllib.request.Request(url, headers=hdr)
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read().decode())
+
+
+def _exists(url) -> bool:
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": f"{APP}-build"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status < 400
+    except Exception:  # noqa
+        return False
 
 
 def download(url, dest: Path):
@@ -65,7 +78,24 @@ def download(url, dest: Path):
 
 
 def find_runtime_assets():
-    rel = gh_json("https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest")
+    try:
+        rel = gh_json("https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest")
+    except Exception as e:  # noqa — API rate-limited/blocked: astral publishes the tag in a plain file; probe asset names
+        log("GitHub API unavailable (%s); using latest-release.json" % e)
+        req = urllib.request.Request("https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release/latest-release.json", headers={"User-Agent": f"{APP}-build"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            lr = json.loads(r.read().decode())
+        tag = lr["tag"]; prefix = lr.get("asset_url_prefix") or f"https://github.com/astral-sh/python-build-standalone/releases/download/{tag}"
+        assets = []
+        for triple in {t[0] for t in TARGETS.values()}:
+            for patch in range(30, -1, -1):
+                for flavour in ("install_only_stripped", "install_only"):
+                    name = f"cpython-{PY_SERIES}.{patch}+{tag}-{triple}-{flavour}.tar.gz"
+                    if _exists(f"{prefix}/{name}"):
+                        assets.append({"name": name, "browser_download_url": f"{prefix}/{name}"})
+                if any(a["name"].startswith(f"cpython-{PY_SERIES}.{patch}+") and triple in a["name"] for a in assets):
+                    break
+        rel = {"tag_name": tag, "assets": assets}
     out = {}
     for name, (triple, *_rest) in TARGETS.items():
         cands = [a for a in rel["assets"] if a["name"].startswith(f"cpython-{PY_SERIES}.") and a["name"].endswith(f"-{triple}-install_only_stripped.tar.gz")]

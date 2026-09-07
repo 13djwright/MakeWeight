@@ -24,6 +24,8 @@ jobs:
           d["repo"] = sys.argv[2]; p.write_text(json.dumps(d) + "\n"); print(d)
           PY
       - name: Build zips
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python build/make_dist.py --out dist
       - name: Installers next to the zips
         run: |
