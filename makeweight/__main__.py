@@ -108,6 +108,13 @@ def main():
             Updater.launch(launch, getattr(app.updater, "launch_args", None))
         except Exception:  # noqa
             log.exception("update: could not start the new version")
+            # keep this window open so the message can be read, and tell the user exactly what to do
+            print("\n" + "=" * 70 + f"\nMakeWeight could not start the new version automatically.\nYour data is safe. Start it by double-clicking:\n  {launch}\n" + "=" * 70)
+            try:
+                input("Press Enter to close this window…")
+            except Exception:  # noqa
+                pass
+            sys.exit(1)
         time.sleep(1.0)
 
 

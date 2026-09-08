@@ -238,9 +238,10 @@ class Updater:
             subprocess.Popen([str(launcher), *args], cwd=os.getcwd(), start_new_session=True, **quiet)
             return
         if s == "Windows":
-            # a fresh console window like a double-click, detached from this process
+            # a fresh console window like a double-click. CREATE_NEW_CONSOLE and DETACHED_PROCESS must not be combined
+            # (CreateProcess rejects it: "The parameter is incorrect") — `start` in a new console is all we need.
             subprocess.Popen(["cmd", "/c", "start", "", str(launcher), *args], cwd=cwd, close_fds=True,
-                             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "DETACHED_PROCESS", 0), **quiet)
+                             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0), **quiet)
         elif s == "Darwin":
             # Terminal runs the .command in a new window, same as a double-click (no quarantine, so no Gatekeeper).
             # Terminal cannot pass arguments; port and "no browser" travel through the handover marker instead.
