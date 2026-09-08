@@ -773,7 +773,26 @@
     try { matches = await api('POST', `robots/${S.robotId}/mesh_matches`, { mesh_ids: bodies.map(b => b.mesh.id) }); } catch (e) { fail(e); }
     const sug = Object.fromEntries(matches.matches.map(m => [m.mesh_id, m.suggested]));
     const parts = (S.robot || { sections: [] }).sections.flatMap(s => s.items.filter(i => i.part).map(i => ({ id: i.part.id, description: i.description, mesh: i.part.mesh })));
-    const thumb = (mid, title) => mid ? h('img', { class: 'thumb', src: `/api/meshes/${mid}/thumb.png`, alt: title || '', title: title || '', loading: 'lazy' }) : h('div', { class: 'thumb empty' }, 'no mesh');
+    // one real 3D viewer for the whole dialog: click any picture to load that mesh into it (drag to orbit, wheel to zoom)
+    const canvas = h('canvas', { class: 'inspect', width: 600, height: 300 });
+    const inspectLbl = h('span', { class: 'sub' }, 'Click a picture to inspect it here — drag to orbit, wheel to zoom, right-drag to pan');
+    let inspector = null, inspecting = null;
+    const inspect = async (mid, title, el) => {
+      if (!mid) return;
+      try {
+        if (!inspector) inspector = new STLViewer(canvas, {});
+        inspectLbl.textContent = `Loading ${title}…`;
+        const buf = await (await fetch(`/api/meshes/${mid}/stl?lod=1`)).arrayBuffer();
+        inspector.load(buf); inspectLbl.textContent = title;
+        document.querySelectorAll('.modal .thumb.active').forEach(x => x.classList.remove('active')); if (el) el.classList.add('active'); inspecting = mid;
+      } catch (e) { inspectLbl.textContent = 'Could not load that mesh: ' + e.message; }
+    };
+    const thumb = (mid, title) => {
+      if (!mid) return h('div', { class: 'thumb empty' }, 'no mesh');
+      const img = h('img', { class: 'thumb clickable', src: `/api/meshes/${mid}/thumb.png`, alt: title || '', title: (title || '') + ' — click to inspect', loading: 'lazy' });
+      img.addEventListener('click', () => inspect(mid, title, img));
+      return img;
+    };
     const rows = bodies.map(b => {
       const sg = sug[b.mesh.id];
       const sel = h('select', null,
@@ -795,6 +814,7 @@
     const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Body from the file'), h('th', null, 'Guess'), h('th', null, 'Assign to'), h('th', null, 'That part today'))), h('tbody', null, ...rows.map(r => r.tr)));
     modal(`Assign ${bodies.length} bod${bodies.length === 1 ? 'y' : 'ies'} to parts`, h('div', null,
       h('p', { class: 'hint', style: { marginTop: 0 } }, 'Each body can replace an existing part’s mesh (orientation, profile, filament, modifiers and history stay; the part re-slices), become a new part, or be skipped. Guesses come from matching volume and size against the parts’ current meshes' + (bodies.some(b => b.mesh.body_name) ? ', and object names from the 3MF' : '') + '.'),
+      h('div', { class: 'inspector' }, canvas, inspectLbl),
       h('div', { class: 'tw' }, tbl)),
       [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: async () => {
         let replaced = 0, created = 0, skipped = 0;
@@ -811,6 +831,7 @@
         if (S.view === 'part') await renderMain();
         toast(`${replaced} mesh${replaced === 1 ? '' : 'es'} replaced · ${created} new part${created === 1 ? '' : 's'}${skipped ? ` · ${skipped} skipped` : ''}${replaced ? ' — re-slicing' : ''}`);
       } }], { width: '960px' });
+    setTimeout(() => { const first = document.querySelector('.modal .thumb.clickable'); if (first) first.click(); }, 50);
   }
 
   // ---------------------------------------------------------------- part detail
@@ -874,7 +895,7 @@
     if (p.mesh) {
       setTimeout(async () => {
         viewer = new STLViewer(canvas, { onSelect: s => { selInfo.textContent = `selected face: ${s.area.toFixed(0)} mm² · ${s.triangles} triangles`; layBtn.disabled = false; } });
-        const buf = await (await fetch(`/api/meshes/${p.mesh.id}/stl?part=${p.id}&t=${Date.now()}`)).arrayBuffer();
+        const buf = await (await fetch(`/api/meshes/${p.mesh.id}/stl?part=${p.id}&lod=1&t=${Date.now()}`)).arrayBuffer();
         viewer.load(buf); viewer.setBoxes(p.modifiers || []);
       }, 0);
     } else canvas.replaceWith(h('div', { class: 'drop' }, 'Attach a mesh to preview and slice this part'));

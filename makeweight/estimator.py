@@ -90,12 +90,13 @@ def _plane_segments(tri: np.ndarray, z: float) -> np.ndarray:
         p = a[:, :2] + t[:, None] * (b[:, :2] - a[:, :2])
         out.append(np.where(hit[:, None], p, np.nan))
     P = np.stack(out, axis=1)  # (N,3,2)
-    segs = []
-    for tri_pts in P:
-        pts = tri_pts[~np.isnan(tri_pts[:, 0])]
-        if len(pts) >= 2:
-            segs.append(pts[:2])
-    return np.array(segs) if segs else np.zeros((0, 2, 2))
+    hit = ~np.isnan(P[:, :, 0])
+    two = hit.sum(axis=1) >= 2
+    if not two.any():
+        return np.zeros((0, 2, 2))
+    P, hit = P[two], hit[two]
+    order = np.argsort(~hit, axis=1, kind="stable")[:, :2]          # the two hit edges first
+    return np.take_along_axis(P, order[:, :, None], axis=1)
 
 
 def _erode(mask: np.ndarray, k: int) -> np.ndarray:

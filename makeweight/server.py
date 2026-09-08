@@ -82,7 +82,7 @@ class App:
                 def build():
                     try:
                         with self._rm_build_lock:  # one heavy build at a time
-                            tri = meshio.load_mesh(meshio.mesh_path(mesh))
+                            tri = self.preview_mesh(mesh)          # the layer classification is a picture; the decimated copy is plenty
                             t = orient.apply_orientation(tri, loads(orient_json, {}), scale, mirror)
                             rm = estimator.RegionModel(t, params)
                         with self._rm_lock:
@@ -103,6 +103,24 @@ class App:
         return self.region_model(part, params, wait=False)
 
     # ------------------------------------------------------------ helpers
+    PREVIEW_MAX_TRIS = 300_000
+
+    def preview_mesh(self, mesh: dict):
+        """The mesh for anything that only needs to *look* right (viewer, thumbnails, layer model): dense CAD exports
+        are decimated once and cached as data/work/lod/<sha>.stl; small meshes come back untouched."""
+        tri = meshio.load_mesh(meshio.mesh_path(mesh))
+        if len(tri) <= self.PREVIEW_MAX_TRIS:
+            return tri
+        ldir = self.root / "data" / "work" / "lod"; ldir.mkdir(parents=True, exist_ok=True)
+        f = ldir / f"{mesh['sha256'][:24]}.stl"
+        if f.exists():
+            return meshio.load_mesh(f)
+        t0 = time.time()
+        d = meshio.decimate_grid(tri, self.PREVIEW_MAX_TRIS // 2)
+        meshio.write_stl(d, f)
+        log.info("preview mesh for %s: %d → %d triangles in %.1fs", mesh.get("filename"), len(tri), len(d), time.time() - t0)
+        return d
+
     def _repair_mesh_paths(self):
         """Mesh rows remember where their file was uploaded. After the data folder moved (new install location, an
         older version's data/ adopted) that path is stale while the file itself sits in the current meshes folder —
@@ -729,10 +747,13 @@ class Handler(BaseHTTPRequestHandler):
                 tdir = app.root / "data" / "work" / "thumbs"; tdir.mkdir(parents=True, exist_ok=True)
                 f = tdir / f"{mesh['sha256'][:24]}.png"
                 if not f.exists():
-                    f.write_bytes(meshio.render_thumbnail(meshio.load_mesh(meshio.mesh_path(mesh))))
+                    with self._thumb_lock:                       # one render at a time: six 1.5M-triangle bodies in parallel is what froze the app
+                        if not f.exists():
+                            f.write_bytes(meshio.render_thumbnail(app.preview_mesh(mesh)))
                 return self._bytes(f.read_bytes(), "image/png")
             if parts[2] == "stl":
-                tri = meshio.load_mesh(meshio.mesh_path(mesh))
+                # ?lod=1: a decimated copy for on-screen previews (the slicer always gets the real file)
+                tri = app.preview_mesh(mesh) if qs.get("lod") else meshio.load_mesh(meshio.mesh_path(mesh))
                 if qs.get("part"):
                     p = db.get("printed_parts", int(qs["part"]))
                     tri = orient.apply_orientation(tri, loads(p["orient_json"], {}), float(p.get("scale") or 1.0), bool(p.get("mirror")))
@@ -777,7 +798,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(job)
             if sub == "auto_orient" and m == "POST":
                 mesh = db.get("meshes", p["mesh_id"])
-                tri = meshio.load_mesh(meshio.mesh_path(mesh))
+                tri = app.preview_mesh(mesh)                    # candidate orientations come from the shape, not the tessellation
                 if p.get("mirror"):
                     tri = meshio.transform(tri, None, 1.0, True)
                 cands = orient.auto_orient(tri)
@@ -807,7 +828,7 @@ class Handler(BaseHTTPRequestHandler):
                     q = orient.quat_for_preset(b["name"])
                 return self._json(self._update_part(pid, {"orient": {"mode": "preset", "quat": q, "label": b["name"]}}))
             if sub == "orientation_sweep" and m == "POST":
-                mesh = db.get("meshes", p["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
+                mesh = db.get("meshes", p["mesh_id"]); tri = app.preview_mesh(mesh)
                 if p.get("mirror"):
                     tri = meshio.transform(tri, None, 1.0, True)
                 cands = orient.auto_orient(tri)[:6]
@@ -989,6 +1010,7 @@ class Handler(BaseHTTPRequestHandler):
         return nid
 
     _mesh_lock = threading.Lock()
+    _thumb_lock = threading.Lock()
 
     def _store_mesh(self, fname: str, data: bytes, split: bool = False) -> dict:
         # big CAD exports (hundreds of MB, millions of triangles) peak at several times their size in memory while

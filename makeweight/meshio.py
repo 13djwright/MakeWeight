@@ -739,3 +739,33 @@ def render_thumbnail(tri: np.ndarray, w: int = 200, h: int = 150, color=(217, 95
             avg = (nr.sum(axis=3) / cnt[:, :, None]).astype(np.uint8)
             img[holes, :3] = avg[holes]; img[holes, 3] = 255
     return _png(img)
+
+
+# ---------------------------------------------------------------- level of detail for previews
+def decimate_grid(tri: np.ndarray, target: int = 250_000) -> np.ndarray:
+    """Cheap decimation for previews/thumbnails (never for slicing): snap vertices to a grid, merge the ones that
+    land in the same cell, drop the triangles that collapse. The grid is coarsened until the result is under
+    `target` triangles. Silhouette and features stay put; only the surface tessellation gets coarser."""
+    if len(tri) <= target:
+        return tri
+    lo, hi = bbox(tri)
+    ext = float((hi - lo).max()) or 1.0
+    cells = 600.0
+    out = tri
+    for _ in range(12):
+        cell = ext / cells
+        pts = tri.reshape(-1, 3)
+        key = np.floor((pts - lo) / cell).astype(np.int64)
+        keyv = np.ascontiguousarray(key).view(np.dtype((np.void, 24))).ravel()
+        _, inv = np.unique(keyv, return_inverse=True)
+        inv = inv.ravel()
+        nverts = int(inv.max()) + 1
+        verts = np.zeros((nverts, 3)); np.add.at(verts, inv, pts)
+        verts /= np.bincount(inv, minlength=nverts).reshape(-1, 1)
+        faces = inv.reshape(-1, 3)
+        keep = (faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2]) & (faces[:, 0] != faces[:, 2])
+        out = verts[faces[keep]]
+        if len(out) <= target:
+            break
+        cells *= 0.7
+    return out

@@ -276,3 +276,10 @@ td.ed.dlg{cursor:pointer} td.ed.dlg:not(.editing)::after{content:"⚖"}
 .thumbcell{vertical-align:top}
 .thumbcell b{display:block;margin-top:6px}
 .partcell{display:flex;gap:10px;align-items:flex-start}
+
+.inspector{margin:8px 0 12px;border:1px solid var(--rule);border-radius:8px;background:var(--panel2);overflow:hidden}
+.inspector canvas.inspect{display:block;width:100%;height:300px;cursor:grab}
+.inspector .sub{display:block;padding:6px 10px;border-top:1px solid var(--rule)}
+.thumb.clickable{cursor:pointer}
+.thumb.clickable:hover{border-color:var(--accent)}
+.thumb.active{outline:2px solid var(--accent);outline-offset:-2px}
