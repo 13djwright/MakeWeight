@@ -676,7 +676,7 @@
       const cost = g != null && p.filament && p.filament.cost_per_kg ? g / 1000 * p.filament.cost_per_kg * it.qty : null; if (cost) totCost += cost;
       const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(refreshRobot).catch(fail);
       tb.append(h('tr', { class: p.locked ? 'locked' : '', dataset: { key: 'p' + p.id } },
-        h('td', null, h('a', { href: '#/part/' + p.id, style: { color: 'inherit', fontWeight: 600, textDecoration: 'none' } }, it.description), h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.mesh.bbox ? p.mesh.bbox.size.map(v => v.toFixed(0)).join('×') + ' mm' : ''} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³` : h('span', { style: { color: 'var(--warn)' } }, 'no mesh attached'))),
+        h('td', null, h('div', { class: 'partcell' }, p.mesh ? h('img', { class: 'thumb sm', src: `/api/meshes/${p.mesh.id}/thumb.png`, alt: '', loading: 'lazy' }) : null, h('div', null, h('a', { href: '#/part/' + p.id, style: { color: 'inherit', fontWeight: 600, textDecoration: 'none' } }, it.description), h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.mesh.bbox ? p.mesh.bbox.size.map(v => v.toFixed(0)).join('×') + ' mm' : ''} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³` : h('span', { style: { color: 'var(--warn)' } }, 'no mesh attached'))))),
         h('td', { class: 'num' }, it.qty),
         p.locked ? h('td', null, filChip(p.filament)) : h('td', { class: 'ed' }, select(st.filaments.map(f => [f.id, f.name]), p.filament_id, { onChange: e => upd({ filament_id: +e.target.value }) })),
         h('td', null, h('span', { class: 'pill auto' }, (p.orient.mode || 'auto') + (p.orient.label ? ' · ' + p.orient.label : ''), p.locked ? ' 🔒' : '')),
@@ -773,17 +773,26 @@
     try { matches = await api('POST', `robots/${S.robotId}/mesh_matches`, { mesh_ids: bodies.map(b => b.mesh.id) }); } catch (e) { fail(e); }
     const sug = Object.fromEntries(matches.matches.map(m => [m.mesh_id, m.suggested]));
     const parts = (S.robot || { sections: [] }).sections.flatMap(s => s.items.filter(i => i.part).map(i => ({ id: i.part.id, description: i.description, mesh: i.part.mesh })));
+    const thumb = (mid, title) => mid ? h('img', { class: 'thumb', src: `/api/meshes/${mid}/thumb.png`, alt: title || '', title: title || '', loading: 'lazy' }) : h('div', { class: 'thumb empty' }, 'no mesh');
     const rows = bodies.map(b => {
       const sg = sug[b.mesh.id];
       const sel = h('select', null,
         h('option', { value: 'skip' }, '— skip this body —'),
         h('option', { value: 'new' }, `＋ New part “${b.name}”`),
         ...parts.map(pt => h('option', { value: String(pt.id) }, `Replace mesh of: ${pt.description}${pt.mesh ? ` (now ${(pt.mesh.volume_mm3 / 1000).toFixed(1)} cm³)` : ' (no mesh yet)'}`)));
-      sel.value = sg ? (sg.why === 'identical file' ? 'skip' : String(sg.part_id)) : (parts.some(pt => !pt.mesh) ? 'new' : 'new');
+      sel.value = sg ? (sg.why === 'identical file' ? 'skip' : String(sg.part_id)) : 'new';
       const why = sg ? h('span', { class: 'pill ' + (sg.score >= 0.9 ? 'ok' : 'warn'), title: sg.why }, sg.why === 'identical file' ? 'unchanged' : sg.score >= 0.9 ? 'match' : 'likely') : h('span', { class: 'pill' }, 'new');
-      return { b, sel, tr: h('tr', null, h('td', null, h('b', null, b.name), h('span', { class: 'sub' }, b.file)), h('td', { class: 'num' }, b.mesh.bbox ? b.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ') + ' mm' : ''), h('td', { class: 'num' }, (b.mesh.volume_mm3 / 1000).toFixed(2)), h('td', null, why), h('td', null, sel)) };
+      // right-hand picture: what the chosen part looks like today, so a wrong guess is obvious before Apply
+      const target = h('div', { class: 'thumbcell' });
+      const drawTarget = () => { target.textContent = ''; const pt = parts.find(x => String(x.id) === sel.value); if (pt) { target.append(thumb(pt.mesh && pt.mesh.id, pt.description), h('span', { class: 'sub' }, pt.description)); } else target.append(h('span', { class: 'sub' }, sel.value === 'new' ? 'becomes a new part' : 'skipped')); };
+      sel.addEventListener('change', drawTarget); drawTarget();
+      return { b, sel, tr: h('tr', null,
+        h('td', { class: 'thumbcell' }, thumb(b.mesh.id, b.name), h('b', null, b.name), h('span', { class: 'sub' }, `${b.mesh.bbox ? b.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ') + ' mm · ' : ''}${(b.mesh.volume_mm3 / 1000).toFixed(1)} cm³`)),
+        h('td', null, why),
+        h('td', null, sel),
+        h('td', null, target)) };
     });
-    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Body'), h('th', { class: 'num' }, 'Size'), h('th', { class: 'num' }, 'cm³'), h('th', null, 'Guess'), h('th', null, 'Assign to'))), h('tbody', null, ...rows.map(r => r.tr)));
+    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Body from the file'), h('th', null, 'Guess'), h('th', null, 'Assign to'), h('th', null, 'That part today'))), h('tbody', null, ...rows.map(r => r.tr)));
     modal(`Assign ${bodies.length} bod${bodies.length === 1 ? 'y' : 'ies'} to parts`, h('div', null,
       h('p', { class: 'hint', style: { marginTop: 0 } }, 'Each body can replace an existing part’s mesh (orientation, profile, filament, modifiers and history stay; the part re-slices), become a new part, or be skipped. Guesses come from matching volume and size against the parts’ current meshes' + (bodies.some(b => b.mesh.body_name) ? ', and object names from the 3MF' : '') + '.'),
       h('div', { class: 'tw' }, tbl)),
@@ -801,7 +810,7 @@
         await refreshRobot(); await loadState();
         if (S.view === 'part') await renderMain();
         toast(`${replaced} mesh${replaced === 1 ? '' : 'es'} replaced · ${created} new part${created === 1 ? '' : 's'}${skipped ? ` · ${skipped} skipped` : ''}${replaced ? ' — re-slicing' : ''}`);
-      } }], { width: '820px' });
+      } }], { width: '960px' });
   }
 
   // ---------------------------------------------------------------- part detail

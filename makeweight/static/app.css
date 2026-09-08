@@ -268,3 +268,11 @@ td.ed.dlg{cursor:pointer} td.ed.dlg:not(.editing)::after{content:"⚖"}
 .filters{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:0 0 8px;padding:8px 10px;background:var(--panel2);border:1px solid var(--rule);border-radius:6px}
 .filters .flt{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--ink2)}
 .filters .flt select{padding:2px 20px 2px 6px;font-size:12px;height:24px}
+
+/* mesh thumbnails (server-rendered PNG, transparent background) */
+.thumb{display:block;width:120px;height:90px;object-fit:contain;background:var(--panel2);border:1px solid var(--rule);border-radius:6px}
+.thumb.sm{width:56px;height:42px;flex:none}
+.thumb.empty{display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--ink3)}
+.thumbcell{vertical-align:top}
+.thumbcell b{display:block;margin-top:6px}
+.partcell{display:flex;gap:10px;align-items:flex-start}

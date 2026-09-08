@@ -725,6 +725,12 @@ class Handler(BaseHTTPRequestHandler):
             mesh = db.get("meshes", r(1))
             if not mesh:
                 raise KeyError("mesh")
+            if parts[2] == "thumb.png":
+                tdir = app.root / "data" / "work" / "thumbs"; tdir.mkdir(parents=True, exist_ok=True)
+                f = tdir / f"{mesh['sha256'][:24]}.png"
+                if not f.exists():
+                    f.write_bytes(meshio.render_thumbnail(meshio.load_mesh(meshio.mesh_path(mesh))))
+                return self._bytes(f.read_bytes(), "image/png")
             if parts[2] == "stl":
                 tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if qs.get("part"):
@@ -982,7 +988,19 @@ class Handler(BaseHTTPRequestHandler):
             db.insert("events", {k: e[k] for k in e if k != "id"} | {"robot_id": nid})
         return nid
 
+    _mesh_lock = threading.Lock()
+
     def _store_mesh(self, fname: str, data: bytes, split: bool = False) -> dict:
+        # big CAD exports (hundreds of MB, millions of triangles) peak at several times their size in memory while
+        # being split: one at a time, and hand memory back afterwards
+        with self._mesh_lock:
+            try:
+                return self._store_mesh_inner(fname, data, split)
+            finally:
+                import gc
+                gc.collect()
+
+    def _store_mesh_inner(self, fname: str, data: bytes, split: bool = False) -> dict:
         db = self.app.db
         names: list[str] = []
         if split and fname.lower().endswith(".3mf"):
@@ -995,9 +1013,11 @@ class Handler(BaseHTTPRequestHandler):
         else:
             tri = meshio.load_mesh(fname, data)
             bodies = [tri]
-            if split and len(tri) < 400000:
-                bodies = meshio.split_bodies(tri)
+            if split:
+                t0 = time.time()
+                bodies = meshio.split_bodies_by_edges(tri)
                 bodies = [b for b in bodies if meshio.volume_mm3(b) > 1.0] or [tri]
+                log.info("split %s (%d triangles) into %d bodies in %.1fs", fname, len(tri), len(bodies), time.time() - t0)
         out = []
         for i, b in enumerate(bodies):
             blob = meshio.to_binary_stl_bytes(b) if (len(bodies) > 1 or not fname.lower().endswith(".stl")) else data

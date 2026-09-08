@@ -301,13 +301,19 @@ def surface_area(tri: np.ndarray) -> float:
 
 
 def _indexed(tri: np.ndarray, tol: float = 1e-6):
+    """Weld coincident vertices (within tol) → (verts, faces). The three rounded coordinates are hashed into one
+    24-byte record so np.unique sorts a 1-D array: several times less memory and time than unique(axis=0) on the
+    multi-million-vertex meshes CAD exports produce."""
     pts = tri.reshape(-1, 3)
-    key = np.round(pts / tol).astype(np.int64)
-    uniq, inv = np.unique(key, axis=0, return_inverse=True)
+    key = np.ascontiguousarray(np.round(pts / tol).astype(np.int64))
+    keyv = key.view(np.dtype((np.void, key.dtype.itemsize * 3))).ravel()
+    _, first, inv = np.unique(keyv, return_index=True, return_inverse=True)
+    del key, keyv
+    inv = inv.ravel()
     faces = inv.reshape(-1, 3)
-    verts = np.zeros((len(uniq), 3))
+    verts = np.zeros((len(first), 3))
     np.add.at(verts, inv, pts)
-    counts = np.bincount(inv, minlength=len(uniq)).reshape(-1, 1)
+    counts = np.bincount(inv, minlength=len(first)).reshape(-1, 1)
     verts /= counts
     return verts, faces
 
@@ -609,3 +615,127 @@ def bambu_project_filament(ps: dict, extruder: int = 1, variant: str = "Direct D
         return out
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------- splitting into bodies (manifold-edge connectivity)
+def split_bodies_by_edges(tri: np.ndarray, max_rounds: int = 200) -> list[np.ndarray]:
+    """Connected components of the faces, joining two faces only across an edge that exactly two faces share.
+
+    Parts exported together from CAD touch each other: a lid sitting on a chassis shares the corners and edges of the
+    contact face with it, so vertex connectivity glues them into one body. Inside one closed solid every edge has
+    exactly two faces; on a contact between two solids the same edge has four. Ignoring such edges keeps touching
+    parts apart while every solid stays whole. Vectorised label propagation (hook + shortcut) — fine for millions of
+    triangles without a Python loop per face."""
+    if len(tri) == 0:
+        return []
+    _, F = _indexed(tri)
+    nf = len(F)
+    e = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    e = np.sort(e, axis=1)
+    face_of = np.tile(np.arange(nf), 3)
+    key = e[:, 0].astype(np.int64) * (F.max() + 1) + e[:, 1]
+    order = np.argsort(key, kind="stable")
+    key, face_of = key[order], face_of[order]
+    uniq, start, counts = np.unique(key, return_index=True, return_counts=True)
+    two = counts == 2
+    f1 = face_of[start[two]]; f2 = face_of[start[two] + 1]
+    labels = np.arange(nf)
+    for _ in range(max_rounds):
+        la, lb = labels[f1], labels[f2]
+        lo = np.minimum(la, lb); hi = np.maximum(la, lb)
+        before = labels.copy()
+        np.minimum.at(labels, hi, lo)
+        # shortcut: point every label at its root
+        for _k in range(64):
+            nl = labels[labels]
+            if np.array_equal(nl, labels):
+                break
+            labels = nl
+        if np.array_equal(before, labels):
+            break
+    roots, inv = np.unique(labels, return_inverse=True)
+    bodies = [tri[inv == i] for i in range(len(roots))]
+    bodies.sort(key=lambda t: -len(t))
+    return bodies
+
+
+# ---------------------------------------------------------------- thumbnails (software render, no GPU, no deps)
+def _png(rgba: np.ndarray) -> bytes:
+    """Encode an (h, w, 4) uint8 array as PNG with the standard library."""
+    import struct
+    import zlib
+    h, w, _ = rgba.shape
+    raw = b"".join(b"\x00" + rgba[y].tobytes() for y in range(h))
+
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
+
+
+def render_thumbnail(tri: np.ndarray, w: int = 200, h: int = 150, color=(217, 95, 27)) -> bytes:
+    """A small shaded PNG of a mesh from a three-quarter view above (the way it stands on the bed), transparent
+    background. Triangles are projected, the ones larger than a pixel are subdivided until they are not, and every
+    piece is splatted at its centroid into a depth buffer — a rasteriser without loops over triangles, which matters for
+    multi-million-triangle CAD exports. Good enough to tell a chassis from a fork at a glance."""
+    if len(tri) == 0:
+        return _png(np.zeros((h, w, 4), np.uint8))
+    t = tri.astype(np.float64)
+    if len(t) > 600_000:                            # dense CAD exports: a subset is plenty for 200×150 px
+        t = t[np.random.default_rng(0).choice(len(t), 600_000, replace=False)]
+    az, el = np.radians(35.0), np.radians(55.0)
+    rz = np.array([[np.cos(az), -np.sin(az), 0], [np.sin(az), np.cos(az), 0], [0, 0, 1]])
+    rx = np.array([[1, 0, 0], [0, np.cos(el), -np.sin(el)], [0, np.sin(el), np.cos(el)]])
+    R = rx @ rz
+    n = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+    nv = n @ R.T
+    v = t.reshape(-1, 3) @ R.T                     # rotated vertices, (3n, 3)
+    lo, hi = v.min(axis=0), v.max(axis=0)
+    span = max(hi[0] - lo[0], hi[1] - lo[1], 1e-9)
+    pad = 6
+    scale = (min(w, h) - 2 * pad) / span
+    ox = (w - (hi[0] - lo[0]) * scale) / 2; oy = (h - (hi[1] - lo[1]) * scale) / 2
+    sv = np.empty_like(v)
+    sv[:, 0] = (v[:, 0] - lo[0]) * scale + ox
+    sv[:, 1] = h - ((v[:, 1] - lo[1]) * scale + oy)
+    sv[:, 2] = v[:, 2]
+    T = sv.reshape(-1, 3, 3)                        # screen-space triangles
+    shade = np.abs(nv @ (np.array([0.3, 0.5, 0.8]) / np.linalg.norm([0.3, 0.5, 0.8]))) * 0.75 + 0.25
+    # subdivide screen-large triangles until each covers about a pixel (bounded: 12 rounds, 3M pieces)
+    for _ in range(12):
+        area = 0.5 * np.abs((T[:, 1, 0] - T[:, 0, 0]) * (T[:, 2, 1] - T[:, 0, 1]) - (T[:, 2, 0] - T[:, 0, 0]) * (T[:, 1, 1] - T[:, 0, 1]))
+        ext = np.maximum(T[:, :, 0].max(1) - T[:, :, 0].min(1), T[:, :, 1].max(1) - T[:, :, 1].min(1))
+        big = (area > 0.6) | (ext > 1.2)
+        if not big.any() or len(T) > 3_000_000:
+            break
+        B, S = T[big], shade[big]
+        a, b, c = B[:, 0], B[:, 1], B[:, 2]
+        ab, bc, ca = (a + b) / 2, (b + c) / 2, (c + a) / 2
+        T = np.concatenate([T[~big], np.stack([a, ab, ca], 1), np.stack([ab, b, bc], 1), np.stack([ca, bc, c], 1), np.stack([ab, bc, ca], 1)])
+        shade = np.concatenate([shade[~big], S, S, S, S])
+    cen = T.mean(axis=1)
+    xi = np.clip(cen[:, 0].astype(int), 0, w - 1); yi = np.clip(cen[:, 1].astype(int), 0, h - 1)
+    depth = cen[:, 2]
+    flat = yi * w + xi
+    order = np.argsort(depth, kind="stable")          # larger z = closer to the viewer after the tilt: written last, wins
+    zb = np.full(h * w, -np.inf); zb[flat[order]] = depth[order]
+    win = depth >= zb[flat] - 1e-9
+    img = np.zeros((h * w, 4), np.uint8)
+    col = np.array(color, dtype=np.float64)
+    img[flat[win], :3] = (col[None, :] * shade[win, None]).clip(0, 255).astype(np.uint8)
+    img[flat[win], 3] = 255
+    img = img.reshape(h, w, 4)
+    # close single-pixel holes from the neighbours
+    a_ = img[:, :, 3] > 0
+    if a_.any():
+        from numpy.lib.stride_tricks import sliding_window_view
+        pa = np.pad(a_, 1); pr = np.pad(img[:, :, :3], ((1, 1), (1, 1), (0, 0)))
+        neigh = sliding_window_view(pa, (3, 3)).reshape(h, w, 9)
+        holes = (~a_) & (neigh.sum(axis=2) >= 6)
+        if holes.any():
+            nr = sliding_window_view(pr, (3, 3), axis=(0, 1)).reshape(h, w, 3, 9)
+            cnt = np.maximum(neigh.sum(axis=2), 1)
+            avg = (nr.sum(axis=3) / cnt[:, :, None]).astype(np.uint8)
+            img[holes, :3] = avg[holes]; img[holes, 3] = 255
+    return _png(img)
