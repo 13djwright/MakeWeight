@@ -29,6 +29,7 @@
   const signed = (v, d = 1) => (v > 0 ? '+' : '') + fmt(v, d);
   const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
   const dateStr = (t) => t ? new Date(t * 1000).toLocaleString([], { dateStr: 'short' }).replace(',', '') : '';
+  const dayStr = (t) => !t ? '' : typeof t === 'string' ? t : new Date(t * 1000).toLocaleDateString();   // weigh-ins store YYYY-MM-DD; runs store epoch seconds
   const today = () => new Date().toISOString().slice(0, 10);
   const secs = s => s == null ? '—' : s < 60 ? s.toFixed(1) + ' s' : (s / 60).toFixed(1) + ' min';
   const hms = s => { if (s == null) return '—'; const hh = Math.floor(s / 3600), mm = Math.round((s % 3600) / 60); return hh ? `${hh}h ${mm}m` : `${mm}m`; };
@@ -119,14 +120,14 @@
     // Inline-editable cell. Affordances: text cursor + pencil on hover, focusable (Tab) and Enter/F2 to edit.
     // While editing, the cell keeps its exact width so the rest of the table never shifts.
     const td = h('td', { class: 'ed ' + (opts.cls || ''), title: opts.title || 'Click to edit', tabindex: '0', role: 'button', 'aria-label': opts.label || 'Edit value' });
-    const show = () => { td.textContent = ''; td.classList.remove('editing'); td.style.width = ''; td.append(opts.render ? opts.render(value) : (value == null || value === '' ? (opts.placeholder || '—') : (opts.fmt ? opts.fmt(value) : value))); };
+    const show = () => { td.textContent = ''; td.classList.remove('editing'); td.append(opts.render ? opts.render(value) : (value == null || value === '' ? (opts.placeholder || '—') : (opts.fmt ? opts.fmt(value) : value))); };
     show();
     const edit = () => {
       if (td.querySelector('input,select')) return;
-      const w = td.getBoundingClientRect().width;              // freeze the column
+      const w = td.getBoundingClientRect().width;              // the table is fixed-layout, so the column cannot move; size the input to the cell
       const cs = getComputedStyle(td);
       const inner = Math.max(24, w - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 2);
-      td.style.width = w + 'px'; td.classList.add('editing');
+      td.classList.add('editing');
       let inp;
       if (opts.options) { inp = select(opts.options, value); }
       else { inp = h('input', { type: opts.type || 'text', value: value == null ? '' : value, class: opts.type === 'number' ? 'num' : '', step: opts.step || 'any', inputmode: opts.type === 'number' ? 'decimal' : undefined }); if (opts.list) inp.setAttribute('list', opts.list); }
@@ -216,7 +217,109 @@
       if (saved && ths[saved.col]) sortTable(tbl, saved.col, saved.dir);
     }
   }
-  new MutationObserver(() => { if (makeSortable._t) return; makeSortable._t = requestAnimationFrame(() => { makeSortable._t = 0; makeSortable(document.body); }); }).observe(document.body, { childList: true, subtree: true });
+  new MutationObserver(() => { if (makeSortable._t) return; makeSortable._t = requestAnimationFrame(() => { makeSortable._t = 0; makeSortable(document.body); makeResizable(document.body); }); }).observe(document.body, { childList: true, subtree: true });
+
+  // ------------------------------------------------------------ resizable columns
+  // Every table with a header gets a drag grip on each column edge. On first layout the browser's automatic widths are
+  // frozen into a <colgroup> (table-layout: fixed), so editing a cell or a value changing never reflows the other
+  // columns. One "fill" column (the widest text column) absorbs the difference so the table keeps filling its card; when
+  // the columns add up to more than the card the table grows and scrolls sideways. Widths are saved per table in the
+  // shared settings, so they travel with the data to every computer. Double-click a grip to fit the column to its
+  // content; right-click a header for fit-all / reset.
+  const COLW = { data: null, timer: 0, MIN: 36 };
+  const colData = () => COLW.data || (COLW.data = Object.assign({}, (S.state && S.state.settings && S.state.settings.col_widths) || {}));
+  const colKey = tbl => tbl.dataset.tkey || tableKey(tbl);
+  function saveColW() { clearTimeout(COLW.timer); COLW.timer = setTimeout(() => api('PUT', 'settings', { col_widths: colData() }).catch(() => { }), 500); }
+  function colgroupOf(tbl, n) {
+    let cg = tbl.querySelector(':scope > colgroup');
+    if (!cg) { cg = h('colgroup'); tbl.prepend(cg); }
+    while (cg.children.length < n) cg.append(h('col'));
+    while (cg.children.length > n) cg.lastChild.remove();
+    return cg;
+  }
+  function pickFill(ths, w) {
+    // a text column (not numeric, not blank): the first one that is nearly as wide as the widest, else the widest of all
+    const text = []; ths.forEach((th, i) => { if (!th.classList.contains('num') && th.textContent.trim()) text.push(i); });
+    if (text.length) { const mx = Math.max(...text.map(i => w[i])); return text.find(i => w[i] >= 0.8 * mx); }
+    let best = 0; w.forEach((x, i) => { if (x > w[best]) best = i; }); return best;
+  }
+  function layoutCols(tbl) {
+    // apply tbl._cw (= {w:[px], f:fill}) — the fill column takes whatever the card has left
+    const cw = tbl._cw; if (!cw) return;
+    const n = cw.w.length, cg = colgroupOf(tbl, n);
+    const wrap = tbl.closest('.tw') || tbl.parentElement;
+    const avail = wrap ? wrap.clientWidth : tbl.clientWidth;
+    let others = 0; cw.w.forEach((x, i) => { if (i !== cw.f) others += x; });
+    const fill = Math.max(cw.w[cw.f], avail - others);       // w[f] is the fill column's minimum (see snapshotCols)
+    const widths = cw.w.map((x, i) => i === cw.f ? fill : x);
+    widths.forEach((x, i) => { cg.children[i].style.width = x + 'px'; });
+    tbl.style.tableLayout = 'fixed'; tbl.style.width = widths.reduce((a, b) => a + b, 0) + 'px'; tbl.classList.add('fixed');
+  }
+  function snapshotCols(tbl, ths) {
+    const exact = ths.map(th => th.getBoundingClientRect().width);
+    if (!exact.every(x => x > 0)) return null;
+    const f = pickFill(ths, exact);
+    const w = exact.map(x => Math.ceil(x));                       // never round down: a fraction short turns a header into an ellipsis
+    // a table that fits its card: the fill column may give up room (down to 140 px) when other columns grow, and takes any
+    // spare room (layoutCols hands it exactly what is left, so the rounding above never makes the table overflow);
+    // a table already wider than its card keeps every natural width and scrolls sideways
+    const wrap = tbl.closest('.tw') || tbl.parentElement, avail = wrap ? wrap.clientWidth : 0;
+    if (avail && exact.reduce((a, b) => a + b, 0) <= avail + 1) w[f] = Math.min(w[f], 140);
+    return { w, f };
+  }
+  function makeResizable(root) {
+    for (const tbl of root.querySelectorAll('table')) {
+      if (tbl.dataset.resizable || !tbl.tHead || !tbl.tHead.rows.length || tbl.closest('.nores')) continue;
+      if (tbl.closest('.modal') && !tbl.dataset.tkey) continue;
+      if (!tbl.isConnected || !tbl.getBoundingClientRect().width) continue;         // not laid out yet: try again on the next pass
+      const ths = [...tbl.tHead.rows[0].children];
+      if (ths.length < 2 || ths.some(t => t.colSpan > 1)) continue;
+      const key = colKey(tbl), saved = colData()[key];
+      let cw = saved && saved.w && saved.w.length === ths.length ? { w: saved.w.map(x => Math.max(COLW.MIN, +x || COLW.MIN)), f: saved.f ?? pickFill(ths, saved.w) } : snapshotCols(tbl, ths);
+      if (!cw) continue;
+      tbl.dataset.resizable = '1'; tbl._cw = cw; tbl.dataset.ckey = key;
+      layoutCols(tbl);
+      const persist = () => { colData()[key] = { w: tbl._cw.w.slice(), f: tbl._cw.f, n: ths.length }; saveColW(); };
+      ths.forEach((th, i) => {
+        const grip = h('div', { class: 'colgrip', title: 'Drag to resize · double-click to fit' });
+        th.append(grip);
+        grip.addEventListener('click', e => e.stopPropagation());
+        grip.addEventListener('dblclick', e => { e.stopPropagation(); fitCol(tbl, i); persist(); });
+        grip.addEventListener('pointerdown', e => {
+          if (e.button !== 0) return;
+          e.preventDefault(); e.stopPropagation();
+          const start = e.clientX, cw0 = tbl._cw, w0 = cw0.w.slice(), live = [...tbl.querySelectorAll(':scope > colgroup > col')].map(c => parseFloat(c.style.width) || 0);
+          const f = cw0.f, j = i === f ? (i + 1 < ths.length ? i + 1 : i - 1) : -1;      // dragging the fill column trades width with its neighbour
+          grip.classList.add('drag'); document.body.classList.add('col-dragging');
+          grip.setPointerCapture(e.pointerId);
+          const move = ev => {
+            const d = ev.clientX - start;
+            const w = w0.slice();
+            if (i === f) { const nw = Math.max(COLW.MIN, live[i] + d); const dd = nw - live[i]; w[i] = nw; if (j >= 0) w[j] = Math.max(COLW.MIN, w0[j] - dd); }
+            else w[i] = Math.max(COLW.MIN, w0[i] + d);
+            tbl._cw = { w, f }; layoutCols(tbl);
+          };
+          const up = () => { grip.removeEventListener('pointermove', move); grip.classList.remove('drag'); document.body.classList.remove('col-dragging'); persist(); fitTables(); };
+          grip.addEventListener('pointermove', move);
+          grip.addEventListener('pointerup', up, { once: true }); grip.addEventListener('pointercancel', up, { once: true });
+        });
+      });
+      tbl.tHead.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        menu(e.target.closest('th') || e.target, [
+          { label: 'Fit all columns to content', onClick: () => { ths.forEach((_, i) => fitCol(tbl, i)); persist(); fitTables(); } },
+          { label: 'Reset column widths', onClick: () => { delete colData()[key]; saveColW(); render(); } },
+        ]);
+      });
+    }
+  }
+  function fitCol(tbl, i) {
+    // widest content in the column (cells are nowrap, so scrollWidth is the natural width), within reason
+    let w = COLW.MIN;
+    for (const row of tbl.rows) { const c = row.children[i]; if (!c || c.colSpan > 1) continue; w = Math.max(w, c.scrollWidth + 2); }
+    tbl._cw.w[i] = Math.min(520, w); layoutCols(tbl);
+  }
+  function relayoutCols() { for (const tbl of document.querySelectorAll('table[data-resizable]')) if (tbl._cw) layoutCols(tbl); }
 
   const ROLES = [['armor', 'Armor · walls first'], ['structure', 'Structure'], ['internal', 'Internal'], ['cosmetic', 'Cosmetic'], ['weapon', 'Weapon']];
   const STATUSES = [['', '—'], ['planned', 'planned'], ['ordered', 'ordered'], ['on hand', 'on hand'], ['installed', 'installed']];
@@ -404,16 +507,37 @@
     }
   };
   function robotCard(r) {
-    const t = r.totals, over = t.over_under;
-    return h('button', { class: 'rcard', onClick: async () => { await loadRobot(r.id); go('sheet'); } },
-      h('div', { class: 't' }, h('b', null, r.name), h('span', { class: 'cls' }, r.class_name || fmt(r.weight_class_g, 0) + ' g')),
-      h('div', { class: 'g' }, fmt(t.best_known), h('small', null, ' g best known')),
-      h('span', { class: 'pill ' + (over > 0 ? 'bad' : 'good') }, over > 0 ? `${fmt(over)} g over` : `${fmt(-over)} g under`),
-      h('div', { class: 'meta' }, h('span', null, `${r.printed_parts} printed parts`), h('span', null, `${Math.round(t.measured_fraction * 100)}% measured`), h('span', null, r.status === 'active' ? dateStr(r.updated) : 'archived')));
+    const t = r.totals, over = t.over_under, cls = r.weight_class_g;
+    const miniBar = (best, printed, title) => {
+      // non-printed (slate) + printed (orange) against the class limit; the black line is the limit, the dotted one the margin
+      const span = Math.max(best, cls) * 1.04;
+      return h('div', { class: 'bar mini', title }, h('i', { style: { left: 0, width: (best - printed) / span * 100 + '%', background: 'var(--slate)' } }), h('i', { style: { left: (best - printed) / span * 100 + '%', width: printed / span * 100 + '%', background: 'var(--accent)' } }),
+        h('i', { class: 'mrg', style: { left: (cls - (r.margin_g || 0)) / span * 100 + '%' } }), h('i', { class: 'lim', style: { left: cls / span * 100 + '%' } }));
+    };
+    const ouPill = (ou) => h('span', { class: 'pill ' + (ou > 0 ? 'bad' : 'good') }, ou > 0 ? `${fmt(ou)} g over` : `${fmt(-ou)} g under`);
+    const cfgs = r.configs || [];
+    const meta = [];
+    meta.push(`${r.lines} line${r.lines === 1 ? '' : 's'}`);
+    meta.push(`${r.printed_parts} printed part${r.printed_parts === 1 ? '' : 's'}${r.printed_parts ? ` · ${r.parts_with_mesh} with mesh` : ''}${r.parts_locked ? ` · ${r.parts_locked} locked` : ''}`);
+    meta.push(`${Math.round(t.measured_fraction * 100)}% of mass measured · ${r.measured_lines} weighed`);
+    if (r.price_total) meta.push(money(r.price_total) + ' in parts');
+    const warn = [];
+    if (t.flags) warn.push(h('span', { class: 'pill warn' }, `${t.flags} need re-weigh`));
+    if (r.slice_errors) warn.push(h('span', { class: 'pill bad' }, `${r.slice_errors} slice error${r.slice_errors === 1 ? '' : 's'}`));
+    if (r.printed_parts && r.parts_with_mesh < r.printed_parts) warn.push(h('span', { class: 'pill warn' }, `${r.printed_parts - r.parts_with_mesh} without mesh`));
+    return h('div', { class: 'rcard' + (r.status === 'active' ? '' : ' archived'), role: 'button', tabindex: '0', onClick: async () => { await loadRobot(r.id); go('sheet'); }, onKeydown: async e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); await loadRobot(r.id); go('sheet'); } } },
+      h('div', { class: 't' }, h('b', null, r.name), h('span', { class: 'cls' }, r.class_name ? `${r.class_name} · ${fmt(cls, 0)} g` : `${fmt(cls, 0)} g`)),
+      cfgs.length ? h('div', { class: 'cfgs' }, ...cfgs.map(c => h('div', { class: 'cfgrow' + (c.active ? ' active' : ''), title: `${c.name}: ${fmt(c.best_known)} g best known, ${fmt(c.printed)} g printed${c.active ? ' · selected on the sheet' : ''}` },
+          h('span', { class: 'n' }, c.name), h('span', { class: 'g mono' }, fmt(c.best_known), h('small', null, ' g')), ouPill(c.over_under), miniBar(c.best_known, c.printed, `${c.name}: ${fmt(c.best_known)} g of ${fmt(cls)} g`))))
+        : h('div', null, h('div', { class: 'g' }, fmt(t.best_known), h('small', null, ' g best known'), ' ', ouPill(over)), miniBar(t.best_known, t.printed, `${fmt(t.best_known)} g of ${fmt(cls)} g · ${fmt(t.printed)} g printed`)),
+      h('div', { class: 'meta' }, ...meta.map(x => h('span', null, x))),
+      warn.length ? h('div', { class: 'meta' }, ...warn) : null,
+      h('div', { class: 'meta foot' }, h('span', null, `Printed ${fmt(t.printed)} g · budget ${fmt(t.printed_budget)} g`), h('span', null, r.status === 'active' ? `updated ${dayStr(r.updated)}` : 'archived'), r.last_weigh_in && h('span', null, `last weigh-in ${dayStr(r.last_weigh_in)}`), r.last_optimize && h('span', null, `last optimizer run ${dayStr(r.last_optimize)}`)),
+      h('div', { class: 'acts' }, h('button', { class: 'btn small', onClick: async e => { e.stopPropagation(); await loadRobot(r.id); go('sheet'); } }, 'Weight sheet'), h('button', { class: 'btn small', onClick: async e => { e.stopPropagation(); await loadRobot(r.id); go('parts'); } }, 'Printed parts'), h('button', { class: 'btn small', onClick: async e => { e.stopPropagation(); await loadRobot(r.id); go('optimizer'); } }, 'Optimizer')));
   }
   function newRobotModal(src) {
     const st = S.state;
-    const name = input({ placeholder: 'e.g. PLAnti Drum v3', value: src ? src.name + ' v2' : '' });
+    const name = input({ placeholder: 'e.g. Antweight v3', value: src ? src.name + ' v2' : '' });
     const cls = select(st.classes.map(c => [c.grams, c.name]), src ? src.weight_class_g : 453.592);
     const margin = input({ type: 'number', value: src ? src.margin_g : 4.5, step: '0.1' });
     cls.addEventListener('change', () => { margin.value = (parseFloat(cls.value) * 0.01).toFixed(1); });
@@ -457,7 +581,7 @@
       stat('Printed parts', fmt(t.printed), `g · ${t.best_known ? Math.round(t.printed / t.best_known * 100) : 0}%`, h('div', { class: 'hint' }, `budget for printed parts: ${fmt(t.printed_budget)} g`)),
       stat('Flags', String(t.flags), '', h('div', { class: 'hint' }, 'need re-weigh'))));
 
-    const tbl = h('table', { class: 'sheet' }, h('thead', null, h('tr', null, h('th', { class: 'num qty' }, 'Qty'), h('th', null, 'Description'), h('th', null, 'Purpose / notes'), h('th', { class: 'num' }, 'Estimated'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Best'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Status'), h('th', null, ''), h('th', null, ''))));
+    const tbl = h('table', { class: 'sheet', dataset: { tkey: 'sheet' } }, h('thead', null, h('tr', null, h('th', { class: 'num qty' }, 'Qty'), h('th', null, 'Description'), h('th', null, 'Purpose / notes'), h('th', { class: 'num' }, 'Estimated'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Best'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Status'), h('th', null, ''), h('th', null, ''))));
     const tb = h('tbody'); tbl.append(tb);
     for (const s of r.sections) {
       tb.append(h('tr', { class: 'sec-h', dataset: { key: 's' + s.id } }, h('td', { colspan: 6 }, s.name, !s.counts && h('span', { class: 'off' }, 'not counted toward weigh-in')),
@@ -577,7 +701,7 @@
     tr.append(h('td', { class: 'num' }, fmt(it.best_grams)));
     tr.append(h('td', { class: 'num', style: { fontWeight: 600 } }, fmt(it.total_grams)));
     tr.append(edCell(it.price, v => upd({ price: v }), { type: 'number', cls: 'num', fmt: v => Number(v).toFixed(2), placeholder: '' }));
-    tr.append(edCell(it.status || '', v => upd({ status: v || null }), { options: STATUSES, render: v => v ? h('span', { class: 'pill auto' }, v) : h('span', { style: { color: 'var(--ink3)' } }, '—') }));
+    tr.append(h('td', null, select(STATUSES, it.status || '', { class: 'bare', 'aria-label': 'Status', title: 'Status', onChange: e => { e.target.blur(); upd({ status: e.target.value || null }).catch(fail); } })));
     tr.append(h('td', null, h('span', { class: 'flag ' + (it.needs_reweigh ? '' : (it.measured_grams != null ? 'ok' : 'none')), title: it.needs_reweigh ? 'Needs re-weigh: changed since it was measured' : (it.measured_grams != null ? 'Measured' : 'Not measured') })));
     tr.append(h('td', { class: 'acts' },
       h('button', { class: 'btn icon', title: 'More actions for this line', 'aria-label': 'Line menu', onClick: e => lineMenu(e.currentTarget, it, s) }, '⋯'),
@@ -693,15 +817,59 @@
   function weighInModal(it) {
     const g = input({ type: 'number', step: '0.01', placeholder: 'grams from the scale' }), d = input({ type: 'date', value: today() }), note = input({ placeholder: 'note (spool, event…)' });
     const lib = it.component_id ? h('input', { type: 'checkbox', checked: true }) : null;
-    modal(`Weigh-in · ${it.description}`, h('div', null, field('Measured (g)', g), field('Date', d), field('Note', note), lib && field('Update library', h('label', null, lib, ' also update the library component')),
-      it.part && it.part.slice && it.part.slice.grams != null && h('p', { class: 'hint' }, `Slicer says ${fmt(it.part.slice.grams, 2)} g for the current profile. This weigh-in feeds the ${it.part.filament ? it.part.filament.name : ''} correction factor.`)),
-      [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { if (g.value === '') return false; await api('POST', `items/${it.id}/weighins`, { grams: parseFloat(g.value), date: d.value, note: note.value || null, update_library: lib ? lib.checked : false }); await refreshRobot(); await loadState(); } }]);
+    const p = it.part, st = S.state;
+    // printed parts: say which profile the print on the scale was really sliced with — it may not be the one on the sheet
+    let prof = null, setPart = null, profHint = null;
+    if (p) {
+      const cur = p.profile ? p.profile.id : null;
+      prof = select(st.profiles.map(x => [x.id, `${x.name} — ${x.string}${x.id === cur ? '  (on the sheet now)' : ''}`]), cur, { class: 'w' });
+      setPart = h('input', { type: 'checkbox', checked: true });
+      const setRow = field('', h('label', null, setPart, ' also make it the part’s profile on the sheet (that is what was printed)'));
+      profHint = h('p', { class: 'hint' });
+      const upd = () => { const same = String(prof.value) === String(cur); setRow.hidden = same; profHint.textContent = same ? (p.slice && p.slice.grams != null ? `Slicer says ${fmt(p.slice.grams, 2)} g for this profile. The weigh-in feeds the ${p.filament ? p.filament.name : ''} correction factor.` : '') : `Recorded against that profile instead of the sheet’s; if it has not been sliced yet, it is queued now so the correction factor can use it.`; };
+      prof.addEventListener('change', upd); upd();
+      var profRows = [field('Printed with', prof), setRow, profHint];
+    }
+    modal(`Weigh-in · ${it.description}`, h('div', null, field('Measured (g)', g), field('Date', d), field('Note', note), ...(profRows || []), lib && field('Update library', h('label', null, lib, ' also update the library component')),
+      it.weigh_ins.length ? h('p', { class: 'hint' }, `${it.weigh_ins.length} earlier weigh-in${it.weigh_ins.length > 1 ? 's' : ''} · `, h('a', { href: '#', onClick: e => { e.preventDefault(); weighHistoryModal(it); } }, 'history…')) : null),
+      [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => {
+        if (g.value === '') return false;
+        const body = { grams: parseFloat(g.value), date: d.value, note: note.value || null, update_library: lib ? lib.checked : false };
+        if (prof) { body.profile_id = +prof.value; body.set_part_profile = setPart.checked; }
+        await api('POST', `items/${it.id}/weighins`, body); await refreshRobot(); await loadState();
+      } }], { width: p ? '620px' : undefined });
   }
   function weighHistoryModal(it) {
-    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Date'), h('th', { class: 'num' }, 'Grams'), h('th', null, 'Profile at the time'), h('th', null, 'Note'), h('th'))),
-      h('tbody', null, ...[...it.weigh_ins].reverse().map(w => h('tr', null, h('td', { class: 'mono' }, w.date || ''), h('td', { class: 'num' }, fmt(w.grams, 2)), h('td', { class: 'prof' }, w.profile_string || ''), h('td', null, w.note || ''),
-        h('td', null, h('button', { class: 'btn icon', onClick: async () => { await api('DELETE', `weighins/${w.id}`); await refreshRobot(); close(); weighHistoryModal(S.robot.sections.flatMap(s => s.items).find(x => x.id === it.id)); } }, '✕'))))));
-    const close = modal(`Weigh-ins · ${it.description}`, h('div', { class: 'tw' }, tbl), [{ label: 'Close' }]);
+    // every field of every weigh-in is editable in place; the filament correction is recomputed after each change
+    const st = S.state, p = it.part;
+    const reload = async () => { await refreshRobot(); await loadState(); const fresh = S.robot.sections.flatMap(s => s.items).find(x => x.id === it.id); it = fresh || it; draw(); };
+    const save = async (w, patch) => { try { await api('PUT', `weighins/${w.id}`, patch); await reload(); } catch (e) { fail(e); } };
+    const wrap = h('div', { class: 'tw' });
+    const draw = () => {
+      wrap.textContent = '';
+      const tbl = h('table', { class: 'nores' }, h('thead', null, h('tr', null, h('th', null, 'Date'), h('th', { class: 'num' }, 'Grams'), p && h('th', null, 'Printed with'), p && h('th', { class: 'num', title: 'What the slicer said for that profile (uncorrected)' }, 'Sliced'), p && h('th', { class: 'num', title: 'measured ÷ sliced' }, 'Ratio'), h('th', null, 'Note'), h('th'))));
+      const tb = h('tbody'); tbl.append(tb);
+      for (const w of [...it.weigh_ins].reverse()) {
+        const tr = h('tr');
+        tr.append(edCell(w.date || '', v => save(w, { date: v }), { type: 'date', cls: 'mono' }));
+        tr.append(edCell(w.grams, v => save(w, { grams: v }), { type: 'number', cls: 'num', fmt: v => fmt(v, 2), step: '0.01' }));
+        if (p) {
+          const opts = [['', w.profile_string ? `(as recorded: ${w.profile_string})` : '(not recorded)'], ...st.profiles.map(x => [x.id, `${x.name} — ${x.string}`])];
+          tr.append(h('td', null, select(opts, w.profile_id || '', { class: 'bare', style: { maxWidth: '260px' }, title: 'The profile this print was sliced with', onChange: e => save(w, { profile_id: e.target.value ? +e.target.value : null }) })));
+          tr.append(h('td', { class: 'num' }, w.sliced_grams != null ? fmt(w.sliced_grams, 2) : h('span', { class: 'rng', title: w.profile_id ? 'not sliced yet — queued' : 'no profile recorded' }, w.profile_id ? 'slicing…' : '—')));
+          tr.append(h('td', { class: 'num' }, w.sliced_grams ? (w.grams / w.sliced_grams).toFixed(3) : ''));
+        }
+        tr.append(edCell(w.note || '', v => save(w, { note: v }), { placeholder: '', cls: 'wrap' }));
+        tr.append(h('td', { class: 'acts' }, h('button', { class: 'btn icon del', title: 'Delete this weigh-in', onClick: async () => { try { await api('DELETE', `weighins/${w.id}`); await reload(); } catch (e) { fail(e); } } }, '✕')));
+        tb.append(tr);
+      }
+      if (!it.weigh_ins.length) tb.append(h('tr', null, h('td', { colspan: 7, class: 'rng' }, 'No weigh-ins.')));
+      wrap.append(tbl);
+    };
+    draw();
+    modal(`Weigh-ins · ${it.description}`, h('div', null, wrap,
+      h('p', { class: 'hint' }, 'The newest weigh-in is the line’s measured weight. Click a date, weight or note to edit it; change “Printed with” when a print was sliced with another profile than the sheet showed — the filament correction factor uses the slice of the profile named here.')),
+      [{ label: '＋ Add weigh-in…', onClick: () => { weighInModal(it); } }, { label: 'Close' }], { width: p ? '900px' : '640px' });
   }
   function robotWeighInModal() {
     const r = S.robot, g = input({ type: 'number', step: '0.1', placeholder: 'whole robot on the scale, g' }), note = input({ placeholder: 'note' });
@@ -754,7 +922,7 @@
         h('button', { class: 'btn primary', onClick: () => go('optimizer') }, 'Optimize →'))));
     const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ or PLY files here — one part per file. A file with several bodies (your whole robot exported as one STL) opens a dialog to say which part each body replaces or adds. Drop a Bambu Studio or PrusaSlicer .3mf project to import every object with its own walls/infill settings.');
     m.append(drop); setupDrop(m, drop);
-    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Cost'), h('th', null, 'Status'), h('th'))));
+    const tbl = h('table', { dataset: { tkey: 'parts' } }, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Cost'), h('th', null, 'Status'), h('th'))));
     const tb = h('tbody'); tbl.append(tb);
     let tot = 0, totC = 0, totBest = 0, totTime = 0, totCost = 0;
     for (const { it, p } of parts) {
@@ -1053,7 +1221,7 @@
         h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
         h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),
         all.length > 1 ? filterBar : null,
-        h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', { class: 'nosort' }, master), h('th', null, 'Profile'), h('th', null, 'Settings'), h('th', null, 'Filament'), h('th', null, 'Engine'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th', { class: 'nosort' }))), sweepRows)),
+        h('div', { class: 'tw' }, h('table', { dataset: { tkey: 'sweep' } }, h('thead', null, h('tr', null, h('th', { class: 'nosort' }, master), h('th', null, 'Profile'), h('th', null, 'Settings'), h('th', null, 'Filament'), h('th', null, 'Engine'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th', { class: 'nosort' }))), sweepRows)),
         !rows.length && h('p', { class: 'hint' }, all.length ? 'No results match these filters.' : 'No slices yet for this orientation.'),
         h('p', { class: 'hint' }, 'Every row is a real slice. “Settings” is walls · top/bottom layers · infill · layer height. Grey rows came from a different slicer engine. Remove rows you no longer need; the current result cannot be removed.'),
         orientJobs.length ? h('div', null, h('h3', { style: { marginTop: '14px' } }, 'Orientation sweep · current profile'), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...orientJobs.filter((j, i, a) => a.findIndex(x => x.orient_key === j.orient_key) === i).sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9)).map(j => h('tr', null, h('td', { class: 'mono' }, j.orient_key.split('|')[0].replace('q', 'quat ')), h('td', { class: 'num' }, j.status === 'done' ? fmt(j.grams, 2) + ' g' : j.status), h('td', null, j.status === 'done' && !p.locked && h('button', { class: 'btn small', onClick: () => upd({ orient: { mode: 'manual', quat: j.orient_key.split('|')[0].slice(1).split(',').map(Number), label: 'from sweep' } }) }, 'Use')))))))) : null);
@@ -1240,7 +1408,8 @@
     const optRuns = runs.filter(x => x.kind === 'optimize');
     const run = S.param ? (optRuns.find(x => x.id === +S.param) || await api('GET', `runs/${S.param}`)) : optRuns[0];
     const t = r.totals;
-    const parts = r.sections.flatMap(s => s.items.filter(i => i.part && i.in_total));
+    // every configuration counts here (the optimizer must make weight in all of them), not just the one selected on the sheet
+    const parts = r.sections.flatMap(s => s.counts ? s.items.filter(i => i.part && i.counted && (i.configs === null || i.configs.length)) : []);
     const locked = parts.filter(i => i.part.locked), free = parts.filter(i => !i.part.locked && i.part.mesh), noMesh = parts.filter(i => !i.part.locked && !i.part.mesh);
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Optimizer'), h('p', null, 'Finds profile plans that put the robot under its limit. Every plan shown has been re-sliced for real before it appears.'))));
     const left = h('div'), right = h('div'); m.append(h('div', { class: 'cols' }, left, right));
@@ -1249,22 +1418,49 @@
     const budgetLbl = h('b', { class: 'mono', style: { fontSize: '16px' } });
     const pctLbl = h('span', { class: 'rng' });
     const calcBudget = () => { budgetLbl.textContent = fmt(r.weight_class_g - parseFloat(margin.value || 0) - (t.best_known - t.printed)) + ' g'; pctLbl.textContent = `${((parseFloat(margin.value) || 0) / r.weight_class_g * 100).toFixed(1)}% of class`; }; margin.addEventListener('input', calcBudget); calcBudget();
-    const segBtn = (obj, val, label, desc) => h('button', { 'aria-pressed': String(obj.v === val), title: desc, onClick: e => { obj.v = val; [...e.currentTarget.parentNode.children].forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); } }, label);
+    // strategies and models, in plain words — the description under each control follows the selection
+    const roles = [...new Set(free.map(i => i.part.role || 'structure'))];
+    const nW = i => { const c = (i.part.constraints || {}).walls || [2, 5]; return c[1] - c[0] + 1; }, nS = i => { const ct = (i.part.constraints || {}).top || [3, 5], cb = (i.part.constraints || {}).bottom || [3, 5]; return Math.max(ct[1], cb[1]) - Math.min(ct[0], cb[0]) + 1; };
+    const gridSlices = free.reduce((n, i) => n + nW(i) * nS(i) * 3, 0), anchorSlices = free.length * 8;
+    const STRATS = {
+      uniform: ['Uniform', 'One profile for all free parts', 'Every free part gets the same walls, shells and infill. Simple and predictable; strong and weak parts are treated alike.'],
+      per_role: ['Per role', 'Each role gets its own walls/shells', `Parts are grouped by the role set in Part detail (armor, weapon, structure, internal, cosmetic). Each group gets its own walls and shells; infill is solved so the robot lands on the budget, with armor and weapon parts denser than internals and cosmetics.${roles.length < 2 ? ` Right now all ${free.length} free part${free.length === 1 ? '' : 's'} have the role “${roles[0] || 'structure'}”, so this behaves like Uniform — set roles in Part detail, or use Priority fill, which tunes each part on its own.` : ''}`],
+      priority: ['Priority fill', 'Minimums first, then spend grams on armor walls', 'Starts every free part at the minimum of its ranges, then spends the leftover grams one step at a time — walls on armor first, then weapon, structure, internals, cosmetics; then shells; then infill — until the budget is used. Parts end up different from each other even when they share a role.'],
+      trim: ['Trim', 'Smallest change from current profiles', 'Starts from the profiles the parts have today and removes grams until the robot makes weight: infill first on cosmetic and internal parts, then shells, then walls, working up to armor last. Use it when the current settings are close and you want to change as little as possible.'],
+    };
+    const MODELS = {
+      anchored: ['Anchored (fast)', 'Real slices at range corners, fitted model in between, every shown plan confirmed', `Slices each part for real at the corners of its ranges (about ${anchorSlices} slices), fits a model of how its weight moves with walls, shells and infill, searches thousands of combinations with that model, then re-slices every plan it shows for real — the grams on the cards are confirmed, not predicted. If a confirmation misses the model by more than 1.5 %, the model is refitted and the search repeated.`],
+      grid: ['Exact grid', 'Real slices on a coarse grid per part; slower, no model', `Slices every walls × shells combination of every part for real at three infill levels (about ${gridSlices} slices here) and only interpolates between infill levels. Slower, but nothing is modelled — use it when Anchored keeps missing on an unusual shape.`],
+    };
+    const stratDesc = h('p', { class: 'hint', style: { margin: '6px 0 0' } }), modelDesc = h('p', { class: 'hint', style: { margin: '6px 0 0' } });
+    const descFor = () => { stratDesc.textContent = STRATS[strat.v][2]; modelDesc.textContent = MODELS[model.v][2]; };
+    const segBtn = (obj, val, label, desc) => h('button', { 'aria-pressed': String(obj.v === val), title: desc, onClick: e => { obj.v = val; [...e.currentTarget.parentNode.children].forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); descFor(); } }, label);
+    descFor();
     const status = h('span', { class: 'hint', style: { margin: 0 } });
+    const cfgs = r.configs || [];
     left.append(h('div', { class: 'card' }, h('h3', null, 'Target'),
       h('div', { class: 'grid2' },
-        h('div', null, field('Class', h('span', null, `${r.class_name || ''} · ${fmt(r.weight_class_g)} g`)), field('Non-printed', h('span', { class: 'mono' }, `${fmt(t.best_known - t.printed)} g `, h('span', { class: 'rng' }, 'best known, from sheet'))), field('Margin', h('div', { class: 'tb' }, margin, pctLbl)), field('Printed budget', budgetLbl)),
+        h('div', null, field('Class', h('span', null, `${r.class_name || ''} · ${fmt(r.weight_class_g)} g`)), field('Non-printed', h('span', { class: 'mono' }, `${fmt(t.best_known - t.printed)} g `, h('span', { class: 'rng' }, cfgs.length > 1 ? 'best known, selected configuration' : 'best known, from sheet'))), field('Margin', h('div', { class: 'tb' }, margin, pctLbl)), field('Printed budget', h('div', null, budgetLbl, cfgs.length > 1 && h('div', { class: 'rng' }, 'for the selected configuration — each one gets its own budget'))),
+          field('Locked', h('span', null, locked.length ? locked.map(i => h('span', { class: 'pill lock', style: { marginRight: '4px' } }, `${i.description} ${fmt(i.total_grams)} g`)) : h('span', { class: 'rng' }, 'none')))),
         h('div', null,
-          field('Strategy', h('div', { class: 'seg' }, segBtn(strat, 'uniform', 'Uniform', 'One profile for all free parts'), segBtn(strat, 'per_role', 'Per role', 'Each role gets its own walls/shells'), segBtn(strat, 'priority', 'Priority fill', 'Minimums first, then spend grams on armor walls'), segBtn(strat, 'trim', 'Trim', 'Smallest change from current profiles'))),
-          field('Rank', h('div', null, rank, h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--ink3)' } }, h('span', null, 'prefer walls'), h('span', null, 'prefer infill')))),
-          field('Model', h('div', { class: 'seg' }, segBtn(model, 'anchored', 'Anchored (fast)', 'Real slices at range corners, fitted model in between, every shown plan confirmed'), segBtn(model, 'grid', 'Exact grid', 'Real slices on a coarse grid per part; slower, no model'))),
-          field('Plans', nplans),
-          field('Locked', h('span', null, locked.length ? locked.map(i => h('span', { class: 'pill lock', style: { marginRight: '4px' } }, `${i.description} ${fmt(i.total_grams)} g`)) : h('span', { class: 'rng' }, 'none'))))),
+          field('Plans', h('div', { class: 'tb' }, nplans, h('span', { class: 'rng' }, 'how many different plans to show'))),
+          field('Free parts', h('span', null, `${free.length} unlocked with a mesh`, roles.length > 1 ? h('span', { class: 'rng' }, ` · roles: ${roles.join(', ')}`) : h('span', { class: 'rng' }, ` · all “${roles[0] || 'structure'}”`))))),
+      h('div', { class: 'optopts' },
+        field('Strategy', h('div', null, h('div', { class: 'seg' }, ...Object.entries(STRATS).map(([k, v]) => segBtn(strat, k, v[0], v[1]))), stratDesc)),
+        field('Rank', h('div', null, h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'prefer walls'), rank, h('span', { class: 'rng' }, 'prefer infill')), h('p', { class: 'hint', style: { margin: '4px 0 0' } }, 'When several plans fit, this decides which count as “stronger”: grams spent on walls and shells, or grams spent on infill.'))),
+        field('Model', h('div', null, h('div', { class: 'seg' }, ...Object.entries(MODELS).map(([k, v]) => segBtn(model, k, v[0], v[1]))), modelDesc))),
+      cfgs.length > 1 && h('p', { class: 'hint', style: { marginTop: '10px' } }, h('b', null, `${cfgs.length} configurations. `), 'Every plan must make weight in all of them. A part shared by every configuration is printed once, so it gets one profile everywhere; parts that are only in some configurations may be sliced differently.'),
       h('div', { class: 'tb', style: { marginTop: '10px' } }, h('button', { class: 'btn primary', disabled: !free.length, onClick: async () => { try { const rr = await api('POST', `robots/${r.id}/optimize`, { strategy: strat.v, model: model.v, rank: +rank.value, margin_g: parseFloat(margin.value), n_plans: +nplans.value }); go('optimizer', rr.id); } catch (e) { fail(e); } } }, 'Run optimizer'),
         run && (run.status === 'running') && h('button', { class: 'btn', onClick: () => api('POST', `runs/${run.id}/cancel`).then(render) }, 'Cancel'), status,
         noMesh.length ? h('span', { class: 'pill warn' }, `${noMesh.length} printed part${noMesh.length > 1 ? 's' : ''} without mesh count as their sheet weight`) : null,
         !free.length && h('span', { class: 'pill warn' }, 'No unlocked parts with meshes to optimize'))));
-    if (!run) { left.append(h('p', { class: 'empty' }, 'No optimizer runs yet for this robot.')); return; }
+    const howCard = h('details', { class: 'card how' }, h('summary', null, 'How the optimizer works'),
+      ...[['Budget', 'Class limit − margin − everything that is not a free printed part (non-printed lines, locked parts, parts without a mesh) = the grams the free parts may weigh. With configurations, each one gets its own budget and the plan must fit the tightest.'],
+        ['Ranges', 'Each part’s walls / top / bottom / infill ranges (Part detail → Optimizer rules) bound what the optimizer may choose. Lock a part to keep it exactly as it is.'],
+        ['Search', 'The strategy decides how settings are spread across parts; the model decides how weights are predicted while searching (see the descriptions above).'],
+        ['Confirm', 'Every plan on a card has been re-sliced for real; “fits” and the grams are slicer numbers, corrected by the filament’s correction factor if one is set.'],
+        ['Apply', 'Apply to parts writes the plan’s profile onto each part (creating profiles as needed) and flags weighed lines for a re-weigh.']].map(([t, x]) => h('div', { class: 'step' }, h('div', null, h('b', null, t), ' ', x))));
+    if (!run) { left.append(h('p', { class: 'empty' }, 'No optimizer runs yet for this robot.')); right.append(howCard); return; }
     const res = run.results || {};
     status.textContent = res.status_text || (run.status === 'running' ? 'running…' : '');
     // results
@@ -1273,37 +1469,41 @@
     const showP = (p) => { plansEl.hidden = p; paretoEl.hidden = !p; viewSeg.children[0].setAttribute('aria-pressed', String(!p)); viewSeg.children[1].setAttribute('aria-pressed', String(p)); if (p) drawPareto(paretoEl, res, run); };
     viewSeg.append(h('button', { 'aria-pressed': 'true', onClick: () => showP(false) }, 'Plans'), h('button', { 'aria-pressed': 'false', onClick: () => showP(true) }, 'Pareto chart'));
     left.append(h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginTop: '14px' } }, h('h3', { style: { margin: 0, fontSize: '12px', letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--ink3)' } }, `Results · run #${run.id} · ${new Date(run.date * 1000).toLocaleString()}`), viewSeg));
+    if (res.config_note) left.append(h('p', { class: 'hint', style: { margin: '6px 0 0' } }, res.config_note));
     const plans = res.plans || [];
-    const selected = { i: 0 };
-    const rightDetail = h('div');
+    const multi = !!res.multi_config;
+    if (S.planSel == null || S.planSelRun !== run.id) { S.planSel = 0; S.planSelRun = run.id; }
+    const selected = { get i() { return Math.min(S.planSel, Math.max(0, plans.length - 1)); }, set i(v) { S.planSel = v; } };
+    const perConfig = (pl) => multi && pl.per_config ? h('div', { class: 'd cfgs' }, ...pl.per_config.map(pc => h('span', { class: 'pill ' + (pc.fits ? 'good' : 'bad'), title: `${pc.name}: ${fmt(pc.total_g)} g printed, ${pc.fits ? fmt(pc.slack_g) + ' g slack' : fmt(-pc.slack_g) + ' g over'}` }, `${pc.name} ${fmt(pc.total_g)} g`))) : null;
+    const detailFor = (pl) => {
+      const el = h('div', { class: 'card plandetail' }, h('h3', null, `${pl.name} · per part`),
+        h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Part'), multi && h('th', null, 'Configurations'), h('th', null, 'Profile'), h('th', { class: 'num' }, 'each'), h('th', { class: 'num' }, 'total'))),
+          h('tbody', null, ...(pl.assignments || []).map(a => h('tr', { class: a.locked ? 'locked' : '' }, h('td', null, a.name, a.locked ? ' 🔒' : ''), multi && h('td', null, a.configs ? a.configs.map(n => h('span', { class: 'pill cfg', style: { marginRight: '4px' } }, n)) : h('span', { class: 'rng' }, 'all')), h('td', { class: 'prof' }, a.profile_string || ''), h('td', { class: 'num' }, a.grams != null ? fmt(a.grams) : h('span', { class: 'pill warn' }, a.status || '…')), h('td', { class: 'num' }, a.grams != null ? fmt(a.grams * a.qty) : ''))),
+            ...(multi && pl.per_config ? pl.per_config.map(pc => h('tr', { class: 'sum' }, h('td', null, `Total · ${pc.name}`), h('td'), h('td', null, h('span', { class: 'pill ' + (pc.fits ? 'good' : 'bad') }, pc.fits ? `fits · ${fmt(pc.slack_g)} g slack` : `${fmt(-pc.slack_g)} g over`)), h('td'), h('td', { class: 'num' }, fmt(pc.total_g)))) : [h('tr', { class: 'sum' }, h('td', null, 'Total'), h('td'), h('td'), h('td', { class: 'num' }, fmt(pl.total_g)))])))),
+        pl.model_total_g != null && pl.status === 'confirmed' && h('p', { class: 'hint' }, `Model predicted ${fmt(pl.model_total_g)} g; confirmed ${fmt(pl.total_g)} g (${signed((pl.total_g - pl.model_total_g) / pl.model_total_g * 100)}%).`));
+      return el;
+    };
     const drawPlans = () => {
       plansEl.textContent = '';
       plans.forEach((pl, i) => {
-        const conf = pl.status === 'confirmed';
-        plansEl.append(h('div', { class: 'plan' + (i === 0 && conf && pl.fits ? ' best' : '') + (pl.fits === false ? ' infeas' : ''), onClick: () => { selected.i = i; drawDetail(); } },
-          h('div', { class: 't' }, h('b', null, pl.name), h('span', { class: 'pill ' + (conf ? (pl.fits ? 'good' : 'bad') : 'warn') }, conf ? (pl.fits ? 'fits' : `${fmt(-pl.slack_g)} g over`) : (pl.status === 'confirming' ? `confirming ${pl.confirmed_n || 0}/${pl.total_n || '?'}` : pl.status))),
-          h('div', { class: 'g', style: conf ? null : { color: 'var(--ink3)' } }, fmt(pl.total_g), h('small', null, conf ? `g · ${fmt(pl.slack_g)} g slack` : 'g · model')),
+        const conf = pl.status === 'confirmed', sel = i === selected.i;
+        plansEl.append(h('div', { class: 'plan' + (i === 0 && conf && pl.fits ? ' best' : '') + (pl.fits === false ? ' infeas' : '') + (sel ? ' sel' : ''), role: 'button', tabindex: '0', 'aria-pressed': String(sel), onClick: () => { selected.i = i; drawPlans(); }, onKeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selected.i = i; drawPlans(); } } },
+          h('div', { class: 't' }, h('b', null, pl.name), h('span', { class: 'pill ' + (conf ? (pl.fits ? 'good' : 'bad') : 'warn') }, conf ? (pl.fits ? 'fits' : `${fmt(-pl.slack_g)} g over${pl.worst_config ? ' · ' + pl.worst_config : ''}`) : (pl.status === 'confirming' ? `confirming ${pl.confirmed_n || 0}/${pl.total_n || '?'}` : pl.status))),
+          h('div', { class: 'g', style: conf ? null : { color: 'var(--ink3)' } }, fmt(pl.total_g), h('small', null, conf ? `g${multi ? ' heaviest configuration' : ''} · ${fmt(pl.slack_g)} g slack${pl.worst_config ? ' in ' + pl.worst_config : ''}` : 'g · model')),
+          perConfig(pl),
           h('div', { class: 'd' }, ...(pl.summary || []).map(s => h('span', { class: 'prof' }, s)), pl.locked_g ? `Locked ${fmt(pl.locked_g)} g` : null),
           h('div', { class: 'sc' }, 'strength ', ...[0, 1, 2, 3, 4].map(k => h('i', { class: (pl.score || 0) * 5 > k ? 'on' : '' })), conf && h('span', { class: 'pill ver', style: { marginLeft: '6px' } }, 'confirmed')),
-          h('div', { class: 'tb' }, h('button', { class: 'btn small' + (i === 0 ? ' primary' : ''), disabled: !conf, onClick: async (e) => { e.stopPropagation(); await api('POST', `runs/${run.id}/apply`, { plan: i }); toast('Plan applied to parts'); await refreshRobot(); await loadState(); render(); } }, 'Apply to parts'))));
+          h('div', { class: 'tb' }, h('button', { class: 'btn small' + (i === 0 ? ' primary' : ''), disabled: !conf, onClick: async (e) => { e.stopPropagation(); await api('POST', `runs/${run.id}/apply`, { plan: i }); toast('Plan applied to parts'); await refreshRobot(); await loadState(); render(); } }, 'Apply to parts'), sel && h('span', { class: 'rng', style: { marginLeft: '8px' } }, 'selected · details below'))));
+        if (sel) plansEl.append(detailFor(pl));
       });
-      if (res.current) plansEl.append(h('div', { class: 'plan infeas' }, h('div', { class: 't' }, h('b', null, 'Current'), h('span', { class: 'pill ' + (res.current.fits ? 'good' : 'bad') }, res.current.fits ? 'fits' : `${fmt(-res.current.slack_g)} g over`)), h('div', { class: 'g' }, fmt(res.current.total_g), h('small', null, 'g printed')), h('div', { class: 'd' }, 'What is on the sheet now, for comparison.'), h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => go('sheet') }, 'View sheet'))));
+      if (res.current) plansEl.append(h('div', { class: 'plan infeas' }, h('div', { class: 't' }, h('b', null, 'Current'), h('span', { class: 'pill ' + (res.current.fits ? 'good' : 'bad') }, res.current.fits ? 'fits' : `${fmt(-res.current.slack_g)} g over${res.current.worst_config ? ' · ' + res.current.worst_config : ''}`)), h('div', { class: 'g' }, fmt(res.current.total_g), h('small', null, multi ? 'g printed, heaviest configuration' : 'g printed')), perConfig(res.current), h('div', { class: 'd' }, 'What is on the sheet now, for comparison.'), h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => go('sheet') }, 'View sheet'))));
       if (!plans.length && run.status !== 'running') plansEl.append(h('p', { class: 'empty' }, res.error || 'No feasible plan found.'));
     };
-    const drawDetail = () => {
-      rightDetail.textContent = '';
-      const pl = plans[selected.i]; if (!pl) return;
-      rightDetail.append(h('div', { class: 'card' }, h('h3', null, `${pl.name} · per part`),
-        h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', null, 'Profile'), h('th', { class: 'num' }, 'each'), h('th', { class: 'num' }, 'total'))),
-          h('tbody', null, ...(pl.assignments || []).map(a => h('tr', { class: a.locked ? 'locked' : '' }, h('td', null, a.name, a.locked ? ' 🔒' : ''), h('td', { class: 'prof' }, a.profile_string || ''), h('td', { class: 'num' }, a.grams != null ? fmt(a.grams) : h('span', { class: 'pill warn' }, a.status || '…')), h('td', { class: 'num' }, a.grams != null ? fmt(a.grams * a.qty) : ''))),
-            h('tr', { class: 'sum' }, h('td', null, 'Total'), h('td'), h('td'), h('td', { class: 'num' }, fmt(pl.total_g)))))),
-        pl.model_total_g != null && pl.status === 'confirmed' && h('p', { class: 'hint' }, `Model predicted ${fmt(pl.model_total_g)} g; confirmed ${fmt(pl.total_g)} g (${signed((pl.total_g - pl.model_total_g) / pl.model_total_g * 100)}%).`)));
-    };
-    drawPlans(); drawDetail();
+    drawPlans();
     left.append(plansEl, paretoEl);
-    right.append(rightDetail);
     if (res.why) right.append(h('div', { class: 'card' }, h('h3', null, 'Why not lighter?'), ...res.why.map((w, i) => h('div', { class: 'step' }, h('span', { class: 'n' }, i + 1), h('div', null, h('b', null, w.title), ' ', w.text)))));
     if (res.model_report) right.append(h('div', { class: 'card' }, h('h3', null, 'Model check'), h('p', { class: 'hint', style: { margin: 0 } }, res.model_report)));
+    right.append(howCard);
     // live refresh while running
     if (run.status === 'running') S.pollRun = run.id; else S.pollRun = null;
   };
@@ -1349,7 +1549,7 @@
         h('td', null, x.kind === 'weigh-in' ? `sheet ${fmt(res.sheet_total)} g · drift ${signed(res.drift)} g` : (res.status_text || '')),
         h('td', null, x.kind === 'optimize' && h('button', { class: 'btn small', onClick: () => go('optimizer', x.id) }, 'Open'), ' ', h('button', { class: 'btn icon', onClick: () => confirmModal('Delete this run?', async () => { await api('DELETE', `runs/${x.id}`); render(); }) }, '✕'))));
     }
-    m.append(h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Run'), h('th', null, 'Date'), h('th', null, 'Kind'), h('th', { class: 'num' }, 'Total g'), h('th', null, 'Notes'), h('th'))), tb)));
+    m.append(h('div', { class: 'tw' }, h('table', { dataset: { tkey: 'runs' } }, h('thead', null, h('tr', null, h('th', null, 'Run'), h('th', null, 'Date'), h('th', null, 'Kind'), h('th', { class: 'num' }, 'Total g'), h('th', null, 'Notes'), h('th'))), tb)));
   };
 
   function runAssignments(run) {
@@ -1405,7 +1605,7 @@
       const q = st.q.toLowerCase();
       const rows = comps.filter(c => (!st.cat || (c.category || 'Other') === st.cat) && (!q || (c.name + ' ' + (c.category || '') + ' ' + (c.vendor || '')).toLowerCase().includes(q)));
       tw.textContent = '';
-      tw.append(h('table', null, h('thead', null, h('tr', null, h('th', null, 'Component'), h('th', null, 'Category'), h('th', { class: 'num' }, 'Weight g'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Dimensions'), h('th', { class: 'num' }, 'Used'), h('th'))),
+      tw.append(h('table', { dataset: { tkey: 'lib-components' } }, h('thead', null, h('tr', null, h('th', null, 'Component'), h('th', null, 'Category'), h('th', { class: 'num' }, 'Weight g'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Dimensions'), h('th', { class: 'num' }, 'Used'), h('th'))),
         h('tbody', null, ...rows.map(c => h('tr', null,
           h('td', null, c.name, c.link && h('a', { href: c.link, target: '_blank', rel: 'noopener', class: 'src', style: { textTransform: 'none' } }, ' link ↗'), c.notes && h('span', { class: 'sub' }, c.notes)),
           edCell(c.category, v => api('PUT', `components/${c.id}`, { category: v }).then(() => { c.category = v; if (!cats.includes(v)) { cats.push(v); cats.sort(); catDatalist(cats); } }), { list: 'cat-list' }),
@@ -1471,8 +1671,8 @@
         h('td', null, h('button', { class: 'btn icon', onClick: e => menu(e.currentTarget, [{ label: p.builtin ? 'View…' : 'Edit…', onClick: () => editProfileModal(p) }, { label: 'Duplicate…', onClick: () => editProfileModal(null, p.params) }, { label: 'Download PrusaSlicer .ini', onClick: () => window.open(`/api/profiles/${p.id}/prusa.ini?filament=${st.settings.default_filament_id || 1}`) }, { label: 'Download Bambu Studio preset (.json)', onClick: () => window.open(`/api/profiles/${p.id}/bambu.json`) }, '-', !p.builtin && { label: 'Delete', cls: 'danger', onClick: () => confirmModal(`Delete profile “${p.name}”?`, async () => { await api('DELETE', `profiles/${p.id}`); await loadState(); render(); }) }].filter(Boolean)) }, '⋯'))));
     }
     m.append(h('div', { class: 'grid2' },
-      h('div', { class: 'card' }, h('h3', null, 'Filaments'), h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Filament'), h('th', null, 'Material'), h('th', { class: 'num' }, 'ρ g/cm³'), h('th', { class: 'num' }, 'Flow'), h('th', { class: 'num', title: 'Max volumetric speed (mm³/s) — caps print speed, affects time only' }, 'mm³/s'), h('th', { class: 'num' }, 'Correction'), h('th', { class: 'num' }, '$/kg'), h('th'))), ftb)), h('p', { class: 'hint' }, 'Correction = median of (measured ÷ sliced) over weighed parts using the filament. Shown estimates are slicer × correction.')),
-      h('div', { class: 'card' }, h('h3', null, 'Profiles'), h('div', { class: 'tw' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Nozzle'), h('th', null, 'String'), h('th', null, 'Notes'), h('th'))), ptb)), h('p', { class: 'hint' }, 'Built-in profiles reproduce Bambu Studio’s system defaults (with cubic instead of grid). Layer counts are exact (min shell thickness 0); set a min shell thickness on a profile if you want Bambu Studio’s “1.0 mm or N layers, whichever is more” behaviour.'),
+      h('div', { class: 'card' }, h('h3', null, 'Filaments'), h('div', { class: 'tw' }, h('table', { dataset: { tkey: 'lib-filaments' } }, h('thead', null, h('tr', null, h('th', null, 'Filament'), h('th', null, 'Material'), h('th', { class: 'num' }, 'ρ g/cm³'), h('th', { class: 'num' }, 'Flow'), h('th', { class: 'num', title: 'Max volumetric speed (mm³/s) — caps print speed, affects time only' }, 'mm³/s'), h('th', { class: 'num' }, 'Correction'), h('th', { class: 'num' }, '$/kg'), h('th'))), ftb)), h('p', { class: 'hint' }, 'Correction = median of (measured ÷ sliced) over weighed parts using the filament. Shown estimates are slicer × correction.')),
+      h('div', { class: 'card' }, h('h3', null, 'Profiles'), h('div', { class: 'tw' }, h('table', { dataset: { tkey: 'lib-profiles' } }, h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Nozzle'), h('th', null, 'String'), h('th', null, 'Notes'), h('th'))), ptb)), h('p', { class: 'hint' }, 'Built-in profiles reproduce Bambu Studio’s system defaults (with cubic instead of grid). Layer counts are exact (min shell thickness 0); set a min shell thickness on a profile if you want Bambu Studio’s “1.0 mm or N layers, whichever is more” behaviour.'),
         h('p', { class: 'hint' }, h('b', null, 'Checking against Bambu Studio: '), 'with identical settings the two slicers agree on weight within about 1% (chassis 78.5 vs 78.9 g; forks 24.3 vs 24.1 g). If Bambu shows less, compare Top shell thickness (Bambu’s 1.0 mm turns 2 top layers into 5 unless set to 0), the filament’s flow ratio (Bambu’s Generic PLA is 0.98, not 1.0) and density. Print time is PrusaSlicer’s estimate with Bambu speeds and limits — expect it to run 5–15% longer than Bambu Studio’s.'))));
   };
   function filModal(f) {
@@ -1700,7 +1900,7 @@
       qtb.append(h('tr', { dataset: { key: 'j' + x.id } }, h('td', null, h('span', { class: 'dot ' + x.status }), x.status), h('td', null, x.part_name || `part #${x.part_id}`), h('td', { class: 'prof' }, pr ? profString(pr) : ''), h('td', null, x.purpose || ''), h('td', { class: 'num' }, x.status === 'running' ? secs((Date.now() / 1000) - x.started) : (x.time_s != null ? secs(x.time_s) : '')), h('td', { class: 'num' }, x.grams != null ? fmt(x.grams, 2) + ' g' : (x.error ? h('span', { class: 'err', title: x.error }, x.error.slice(0, 60)) : ''))));
     }
     left.append(h('div', { class: 'card' }, h('h3', null, `Queue · ${j.state.running} running · ${j.state.queued} queued`, h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => api('POST', 'jobs/cancel', {}).then(render) }, 'Cancel queued'), h('button', { class: 'btn small', onClick: () => api('POST', 'jobs/retry_errors', {}).then(render) }, 'Retry errors'))),
-      h('div', { class: 'tw', style: { maxHeight: '420px', overflow: 'auto' } }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Status'), h('th', null, 'Part'), h('th', null, 'Profile'), h('th', null, 'Purpose'), h('th', { class: 'num' }, 'Time'), h('th', { class: 'num' }, 'Result'))), qtb)), !j.jobs.length && h('p', { class: 'hint' }, 'No jobs yet.')));
+      h('div', { class: 'tw', style: { maxHeight: '420px', overflow: 'auto' } }, h('table', { dataset: { tkey: 'jobs' } }, h('thead', null, h('tr', null, h('th', null, 'Status'), h('th', null, 'Part'), h('th', null, 'Profile'), h('th', null, 'Purpose'), h('th', { class: 'num' }, 'Time'), h('th', { class: 'num' }, 'Result'))), qtb)), !j.jobs.length && h('p', { class: 'hint' }, 'No jobs yet.')));
     // right: cache, printers, data
     right.append(h('div', { class: 'card' }, h('h3', null, 'Cache'), h('dl', { class: 'kv' }, h('dt', null, 'Slices cached'), h('dd', null, j.cache.done), h('dt', null, 'Slicer time spent'), h('dd', null, secs(j.cache.time_s))), h('div', { class: 'tb', style: { marginTop: '8px' } }, h('button', { class: 'btn small', onClick: () => confirmModal('Clear all cached slice results? Parts will re-slice as needed.', async () => { await api('POST', 'jobs/clear_cache', {}); render(); }, 'Clear') }, 'Clear cache'))));
     right.append(h('div', { class: 'card' }, h('h3', null, 'Printers', h('div', { class: 'tb' }, h('button', { class: 'btn small', onClick: () => printerModal(), title: 'Add a printer…', 'aria-label': 'Add a printer' }, '＋'))), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...st.printers.map(p => h('tr', null, h('td', null, h('b', null, p.name)), h('td', null, p.nozzles.join(' · ') + ' mm'), h('td', { class: 'rng' }, `${p.bed.x} × ${p.bed.y} × ${p.bed.z}`), h('td', null, h('button', { class: 'btn icon', onClick: () => printerModal(p) }, '✎'))))))),
@@ -1856,6 +2056,7 @@
   }
   // Tables keep sticky column headers as long as they fit their card; one that is wider scrolls sideways instead.
   function fitTables() {
+    relayoutCols();
     for (const w of document.querySelectorAll('#main .tw')) {
       w.classList.remove('wide');
       if (w.scrollWidth > w.clientWidth + 1) w.classList.add('wide');

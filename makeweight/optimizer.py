@@ -22,6 +22,7 @@ from .db import loads, now
 DEFAULT_RANGES = {"walls": [2, 5], "top": [3, 5], "bottom": [3, 5], "infill": [8, 40]}
 ROLE_WEIGHT = {"weapon": 1.0, "armor": 1.0, "structure": 0.8, "internal": 0.5, "cosmetic": 0.2}
 ROLE_PRIORITY = ["armor", "weapon", "structure", "internal", "cosmetic"]
+ROLE_INFILL_OFFSET = {"armor": 8.0, "weapon": 8.0, "structure": 0.0, "internal": -6.0, "cosmetic": -10.0}
 _ACTIVE: dict[int, "Optimization"] = {}
 
 
@@ -83,6 +84,7 @@ class PartModel:
         self.role = part.get("role") or "structure"
         self.model = None  # FittedModel or GridModel
         self.anchors: dict[tuple, float] = {}
+        self.cfgs: set = set()          # configuration ids this line is in (see Optimization.configs)
 
     def params_for(self, W: int, s: int, d: float) -> dict:
         p = dict(self.base)
@@ -144,6 +146,8 @@ class Optimization:
         self.mode_model = body.get("model") or "anchored"
         self.alpha = float(body.get("rank", 25)) / 100.0
         self.n_plans = int(body.get("n_plans") or 5)
+        self.configs: list[dict] = [{"id": None, "name": ""}]
+        self.budgets: dict = {}; self.fixed_g: dict = {}; self.fixed_items: list = []
 
     # ------------------------------------------------------------ plumbing
     def save(self, text: str | None = None, status: str | None = None):
@@ -191,19 +195,46 @@ class Optimization:
     def _run(self):
         det = self.app.robot_detail(self.rid)
         robot = det
-        items = [it for s in det["sections"] for it in s["items"] if it.get("part") and it.get("in_total")]      # active configuration only
         single = self.body.get("mode") == "single"
+        # Configurations: a plan must make weight in *every* loadout. A line shared by several configurations gets one
+        # profile (the same physical part is printed once); a line that is only in some of them is free to differ.
+        cfg_rows = det.get("configs") or []
+        if single or not cfg_rows:
+            cfg_rows = [{"id": None, "name": robot["name"]}]
+        self.configs = [{"id": c["id"], "name": c.get("name") or "?"} for c in cfg_rows]
+        cids = [c["id"] for c in self.configs]
+
+        def member(it, cid):
+            cj = it.get("configs")
+            return cid is None or cj is None or cid in cj
+
+        items = []
+        for sec in det["sections"]:
+            for it in sec["items"]:
+                if not (sec["counts"] and it.get("counted", True)):
+                    continue
+                it["_cfgs"] = {cid for cid in cids if member(it, cid)}
+                if it["_cfgs"]:
+                    items.append(it)
         free: list[PartModel] = []
-        fixed_g = 0.0
+        fixed_g = {cid: 0.0 for cid in cids}          # locked / mesh-less printed parts, per configuration
+        non_printed = {cid: 0.0 for cid in cids}
         why = []
         locked_g = 0.0
+        fixed_items = []
         for it in items:
-            p = it["part"]
+            p = it.get("part")
+            if not p:
+                for cid in it["_cfgs"]:
+                    non_printed[cid] += it["total_grams"]
+                continue
             is_target = single and p["id"] == self.body.get("part_id")
             if single and not is_target:
                 continue
             if p["locked"] or not p.get("mesh") or not p.get("profile") or not p.get("filament"):
-                fixed_g += it["total_grams"]
+                for cid in it["_cfgs"]:
+                    fixed_g[cid] += it["total_grams"]
+                fixed_items.append(it)
                 if p["locked"]:
                     locked_g += it["total_grams"]
                 elif not p.get("mesh"):
@@ -216,25 +247,38 @@ class Optimization:
             for k, v in (p.get("constraints") or {}).items():
                 if k in ranges and isinstance(v, list) and len(v) == 2 and v[0] is not None and v[1] is not None:
                     ranges[k] = [min(v), max(v)]
-            free.append(PartModel(it, row, mesh, fil, base, ranges))
+            pm = PartModel(it, row, mesh, fil, base, ranges)
+            pm.cfgs = set(it["_cfgs"])
+            free.append(pm)
         if not free:
             raise RuntimeError("No unlocked printed parts with a mesh to optimize")
+        self.fixed_items = fixed_items
         margin = float(self.body.get("margin_g", robot["margin_g"] or 0))
         if single:
-            budget = float(self.body.get("target_g") or 0) * free[0].qty
-            self.res["budget_g"] = budget
-            self.res["budget_total_g"] = budget
+            b = float(self.body.get("target_g") or 0) * free[0].qty
+            budgets = {cid: b for cid in cids}
+            self.res["budget_g"] = b
+            self.res["budget_total_g"] = b
         else:
-            non_printed = det["totals"]["best_known"] - det["totals"]["printed"]
-            budget = robot["weight_class_g"] - margin - non_printed - fixed_g
-            self.res["budget_g"] = budget
-            self.res["budget_total_g"] = budget + fixed_g
-            self.res["non_printed_g"] = non_printed; self.res["fixed_printed_g"] = fixed_g
+            budgets = {cid: robot["weight_class_g"] - margin - non_printed[cid] - fixed_g[cid] for cid in cids}
+            self.res["budget_g"] = min(budgets.values())
+            self.res["budget_total_g"] = min(budgets[cid] + fixed_g[cid] for cid in cids)
+            self.res["non_printed_g"] = max(non_printed.values()); self.res["fixed_printed_g"] = max(fixed_g.values())
+        self.budgets = budgets; self.fixed_g = fixed_g
+        self.res["configs"] = [{"id": c["id"], "name": c["name"], "budget_g": budgets[c["id"]] + fixed_g[c["id"]], "non_printed_g": non_printed[c["id"]],
+                                "fixed_printed_g": fixed_g[c["id"]], "n_parts": sum(1 for pm in free if c["id"] in pm.cfgs)} for c in self.configs]
+        self.res["multi_config"] = len(self.configs) > 1
+        self.res["roles"] = sorted({pm.role for pm in free})
+        shared = [pm for pm in free if len(pm.cfgs) == len(cids)]
+        if len(self.configs) > 1:
+            self.res["config_note"] = (f"{len(shared)} part{'s' if len(shared) != 1 else ''} shared by every configuration get one profile; "
+                                       f"{len(free) - len(shared)} configuration-specific part{'s' if len(free) - len(shared) != 1 else ''} may differ. Every plan shown makes weight in all {len(self.configs)} configurations.")
+        budget = budgets  # dict per configuration from here on
         if locked_g:
             why.insert(0, {"title": "Locked", "text": f"{locked_g:.1f} g of locked printed parts cannot move."})
         # current plan for comparison
-        cur_total = sum(pm.item["total_grams"] for pm in free)
-        self.res["current"] = {"total_g": cur_total + fixed_g, "fits": cur_total <= budget, "slack_g": budget - cur_total}
+        cur = self.totals(free, {pm.part["id"]: None for pm in free}, lambda pm, _a: pm.item["total_grams"] / max(pm.qty, 1e-9))
+        self.res["current"] = self.fit_view(cur, fixed_g, budget)
 
         # ---- stage 1: anchors / grid
         self.save("queueing anchor slices")
@@ -314,33 +358,72 @@ class Optimization:
             pp["shown"] = pp["label"] is not None
 
     # ------------------------------------------------------------ search
-    def candidate(self, free, assign: dict[int, tuple], budget: float) -> dict:
-        """assign: part_id -> (W, s, d)."""
-        total = 0.0; score = 0.0; norm = 0.0
+    def totals(self, free, assign: dict, grams_fn) -> dict:
+        """Free-part grams per configuration: {cid: total}. grams_fn(pm, assign[pid]) -> grams for one unit."""
+        out = {c["id"]: 0.0 for c in self.configs}
+        for pm in free:
+            g = grams_fn(pm, assign[pm.part["id"]]) * pm.qty
+            for cid in pm.cfgs:
+                out[cid] += g
+        return out
+
+    def fit_view(self, totals: dict, fixed_g: dict, budget: dict) -> dict:
+        """Per-configuration totals incl. fixed parts, overall fits/slack (worst configuration) and the heaviest total."""
+        per = []
+        for c in self.configs:
+            cid = c["id"]; t = totals[cid] + fixed_g[cid]; sl = budget[cid] - totals[cid]
+            per.append({"id": cid, "name": c["name"], "total_g": t, "slack_g": sl, "fits": sl >= -1e-6})
+        worst = min(per, key=lambda x: x["slack_g"])
+        return {"total_g": max(x["total_g"] for x in per), "slack_g": worst["slack_g"], "fits": all(x["fits"] for x in per), "per_config": per,
+                "worst_config": worst["name"] if len(per) > 1 else None}
+
+    def candidate(self, free, assign: dict[int, tuple], budget: dict) -> dict:
+        """assign: part_id -> (W, s, d). Fits only if every configuration makes weight; slack is the tightest one."""
+        score = 0.0; norm = 0.0
+        tot = self.totals(free, assign, lambda pm, a: pm.predict(*a))
         for pm in free:
             W, s, d = assign[pm.part["id"]]
-            total += pm.predict(W, s, d) * pm.qty
             w = ROLE_WEIGHT.get(pm.role, 0.6) * pm.qty
             wr, sr, dr = pm.w_range(), pm.s_range(), pm.ranges["infill"]
             wn = (W - wr[0]) / max(1, wr[-1] - wr[0]); sn = (s - sr[0]) / max(1, sr[-1] - sr[0]); dn = (d - dr[0]) / max(1e-6, dr[1] - dr[0])
             score += w * ((1 - self.alpha) * (0.8 * wn + 0.2 * sn) + self.alpha * dn); norm += w
-        return {"assign": assign, "total_g": total, "score": score / norm if norm else 0.0, "fits": total <= budget + 1e-6, "slack_g": budget - total,
+        slack = min(budget[cid] - tot[cid] for cid in tot)
+        return {"assign": assign, "total_g": max(tot.values()), "totals": tot, "score": score / norm if norm else 0.0, "fits": slack >= -1e-6, "slack_g": slack,
                 "key": tuple((pid, a[0], a[1]) for pid, a in sorted(assign.items()))}
 
-    def solve_shared_d(self, free, ws: dict[int, tuple], budget: float):
-        """Common infill % so that the total hits budget for fixed (W,s) per part; clamped to ranges."""
-        a = 0.0; b = 0.0
+    def solve_shared_d(self, free, ws: dict[int, tuple], budget: dict, offsets: dict[str, float] | None = None):
+        """Common infill % (plus an optional per-role offset) so that the tightest configuration lands on its budget for
+        fixed (W,s) per part; whole percent, rounded down, clamped to the parts' ranges. None when even the minimum is over."""
+        lines = {}
         for pm in free:
             W, s = ws[pm.part["id"]]
-            a0, b0 = pm.line(W, s); a += a0 * pm.qty; b += b0 * pm.qty
-        if b <= 1e-9:
+            lines[pm.part["id"]] = pm.line(W, s)
+        offs = offsets or {}
+
+        def d_of(pm, base):
+            lo, hi = pm.ranges["infill"]
+            return float(min(max(base + offs.get(pm.role, 0.0), lo), hi))
+
+        def total(cid, base):
+            return sum((lines[pm.part["id"]][0] + lines[pm.part["id"]][1] * d_of(pm, base)) * pm.qty for pm in free if cid in pm.cfgs)
+
+        lo = min(pm.ranges["infill"][0] for pm in free) - max([abs(v) for v in offs.values()] + [0.0])
+        hi = max(pm.ranges["infill"][1] for pm in free) + max([abs(v) for v in offs.values()] + [0.0])
+        if any(total(cid, lo) > budget[cid] + 1e-6 for cid in budget):
             return None
-        d = (budget - a) / b
-        lo = max(pm.ranges["infill"][0] for pm in free); hi = min(pm.ranges["infill"][1] for pm in free)
-        d = float(np.floor(d))  # whole percent, on the safe side
-        if d < lo:
-            return None
-        return min(d, hi)
+        # totals rise with infill: bisect the largest base that still fits every configuration
+        a, b = lo, hi
+        if all(total(cid, hi) <= budget[cid] + 1e-6 for cid in budget):
+            a = hi
+        else:
+            for _ in range(40):
+                m = (a + b) / 2
+                if all(total(cid, m) <= budget[cid] + 1e-6 for cid in budget):
+                    a = m
+                else:
+                    b = m
+        base = float(np.floor(a))
+        return {pm.part["id"]: d_of(pm, base) for pm in free}
 
     def search(self, free, budget) -> list[dict]:
         cands: list[dict] = []
@@ -348,11 +431,16 @@ class Optimization:
         d_lo = max(pm.ranges["infill"][0] for pm in free); d_hi = min(pm.ranges["infill"][1] for pm in free)
         d_grid = sorted(set([float(d_lo), float(d_hi)] + [float(round(x)) for x in np.arange(d_lo, d_hi + 0.01, max(2.0, (d_hi - d_lo) / 6))]))
 
-        def add_ws(ws):
-            d = self.solve_shared_d(free, ws, budget)
+        def add_ws(ws, offsets=None):
+            sol = self.solve_shared_d(free, ws, budget, offsets)
             outs = []
-            for dd in ([d] if d is not None else []) + d_grid:
-                assign = {pm.part["id"]: (ws[pm.part["id"]][0], ws[pm.part["id"]][1], float(dd)) for pm in free}
+            if sol is not None:
+                outs.append(self.candidate(free, {pm.part["id"]: (ws[pm.part["id"]][0], ws[pm.part["id"]][1], sol[pm.part["id"]]) for pm in free}, budget))
+            for dd in d_grid:
+                assign = {}
+                for pm in free:
+                    lo, hi = pm.ranges["infill"]
+                    assign[pm.part["id"]] = (ws[pm.part["id"]][0], ws[pm.part["id"]][1], float(min(max(dd + (offsets or {}).get(pm.role, 0.0), lo), hi)))
                 outs.append(self.candidate(free, assign, budget))
             cands.extend(outs)
 
@@ -383,6 +471,8 @@ class Optimization:
                         if pm.role == r:
                             ws[pid(pm)] = (W, s)
                 add_ws(ws)
+                if len(roles) > 1:      # armor/weapon denser than structure, internals and cosmetics sparser
+                    add_ws(ws, ROLE_INFILL_OFFSET)
         elif self.strategy in ("priority", "trim"):
             order = sorted(free, key=lambda pm: ROLE_PRIORITY.index(pm.role) if pm.role in ROLE_PRIORITY else 9)
             if self.strategy == "priority":
@@ -486,17 +576,23 @@ class Optimization:
             W, s, d = c["assign"][pm.part["id"]]
             params = pm.params_for(W, s, d)
             assigns.append({"part_id": pm.part["id"], "name": pm.item["description"], "qty": pm.qty, "params": params, "profile_string": profiles.profile_string(params),
-                            "role": pm.role, "grams": None, "model_grams": pm.predict(W, s, d), "status": "pending", "locked": False})
-        det = self.app.robot_detail(self.rid)
-        for it in [it for s in det["sections"] for it in s["items"] if it.get("part") and it.get("in_total") and (it["part"]["locked"] or not it["part"].get("mesh"))]:
-            if self.body.get("mode") == "single":
-                continue
-            assigns.append({"part_id": it["part"]["id"], "name": it["description"], "qty": it["qty"], "params": None, "profile_string": it["part"]["profile"]["string"] if it["part"].get("profile") else "",
-                            "grams": it["best_grams"], "status": "fixed", "locked": True})
+                            "role": pm.role, "grams": None, "model_grams": pm.predict(W, s, d), "status": "pending", "locked": False, "configs": self._cfg_names(pm.cfgs)})
+        if self.body.get("mode") != "single":
+            for it in self.fixed_items:
+                assigns.append({"part_id": it["part"]["id"], "name": it["description"], "qty": it["qty"], "params": None, "profile_string": it["part"]["profile"]["string"] if it["part"].get("profile") else "",
+                                "grams": it["best_grams"], "status": "fixed", "locked": True, "configs": self._cfg_names(it["_cfgs"])})
         summary = self.summarize(c, free)
         label = self.label_for(c, free)
-        return {"name": label, "label": label, "key": [list(k) for k in c["key"]], "full": [[k] + list(v) for k, v in sorted(c["assign"].items())], "assignments": assigns, "total_g": c["total_g"] + fixed_g, "model_total_g": c["total_g"] + fixed_g,
-                "slack_g": c["slack_g"], "fits": c["fits"], "score": c["score"], "summary": summary, "status": "confirming", "locked_g": sum(a["grams"] * a["qty"] for a in assigns if a["locked"] and a["grams"] is not None)}
+        fv = self.fit_view(c["totals"], fixed_g, budget)
+        return {"name": label, "label": label, "key": [list(k) for k in c["key"]], "full": [[k] + list(v) for k, v in sorted(c["assign"].items())], "assignments": assigns,
+                "total_g": fv["total_g"], "model_total_g": fv["total_g"], "per_config": fv["per_config"], "worst_config": fv["worst_config"],
+                "slack_g": fv["slack_g"], "fits": fv["fits"], "score": c["score"], "summary": summary, "status": "confirming", "locked_g": sum(a["grams"] * a["qty"] for a in assigns if a["locked"] and a["grams"] is not None)}
+
+    def _cfg_names(self, cfgs) -> list | None:
+        """None when the part is in every configuration (or there is only one), else the names it belongs to."""
+        if len(self.configs) <= 1 or len(cfgs) == len(self.configs):
+            return None
+        return [c["name"] for c in self.configs if c["id"] in cfgs]
 
     def summarize(self, c: dict, free) -> list[str]:
         by_role: dict[str, set] = {}
@@ -541,18 +637,24 @@ class Optimization:
             if i % step and tuple(sorted(c["assign"].items())) not in shown:
                 continue
             full = tuple(sorted(c["assign"].items()))
-            pts.append({"total_g": c["total_g"] + fixed_g, "score": c["score"], "fits": c["fits"], "summary": self.summarize(c, free), "key": [list(k) for k in c["key"]],
+            pts.append({"total_g": self.fit_view(c["totals"], fixed_g, self.budgets)["total_g"], "score": c["score"], "fits": c["fits"], "summary": self.summarize(c, free), "key": [list(k) for k in c["key"]],
                         "shown": full in shown, "full": [[k] + list(v) for k, v in sorted(c["assign"].items())]})
         return pts
 
-    def why_not_lighter(self, free, budget: float, locked_g: float) -> list[dict]:
-        floor = sum(pm.predict(pm.w_range()[0], pm.s_range()[0], pm.ranges["infill"][0]) * pm.qty for pm in free)
-        out = [{"title": "Minimums", "text": f"With every free part at its minimum walls/shells/infill the printed parts weigh {floor:.1f} g (model). Budget for them: {budget:.1f} g → headroom {budget - floor:+.1f} g."}]
-        ceiling = sum(pm.predict(pm.w_range()[-1], pm.s_range()[-1], pm.ranges["infill"][1]) * pm.qty for pm in free)
-        if ceiling <= budget:
-            out.append({"title": "Headroom", "text": f"Even every free part at its maximum walls/shells/infill ({ceiling:.1f} g, model) fits with {budget - ceiling:.1f} g to spare. Raise the ranges in Part detail if you want to spend it."})
-        if floor > budget:
-            out.append({"title": "Infeasible", "text": "Even the minimums exceed the budget: loosen a constraint, unlock a part, or lighten something that isn't printed."})
+    def why_not_lighter(self, free, budget: dict, locked_g: float) -> list[dict]:
+        floors = self.totals(free, {pm.part["id"]: None for pm in free}, lambda pm, _a: pm.predict(pm.w_range()[0], pm.s_range()[0], pm.ranges["infill"][0]))
+        ceils = self.totals(free, {pm.part["id"]: None for pm in free}, lambda pm, _a: pm.predict(pm.w_range()[-1], pm.s_range()[-1], pm.ranges["infill"][1]))
+        multi = len(self.configs) > 1
+        out = []
+        for c in self.configs:
+            cid = c["id"]; tag = f"{c['name']}: " if multi else ""
+            out.append({"title": "Minimums" if not multi else f"Minimums · {c['name']}", "text": f"{tag}with every free part at its minimum walls/shells/infill the printed parts weigh {floors[cid]:.1f} g (model). Budget for them: {budget[cid]:.1f} g → headroom {budget[cid] - floors[cid]:+.1f} g."})
+        if all(ceils[cid] <= budget[cid] for cid in budget):
+            worst = min(budget[cid] - ceils[cid] for cid in budget)
+            out.append({"title": "Headroom", "text": f"Even every free part at its maximum walls/shells/infill fits, with {worst:.1f} g to spare{' in the tightest configuration' if multi else ''}. Raise the ranges in Part detail if you want to spend it."})
+        if any(floors[cid] > budget[cid] for cid in budget):
+            bad = [c["name"] for c in self.configs if floors[c["id"]] > budget[c["id"]]]
+            out.append({"title": "Infeasible", "text": ("Even the minimums exceed the budget" + (f" in {', '.join(bad)}" if multi else "") + ": loosen a constraint, unlock a part, or lighten something that isn't printed.")})
         return out
 
     # ------------------------------------------------------------ confirm
@@ -591,9 +693,16 @@ class Optimization:
                 done_n = sum(1 for a in pl["assignments"] if a["locked"] or a["status"] in ("confirmed", "error"))
                 pl["confirmed_n"] = done_n; pl["total_n"] = len(pl["assignments"])
                 if done_n == len(pl["assignments"]):
-                    total = sum((a["grams"] or 0) * a["qty"] for a in pl["assignments"])
-                    pl["total_g"] = total; pl["status"] = "confirmed"
-                    pl["slack_g"] = budget + fixed_g - total if self.body.get("mode") != "single" else budget - total
-                    pl["fits"] = pl["slack_g"] >= -1e-6
+                    names = {c["name"]: c["id"] for c in self.configs}
+                    tot = {c["id"]: 0.0 for c in self.configs}
+                    for a in pl["assignments"]:
+                        if a["locked"]:
+                            continue          # fixed parts are already in fixed_g
+                        ids = tot.keys() if a.get("configs") is None else [names[n] for n in a["configs"] if n in names]
+                        for cid in ids:
+                            tot[cid] += (a["grams"] or 0) * a["qty"]
+                    fv = self.fit_view(tot, fixed_g if self.body.get("mode") != "single" else {cid: 0.0 for cid in tot}, budget)
+                    pl["total_g"] = fv["total_g"]; pl["status"] = "confirmed"; pl["per_config"] = fv["per_config"]; pl["worst_config"] = fv["worst_config"]
+                    pl["slack_g"] = fv["slack_g"]; pl["fits"] = fv["fits"]
             self.save()
         return worst

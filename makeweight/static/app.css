@@ -168,7 +168,7 @@ canvas.viewer.pick{cursor:crosshair}
 .sbar{height:8px;border-radius:4px;background:var(--panel2);border:1px solid var(--rule);display:flex;overflow:hidden;margin-top:6px}
 .sbar i{display:block;height:100%}
 
-.robots{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.robots{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .rcard{border:1px solid var(--rule);border-radius:8px;padding:14px 16px;background:var(--panel);display:flex;flex-direction:column;gap:6px;cursor:pointer;text-align:left}
 .rcard:hover{border-color:var(--accent)}
 .rcard .t{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
@@ -178,10 +178,23 @@ canvas.viewer.pick{cursor:crosshair}
 .rcard .g small{font-size:12px;color:var(--ink3);font-weight:500}
 .rcard .meta{font-size:12px;color:var(--ink2);display:flex;gap:10px;flex-wrap:wrap}
 .rcard.new{border-style:dashed;align-items:center;justify-content:center;color:var(--ink3);min-height:120px}
+.rcard.archived{opacity:.75}
+.rcard .g .pill{font-size:11px;vertical-align:middle;margin-left:6px}
+.bar.mini{height:8px;margin-top:6px}
+.bar .mrg{position:absolute;top:-1px;bottom:-1px;width:0;border-left:1px dashed var(--ink2)}
+.rcard .cfgs{display:flex;flex-direction:column;gap:6px;margin-top:2px}
+.rcard .cfgrow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:4px 8px;align-items:baseline;padding:6px 8px;border-radius:6px;background:var(--panel2)}
+.rcard .cfgrow.active{box-shadow:inset 0 0 0 1px var(--accent)}
+.rcard .cfgrow .n{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rcard .cfgrow .g{font-size:15px;font-weight:700;line-height:1.1}
+.rcard .cfgrow .g small{font-size:11px;font-weight:500;color:var(--ink3)}
+.rcard .cfgrow .bar{grid-column:1 / -1;margin-top:2px}
+.rcard .meta.foot{color:var(--ink3);font-size:11px;margin-top:auto}
+.rcard .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
 
 .plans{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:12px}
 .plan{border:1px solid var(--rule);border-radius:8px;padding:12px 14px;background:var(--panel);display:flex;flex-direction:column;gap:8px}
-.plan.best{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.plan.best{border-left:3px solid var(--accent)}
 .plan .t{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
 .plan .t b{font-size:14px}
 .plan .g{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
@@ -193,6 +206,15 @@ canvas.viewer.pick{cursor:crosshair}
 .plan .sc i.on{background:var(--accent)}
 .plan .tb{margin-top:auto}
 .plan.infeas{border-style:dashed;opacity:.85}
+.plan{cursor:pointer;transition:border-color .12s,box-shadow .12s}
+.plan:hover{border-color:var(--ink3)}
+.plan.sel{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--accent-soft2,var(--panel))}
+.plan.sel::after{content:"";position:absolute;left:50%;bottom:-13px;margin-left:-8px;border:8px solid transparent;border-top-color:var(--accent)}
+.plan{position:relative}
+.plan .d.cfgs{display:flex;flex-wrap:wrap;gap:4px}
+.plans .plandetail{grid-column:1 / -1;border-color:var(--accent);margin:0}
+details.how summary{cursor:pointer;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);font-weight:600}
+details.how[open] summary{margin-bottom:6px}
 .step{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--ink2);padding:6px 0;border-bottom:1px solid var(--rule2)}
 .step:last-child{border-bottom:0}
 .step b{color:var(--ink);font-weight:600}
@@ -257,7 +279,7 @@ tr.new-row input.ghost-in:focus{background:var(--panel);border-style:solid;borde
 tr.new-row input.ghost-in::placeholder{color:var(--ink3)}
 tr.new-row input.num{text-align:right;appearance:textfield;-moz-appearance:textfield}
 tr.new-row input.num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
-td.acts{white-space:nowrap}
+td.acts{white-space:nowrap} td.acts .btn + .btn{margin-left:12px}
 td.acts .btn.del{color:var(--ink3)} td.acts .btn.del:hover{color:var(--bad);background:var(--bad-soft)}
 tr:not(:hover) td.acts .btn.del{opacity:.35}
 .toast.action{display:flex;align-items:center;gap:10px}
@@ -293,3 +315,19 @@ td.ed.dlg{cursor:pointer} td.ed.dlg:not(.editing)::after{content:"⚖"}
 table.sheet th.num,table.sheet td.num{width:1%;white-space:nowrap}
 table.sheet th.qty,table.sheet td.qty{width:44px;min-width:44px}
 table.sheet tr.new-row td.qty input{width:44px}
+
+/* resizable columns (see makeResizable) */
+table.fixed td,table.fixed th{overflow:hidden;text-overflow:ellipsis}
+table.fixed td.wrap{white-space:normal;max-width:none}
+th{position:sticky}
+.colgrip{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;z-index:3;touch-action:none}
+.colgrip::after{content:"";position:absolute;top:6px;bottom:6px;right:2px;width:2px;border-radius:1px;background:var(--rule);opacity:0;transition:opacity .12s}
+th:hover .colgrip::after{opacity:1}
+.colgrip:hover::after,.colgrip.drag::after{opacity:1;background:var(--accent);top:0;bottom:0}
+body.col-dragging,body.col-dragging *{cursor:col-resize!important;user-select:none}
+/* status is a plain dropdown in the sheet — one click */
+td select.bare{border-color:transparent;background:transparent;padding:2px 20px 2px 4px;font-size:12px;max-width:100%;color:var(--ink2)}
+td select.bare:hover,td select.bare:focus{border-color:var(--rule);background:var(--panel)}
+tr.dim td select.bare{color:var(--ink3)}
+.optopts{margin-top:10px;padding-top:10px;border-top:1px solid var(--rule2)}
+.optopts .slider{width:260px;max-width:60%}

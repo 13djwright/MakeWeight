@@ -95,6 +95,8 @@ def filament_key(filament: dict, machine: str) -> str:
 
 
 class JobManager:
+    on_weighin_slice = None   # set by App: called with the finished job of a weigh-in slice
+
     def __init__(self, db: DB, events: Events, data_dir: Path, workers: int = 2, work_dir: Path | None = None):
         self.db = db
         self.events = events
@@ -365,7 +367,13 @@ class JobManager:
         return res
 
     def _after(self, job: dict):
-        """When a part's *current* profile slice lands, push it onto the sheet line."""
+        """When a part's *current* profile slice lands, push it onto the sheet line; a slice behind a weigh-in fills in
+        that weigh-in's sliced grams and refreshes the filament correction."""
+        if job["status"] == "done" and job.get("purpose") == "weigh-in" and self.on_weighin_slice:
+            try:
+                self.on_weighin_slice(job)
+            except Exception:  # noqa
+                log.exception("weigh-in slice hook")
         if job["status"] != "done" or job.get("purpose") not in ("current",):
             return
         part = self.db.get("printed_parts", job["part_id"])

@@ -4,16 +4,13 @@
 # This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any
 # later version. It is distributed WITHOUT ANY WARRANTY; see the LICENSE file for details.
-"""First-run seed: printers, filaments, profiles, component library and Devin's three robots."""
+"""First-run seed: printers, filaments and starter profiles. Robots and the component library start empty."""
 from __future__ import annotations
 
 import json
-import re
-import time
-from pathlib import Path
 
 from . import profiles
-from .db import DB, now
+from .db import DB
 
 FILAMENTS = [
     # name, material, density g/cm3, flow ratio, colour, $/kg, max volumetric speed mm3/s  (Bambu Studio 2.08 system profiles, 0.4 nozzle)
@@ -39,28 +36,6 @@ FILAMENTS = [
 ]
 
 PRINTERS = [("Bambu Lab H2D", [0.4, 0.6], {"x": 350, "y": 320, "z": 325}), ("Bambu Lab P1S", [0.4, 0.6], {"x": 256, "y": 256, "z": 256})]
-
-
-def parse_profile_note(note: str | None) -> dict | None:
-    """'5 Walls, 2 Top, 4 Bottom, 15% infill' -> params."""
-    if not note:
-        return None
-    p = {}
-    m = re.search(r"(\d+)\s*walls?", note, re.I)
-    if m: p["walls"] = int(m.group(1))
-    m = re.search(r"(\d+)\s*top\s*&\s*bottom", note, re.I)
-    if m: p["top"] = p["bottom"] = int(m.group(1))
-    m = re.search(r"(\d+)\s*top\b", note, re.I)
-    if m and "top" not in p: p["top"] = int(m.group(1))
-    m = re.search(r"(\d+)\s*bottom", note, re.I)
-    if m and "bottom" not in p: p["bottom"] = int(m.group(1))
-    m = re.search(r"(\d+)\s*%\s*(\w+)?\s*infill", note, re.I)
-    if m:
-        p["infill"] = float(m.group(1))
-        if m.group(2) and m.group(2).lower() in profiles.PATTERNS: p["pattern"] = m.group(2).lower()
-    m = re.search(r"(0\.\d+)\s*(mm)?\s*layer", note, re.I)
-    if m: p["layer_height"] = float(m.group(1)); p["first_layer_height"] = float(m.group(1))
-    return p or None
 
 
 def refresh_builtin_filaments(db: DB) -> int:
@@ -127,44 +102,4 @@ def ensure_seed(db: DB) -> None:
         db.set_setting("default_filament_id", fil_ids["Bambu PLA Basic"])
         db.set_setting("default_profile_id", prof_ids["Bambu 0.20mm Standard · 0.4 (cubic)"])
 
-        data_path = Path(__file__).parent / "seed_data.json"
-        if data_path.exists():
-            data = json.loads(data_path.read_text())
-            comp_ids = {}
-            for c in data["components"]:
-                cid = db.insert("components", {"name": c["name"], "category": c["category"], "link": c.get("link"), "price": c.get("price"),
-                                               "dimensions": c.get("dimensions"), "grams": c.get("grams"), "grams_source": "sheet",
-                                               "notes": ("Used in " + ", ".join(c["used_in"])) if c.get("used_in") else None,
-                                               "created": now(), "updated": now()})
-                comp_ids[c["name"].lower()] = cid
-            for rb in data["robots"]:
-                rid = db.insert("robots", {"name": rb["name"], "weight_class_g": rb["weight_class_g"], "class_name": rb.get("class_name"),
-                                           "margin_g": round(rb["weight_class_g"] * 0.01, 1), "printer_id": p1s, "nozzle": 0.4, "status": "active",
-                                           "notes": "Seeded from the Excel weight budget. Sheet weights imported as estimates (source: sheet); add weigh-ins to mark them measured.",
-                                           "created": now(), "updated": now()})
-                for si, sec in enumerate(rb["sections"]):
-                    sid = db.insert("sections", {"robot_id": rid, "name": sec["name"], "ord": si, "counts": 1 if sec["counts"] else 0})
-                    for ii, it in enumerate(sec["items"]):
-                        iid = db.insert("line_items", {"section_id": sid, "ord": ii, "qty": it["qty"], "description": it["description"], "purpose": it.get("purpose"),
-                                                       "link": it.get("link"), "dimensions": it.get("dimensions"), "price": it.get("price"),
-                                                       "est_grams": it.get("grams"), "est_source": "slicer" if it.get("printed") else "sheet",
-                                                       "component_id": comp_ids.get((it.get("component_key") or "").lower()), "notes": it.get("notes"),
-                                                       "counted": 0 if it.get("excluded") else 1})
-                        if it.get("printed"):
-                            params = parse_profile_note(it.get("profile_note"))
-                            prof_id = prof_ids["Bambu 0.20mm Standard · 0.4 (cubic)"]
-                            if it.get("locked"):
-                                prof_id = prof_ids["Weapon solid 3W/100%"]
-                            elif params:
-                                nm = f"{rb['name']} · {it['description']}"
-                                prof_id = db.insert("profiles", {"name": nm, "printer_id": None, "nozzle": 0.4, "params_json": json.dumps(profiles.normalize(params)), "builtin": 0,
-                                                                 "notes": "From sheet note: " + (it.get("profile_note") or "")})
-                            role = it.get("role") or "structure"
-                            if "upright" in it["description"].lower():
-                                role = "structure"
-                            db.insert("printed_parts", {"robot_id": rid, "line_item_id": iid, "mesh_id": None, "orient_json": json.dumps({"mode": "auto", "quat": [0, 0, 0, 1]}),
-                                                        "scale": 1.0, "filament_id": fil_ids.get(it.get("filament"), fil_ids["Bambu PLA Basic"]), "profile_id": prof_id,
-                                                        "role": role, "locked": 1 if it.get("locked") else 0, "constraints_json": "{}"})
-                for ev in rb.get("events", []):
-                    db.insert("events", {"robot_id": rid, "date": ev["date"], "title": ev["title"], "notes": ev.get("notes"), "total_snapshot_g": None})
         db.set_setting("seeded_v1", True)

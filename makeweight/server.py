@@ -60,6 +60,7 @@ class App:
         cores = os.cpu_count() or 2
         workers = self.db.setting("workers") or max(1, cores // 2)
         self.jobs = JobManager(self.db, self.events, self.data_dir, workers=workers, work_dir=self.work_dir)
+        self.jobs.on_weighin_slice = self._weighin_slice_landed
         self.undo = UndoManager(self.db, self.events)
         self.updater = Updater(self.db, self.events)
         self.httpd = None  # set by serve()
@@ -164,6 +165,14 @@ class App:
         by_item: dict[int, list] = {}
         for w in weigh:
             by_item.setdefault(w["line_item_id"], []).append(w)
+            if w.get("profile_id") and w.get("sliced_grams") is None:
+                pp = next((p for p in parts if p.get("line_item_id") == w["line_item_id"]), None)
+                if pp:
+                    g = self.sliced_grams_for(pp, w["profile_id"], queue=False)
+                    if g:
+                        w["sliced_grams"] = g; self.db.update("weigh_ins", w["id"], {"sliced_grams": g})
+                        if pp.get("filament_id"):
+                            self.recalc_filament_correction(pp["filament_id"])
         parts_by_item = {p["line_item_id"]: p for p in parts if p.get("line_item_id")}
         sec_map = {s["id"]: s for s in sections}
         for s in sections:
@@ -212,6 +221,51 @@ class App:
         }
         robot["queue"] = self.db.one("SELECT COUNT(*) n FROM slice_jobs j JOIN printed_parts p ON p.id=j.part_id WHERE p.robot_id=? AND j.status IN ('queued','running')", [rid])["n"]
         return robot
+
+    def _weighin_slice_landed(self, job: dict):
+        """A slice queued behind a weigh-in finished: store its grams on every weigh-in of that part that named the profile."""
+        part = self.db.get("printed_parts", job["part_id"])
+        if not part or not part.get("line_item_id"):
+            return
+        touched = False
+        for w in self.db.q("SELECT * FROM weigh_ins WHERE line_item_id=? AND profile_id IS NOT NULL AND sliced_grams IS NULL", [part["line_item_id"]]):
+            g = self.sliced_grams_for(part, w["profile_id"], queue=False)
+            if g:
+                self.db.update("weigh_ins", w["id"], {"sliced_grams": g}); touched = True
+        if touched and part.get("filament_id"):
+            self.recalc_filament_correction(part["filament_id"])
+            self.events.emit("line_item", {"id": part["line_item_id"], "robot_id": part["robot_id"]})
+
+    def sliced_grams_for(self, p: dict, profile_id: int, queue: bool = True) -> float | None:
+        """Slicer grams (uncorrected) of part p printed with profile_id, from the slice cache; queues the slice when missing."""
+        prof = self.db.get("profiles", profile_id); fil = self.db.get("filaments", p["filament_id"]) if p.get("filament_id") else None
+        if not prof or not fil or not p.get("mesh_id"):
+            return None
+        params = loads(prof["params_json"], {})
+        job = self.jobs.cached_result(p, params, fil)
+        if job and job.get("status") == "done" and job.get("grams"):
+            return job["grams"]
+        if queue:
+            try:
+                self.jobs.ensure_slice(p, profiles.normalize(params), fil, purpose="weigh-in", priority=3)
+            except Exception:  # noqa
+                log.exception("could not queue the slice behind a weigh-in")
+        return None
+
+    def _weighin_fields(self, iid: int, b: dict) -> dict:
+        """Common POST/PUT handling: the profile the part was really printed with (override) and the slice behind it."""
+        out = {}
+        pp = self.db.one("SELECT * FROM printed_parts WHERE line_item_id=?", [iid])
+        pid = b.get("profile_id")
+        if pid is None and pp and pp.get("profile_id"):
+            pid = pp["profile_id"]
+        if pid:
+            prof = self.db.get("profiles", int(pid))
+            if prof:
+                out["profile_id"] = prof["id"]
+                out["profile_string"] = profiles.profile_string(loads(prof["params_json"], {}))
+                out["sliced_grams"] = self.sliced_grams_for(pp, prof["id"]) if pp else None
+        return out
 
     def _part_view(self, p: dict) -> dict:
         p = dict(p)
@@ -276,11 +330,20 @@ class App:
         ratios = []
         for r in rows:
             p = self.db.get("printed_parts", r["id"])
+            ws = self.db.q("SELECT * FROM weigh_ins WHERE line_item_id=? ORDER BY date DESC, id DESC LIMIT 1", [r["line_item_id"]]) if r["line_item_id"] else []
+            if not ws:
+                continue
+            w = ws[0]
+            if w.get("profile_id"):
+                # the weigh-in says which profile was printed: compare with the slice of exactly that profile
+                sliced = self.sliced_grams_for(p, w["profile_id"])
+                if sliced:
+                    ratios.append(w["grams"] / sliced)
+                continue
             pv = self._part_view(p)
             job = pv.get("slice")
-            ws = self.db.q("SELECT grams FROM weigh_ins WHERE line_item_id=? ORDER BY date DESC, id DESC LIMIT 1", [r["line_item_id"]]) if r["line_item_id"] else []
-            if job and job.get("status") == "done" and job.get("grams") and ws and not self.db.get("line_items", r["line_item_id"])["needs_reweigh"]:
-                ratios.append(ws[0]["grams"] / job["grams"])
+            if job and job.get("status") == "done" and job.get("grams") and not self.db.get("line_items", r["line_item_id"])["needs_reweigh"]:
+                ratios.append(w["grams"] / job["grams"])
         ratios.sort()
         corr = {"n": len(ratios)}
         if ratios:
@@ -468,7 +531,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "state":
             return self._json({
                 "slicer": app.jobs.queue_state(), "install": app.install_state, "engines": app.jobs.engine_status(), "undo": app.undo.state(),
-                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id", "appearance", "update_repo")},
+                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id", "appearance", "update_repo", "col_widths")},
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
@@ -651,13 +714,17 @@ class Handler(BaseHTTPRequestHandler):
                 b = self._jbody(); it = db.get("line_items", iid)
                 if not it:
                     raise KeyError("item")
-                pstr = None
                 pp = db.one("SELECT * FROM printed_parts WHERE line_item_id=?", [iid])
-                if pp and pp.get("profile_id"):
-                    prof = db.get("profiles", pp["profile_id"])
-                    pstr = profiles.profile_string(loads(prof["params_json"], {})) if prof else None
-                wid = db.insert("weigh_ins", {"line_item_id": iid, "grams": float(b["grams"]), "date": b.get("date") or time.strftime("%Y-%m-%d"), "note": b.get("note"), "profile_string": pstr})
-                db.update("line_items", iid, {"needs_reweigh": 0})
+                row = {"line_item_id": iid, "grams": float(b["grams"]), "date": b.get("date") or time.strftime("%Y-%m-%d"), "note": b.get("note"), "profile_string": None}
+                row.update(app._weighin_fields(iid, b))
+                wid = db.insert("weigh_ins", row)
+                if pp and b.get("profile_id") and int(b["profile_id"]) != (pp.get("profile_id") or 0) and b.get("set_part_profile"):
+                    # the part was printed with another profile than the sheet said: make the sheet say so
+                    db.update("printed_parts", pp["id"], {"profile_id": int(b["profile_id"])})
+                    app.current_slice_for_part(pp["id"], priority=2)
+                # a weigh-in with an explicit profile only clears the flag when it is the profile the sheet uses now
+                pp2 = db.one("SELECT profile_id FROM printed_parts WHERE line_item_id=?", [iid])
+                db.update("line_items", iid, {"needs_reweigh": 1 if (pp2 and row.get("profile_id") and pp2.get("profile_id") and row["profile_id"] != pp2["profile_id"]) else 0})
                 if it.get("component_id") and b.get("update_library"):
                     db.update("components", it["component_id"], {"grams": float(b["grams"]), "grams_source": "measured", "updated": now()})
                     db.insert("component_weighins", {"component_id": it["component_id"], "grams": float(b["grams"]), "date": b.get("date") or time.strftime("%Y-%m-%d")})
@@ -666,6 +733,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(db.get("weigh_ins", wid))
             if parts[2] == "move" and m == "POST":
                 b = self._jbody(); db.update("line_items", iid, {"section_id": int(b["section_id"])}); return self._json({"ok": True})
+        if parts[0] == "weighins" and m == "PUT":
+            w = db.get("weigh_ins", r(1))
+            if not w:
+                raise KeyError("weigh-in")
+            b = self._jbody()
+            upd = {}
+            if "grams" in b and b["grams"] is not None:
+                upd["grams"] = float(b["grams"])
+            if b.get("date"):
+                upd["date"] = str(b["date"])[:10]
+            if "note" in b:
+                upd["note"] = b["note"] or None
+            if "profile_id" in b:
+                if b["profile_id"]:
+                    upd.update(app._weighin_fields(w["line_item_id"], {"profile_id": b["profile_id"]}))
+                else:
+                    upd.update({"profile_id": None, "sliced_grams": None})
+            if upd:
+                db.update("weigh_ins", w["id"], upd)
+            pp = db.one("SELECT filament_id FROM printed_parts WHERE line_item_id=?", [w["line_item_id"]])
+            if pp and pp.get("filament_id"):
+                app.recalc_filament_correction(pp["filament_id"])
+            return self._json(db.get("weigh_ins", w["id"]))
         if parts[0] == "weighins" and m == "DELETE":
             w = db.get("weigh_ins", r(1))
             db.delete("weigh_ins", r(1))
@@ -983,8 +1073,35 @@ class Handler(BaseHTTPRequestHandler):
         out = []
         for rb in rows:
             det = self.app.robot_detail(rb["id"])
-            n_parts = sum(1 for s in det["sections"] for it in s["items"] if it.get("part"))
-            out.append({k: rb[k] for k in rb} | {"totals": det["totals"], "printed_parts": n_parts})
+            items = [it for s in det["sections"] for it in s["items"]]
+            n_parts = sum(1 for it in items if it.get("part"))
+            # one summary line per configuration (the sheet's totals follow the active one; the card shows them all)
+            per = []
+            for c in det.get("configs") or []:
+                tot = printed = 0.0
+                for s in det["sections"]:
+                    if not s["counts"]:
+                        continue
+                    for it in s["items"]:
+                        cj = it.get("configs")
+                        if not it.get("counted", True) or (cj is not None and c["id"] not in cj):
+                            continue
+                        tot += it["total_grams"]
+                        if it.get("part"):
+                            printed += it["total_grams"]
+                per.append({"id": c["id"], "name": c["name"], "best_known": tot, "printed": printed, "over_under": tot - rb["weight_class_g"],
+                            "over_under_margin": tot + (rb["margin_g"] or 0) - rb["weight_class_g"], "active": c["id"] == det.get("active_config")})
+            weigh_dates = [w["date"] for it in items for w in it.get("weigh_ins", [])]
+            last_run = self.app.db.one("SELECT MAX(date) d FROM runs WHERE robot_id=? AND kind='optimize'", [rb["id"]])["d"]
+            out.append({k: rb[k] for k in rb if k != "configs_json"} | {
+                "totals": det["totals"], "printed_parts": n_parts, "configs": per, "active_config": det.get("active_config"),
+                "lines": len(items), "parts_with_mesh": sum(1 for it in items if it.get("part") and it["part"].get("mesh")),
+                "parts_locked": sum(1 for it in items if it.get("part") and it["part"].get("locked")),
+                "measured_lines": sum(1 for it in items if it.get("measured_grams") is not None), "counted_lines": sum(1 for it in items if it.get("in_total")),
+                "price_total": sum((it.get("price") or 0) * (it.get("qty") or 0) for it in items),
+                "last_weigh_in": max(weigh_dates) if weigh_dates else None, "last_optimize": last_run,
+                "slice_errors": sum(1 for it in items if it.get("part") and (it["part"].get("slice") or {}).get("status") == "error"),
+            })
         return out
 
     def _create_item(self, sid: int, b: dict) -> dict:
