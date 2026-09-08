@@ -4,7 +4,7 @@
 :root, :root[data-theme="light"]{
   --bg:#EEF0EC; --panel:#FFFFFF; --panel2:#F5F6F3; --ink:#1B1F24; --ink2:#4A5159; --ink3:#7F868E; --rule:#D7DBD5; --rule2:#E6E9E3;
   --accent:#D95F1B; --accent-ink:#B04B12; --accent-soft:#FBE9DD;
-  --slate:#35526E; --slate-soft:#DCE5EE; --hatch:#C5D2DE;
+  --slate:#35526E; --slate-rgb:53,82,110; --slate-soft:#DCE5EE; --hatch:#C5D2DE;
   --good:#2E7D4F; --good-soft:#DDEFE4; --bad:#B6352E; --bad-soft:#F6DEDC; --warn:#946A00; --warn-soft:#F7ECC8;
   --sel:#FFF4EC; --focus:#D95F1B; color-scheme:light;
 }
@@ -12,7 +12,7 @@
   :root:not([data-theme="light"]){
     --bg:#121518; --panel:#1B1F24; --panel2:#22272D; --ink:#E7E9EB; --ink2:#B4BAC1; --ink3:#828A93; --rule:#333A42; --rule2:#2A3038;
     --accent:#F0813A; --accent-ink:#F79A5E; --accent-soft:#3A2617;
-    --slate:#8FB0CF; --slate-soft:#22313F; --hatch:#3E5164;
+    --slate:#8FB0CF; --slate-rgb:143,176,207; --slate-soft:#22313F; --hatch:#3E5164;
     --good:#5DBA82; --good-soft:#1E3327; --bad:#E5716A; --bad-soft:#3B2220; --warn:#E0B44A; --warn-soft:#3A3117;
     --sel:#2B241F; --focus:#F0813A; color-scheme:dark;
   }
@@ -20,7 +20,7 @@
 :root[data-theme="dark"]{
   --bg:#121518; --panel:#1B1F24; --panel2:#22272D; --ink:#E7E9EB; --ink2:#B4BAC1; --ink3:#828A93; --rule:#333A42; --rule2:#2A3038;
   --accent:#F0813A; --accent-ink:#F79A5E; --accent-soft:#3A2617;
-  --slate:#8FB0CF; --slate-soft:#22313F; --hatch:#3E5164;
+  --slate:#8FB0CF; --slate-rgb:143,176,207; --slate-soft:#22313F; --hatch:#3E5164;
   --good:#5DBA82; --good-soft:#1E3327; --bad:#E5716A; --bad-soft:#3B2220; --warn:#E0B44A; --warn-soft:#3A3117;
   --sel:#2B241F; --focus:#F0813A; color-scheme:dark;
 }
@@ -250,7 +250,7 @@ details.how[open] summary{margin-bottom:6px}
 .modal footer{display:flex;gap:8px;justify-content:flex-end;padding:12px 16px;border-top:1px solid var(--rule)}
 .modal .field{grid-template-columns:140px 1fr}
 #toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:60}
-.toast{background:var(--ink);color:var(--bg);padding:9px 14px;border-radius:8px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:420px}
+.toast{background:var(--ink);color:var(--bg);padding:9px 14px;border-radius:8px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:520px}
 .toast.err{background:var(--bad);color:#fff}
 .menu{position:absolute;background:var(--panel);border:1px solid var(--rule);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.2);padding:4px;z-index:40;min-width:200px}
 .menu button{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:5px;font-size:13px}
@@ -331,3 +331,29 @@ td select.bare:hover,td select.bare:focus{border-color:var(--rule);background:va
 tr.dim td select.bare{color:var(--ink3)}
 .optopts{margin-top:10px;padding-top:10px;border-top:1px solid var(--rule2)}
 .optopts .slider{width:260px;max-width:60%}
+
+/* assign-bodies dialog */
+table.assign-tbl{table-layout:fixed}
+table.assign-tbl td{white-space:normal;vertical-align:top}
+table.assign-tbl select.assign{width:100%;max-width:none}
+table.assign-tbl tr.skipped td{opacity:.45}
+table.assign-tbl tr.skipped td:nth-child(4){opacity:1}
+.btn.skip[aria-pressed="true"]{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.rng.bad{color:var(--bad)}
+
+/* weight-distribution tooltip */
+.tip{position:fixed;z-index:1000;background:var(--panel);color:var(--ink);border:1px solid var(--rule);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.22);padding:10px 12px;font-size:12px;pointer-events:none;max-width:520px}
+.tip .tt{font-size:13px;margin-bottom:6px;display:flex;align-items:center;flex-wrap:wrap;gap:2px}
+.tip table{width:auto;font-size:12px;border-collapse:collapse}
+.tip td{padding:2px 6px;border:0;white-space:nowrap}
+.tip tr.on td{background:var(--sel)}
+.tip tr.sum td{border-top:1px solid var(--rule);font-weight:600;background:transparent}
+.tip .sw{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:-1px;margin-right:2px}
+.tip .sw.line{width:2px;height:12px;background:var(--ink);border-radius:0;margin:0 4px}
+.tip .sw.dash{width:0;height:12px;border-left:1px dashed var(--ink2);margin:0 4px}
+.tip .keys{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;color:var(--ink3);font-size:11px}
+.tip .keys span{display:inline-flex;align-items:center;gap:4px}
+.bar{cursor:help;outline:none}
+.bar:focus-visible{box-shadow:0 0 0 2px var(--accent-soft)}
+.bar i{transition:filter .1s}
+.bar:hover i:not(.lim):not(.mrg):hover{filter:brightness(1.15)}

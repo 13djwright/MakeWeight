@@ -30,6 +30,49 @@
   const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
   const dateStr = (t) => t ? new Date(t * 1000).toLocaleString([], { dateStr: 'short' }).replace(',', '') : '';
   const dayStr = (t) => !t ? '' : typeof t === 'string' ? t : new Date(t * 1000).toLocaleDateString();   // weigh-ins store YYYY-MM-DD; runs store epoch seconds
+
+  // ------------------------------------------------------------ weight distribution bar + tooltip
+  // One segment per counted section, left to right; printed grams inside a section are drawn in the accent colour, the
+  // rest in slate (each section a little lighter than the one before). Black line = class limit, dashed line = limit −
+  // margin. Hovering shows a legend with every section's grams and share instead of the browser's plain title text.
+  let TIP = null;
+  function tipEl() { if (!TIP) { TIP = h('div', { class: 'tip', role: 'tooltip', hidden: true }); document.body.append(TIP); } return TIP; }
+  function showTip(content, x, y) { const t = tipEl(); t.textContent = ''; t.append(content); t.hidden = false; moveTip(x, y); }
+  function moveTip(x, y) { const t = tipEl(); const w = t.offsetWidth, hgt = t.offsetHeight; const left = Math.min(x + 14, window.innerWidth - w - 8), top = y + 18 + hgt > window.innerHeight ? y - hgt - 10 : y + 18; t.style.left = left + 'px'; t.style.top = top + 'px'; }
+  function hideTip() { if (TIP) TIP.hidden = true; }
+  function budgetBar(o) {
+    // o: { segments: [{name, grams, printed}], limit, margin, total, name, mini }
+    const segs = (o.segments || []).filter(s => s.grams > 0);
+    const span = Math.max(o.total || 0, o.limit) * 1.04;
+    const bar = h('div', { class: 'bar' + (o.mini ? ' mini' : ''), tabindex: '0', 'aria-label': `${fmt(o.total)} g of ${fmt(o.limit)} g` });
+    let x = 0; const shades = [0.9, 0.7, 0.55, 0.42, 0.34, 0.28];
+    const rows = [];
+    segs.forEach((sg, i) => {
+      const other = sg.grams - (sg.printed || 0), color = `rgba(var(--slate-rgb), ${shades[i % shades.length]})`;
+      if (other > 0) { bar.append(h('i', { dataset: { i }, style: { left: x + '%', width: other / span * 100 + '%', background: color } })); x += other / span * 100; }
+      if (sg.printed > 0) { bar.append(h('i', { dataset: { i }, style: { left: x + '%', width: sg.printed / span * 100 + '%', background: 'var(--accent)' } })); x += sg.printed / span * 100; }
+      rows.push({ i, sg, color });
+    });
+    if (o.margin) bar.append(h('i', { class: 'mrg', style: { left: (o.limit - o.margin) / span * 100 + '%' } }));
+    bar.append(h('i', { class: 'lim', style: { left: o.limit / span * 100 + '%' } }));
+    const legend = () => {
+      const over = (o.total || 0) - o.limit;
+      const el = h('div', { class: 'tipbody' },
+        h('div', { class: 'tt' }, o.name ? `${o.name} · ` : '', h('b', null, `${fmt(o.total)} g`), ` of ${fmt(o.limit)} g`, h('span', { class: 'pill ' + (over > 0 ? 'bad' : 'good'), style: { marginLeft: '8px' } }, over > 0 ? `${fmt(over)} g over` : `${fmt(-over)} g under`)),
+        h('table', { class: 'nores' }, h('tbody', null,
+          ...rows.map(r => h('tr', { dataset: { i: r.i } }, h('td', null, h('i', { class: 'sw', style: { background: r.color } }), r.sg.printed > 0 && h('i', { class: 'sw', style: { background: 'var(--accent)' } })), h('td', null, r.sg.name), h('td', { class: 'num' }, fmt(r.sg.grams), ' g'), h('td', { class: 'num rng' }, o.total ? Math.round(r.sg.grams / o.total * 100) + '%' : ''), h('td', { class: 'rng' }, r.sg.printed > 0 ? `${fmt(r.sg.printed)} g printed` : ''))),
+          h('tr', { class: 'sum' }, h('td'), h('td', null, 'Total'), h('td', { class: 'num' }, fmt(o.total), ' g'), h('td', { class: 'num rng' }, '100%'), h('td')))),
+        h('div', { class: 'keys' }, h('span', null, h('i', { class: 'sw', style: { background: 'var(--accent)' } }), 'printed parts'), h('span', null, h('i', { class: 'sw', style: { background: `rgba(var(--slate-rgb), .7)` } }), 'everything else'), h('span', null, h('i', { class: 'sw line' }), `class limit ${fmt(o.limit)} g`), o.margin ? h('span', null, h('i', { class: 'sw dash' }), `limit − margin ${fmt(o.limit - o.margin)} g`) : null));
+      return el;
+    };
+    const hl = i => { if (!TIP) return; TIP.querySelectorAll('tr').forEach(tr => tr.classList.toggle('on', tr.dataset.i === String(i))); };
+    bar.addEventListener('mouseenter', e => { showTip(legend(), e.clientX, e.clientY); });
+    bar.addEventListener('mousemove', e => { moveTip(e.clientX, e.clientY); hl(e.target.dataset ? e.target.dataset.i : null); });
+    bar.addEventListener('mouseleave', hideTip);
+    bar.addEventListener('focus', () => { const r = bar.getBoundingClientRect(); showTip(legend(), r.left, r.bottom - 10); });
+    bar.addEventListener('blur', hideTip);
+    return bar;
+  }
   const today = () => new Date().toISOString().slice(0, 10);
   const secs = s => s == null ? '—' : s < 60 ? s.toFixed(1) + ' s' : (s / 60).toFixed(1) + ' min';
   const hms = s => { if (s == null) return '—'; const hh = Math.floor(s / 3600), mm = Math.round((s % 3600) / 60); return hh ? `${hh}h ${mm}m` : `${mm}m`; };
@@ -73,7 +116,7 @@
       // a refresh that arrived while this dialog was open (its own Save, a slice landing) was held back — run it now
       if (S.renderPending && !document.querySelector('.modal-bg')) { S.renderPending = false; softRender().catch(console.error); }
     };
-    const dlg = h('div', { class: 'modal', style: opts.width ? { width: opts.width } : null, role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: '-1' },
+    const dlg = h('div', { class: 'modal', style: opts.width ? { width: opts.width, maxWidth: '96vw' } : null, role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: '-1' },
       h('header', null, h('h2', null, title), h('button', { class: 'btn icon x', onClick: close, 'aria-label': 'Close' }, '✕')),
       h('div', { class: 'body' }, body),
       buttons && h('footer', null, ...buttons.map(b => h('button', { class: 'btn ' + (b.cls || ''), onClick: async () => { try { const r = await b.onClick?.(close); if (r !== false && !b.keep) close(); } catch (e) { fail(e); } } }, b.label))));
@@ -416,14 +459,8 @@
     const b = $('#budget'); b.textContent = '';
     if (r) {
       const t = r.totals, cls = r.weight_class_g, over = t.over_under;
-      const bar = h('div', { class: 'bar', title: 'Sections left to right; orange = printed parts; black line = class limit' });
-      let x = 0; const total = Math.max(t.best_known, cls) * 1.02;
-      for (const s of r.sections.filter(s => s.counts)) {
-        const w = (s.items.filter(i => i.in_total).reduce((a, i) => a + i.total_grams, 0)) / total * 100;
-        const printed = s.items.some(i => i.part) && s.items.every(i => i.part || !i.in_total);
-        bar.append(h('i', { style: { left: x + '%', width: w + '%', background: printed ? 'var(--accent)' : 'var(--slate)', opacity: printed ? 1 : (0.55 + 0.1 * (x / 20 % 3)) } })); x += w;
-      }
-      bar.append(h('i', { class: 'lim', style: { left: (cls / total * 100) + '%' } }));
+      const segs = r.sections.filter(s => s.counts).map(s => ({ name: s.name, grams: s.items.filter(i => i.in_total).reduce((a, i) => a + i.total_grams, 0), printed: s.items.filter(i => i.in_total && i.part).reduce((a, i) => a + i.total_grams, 0) }));
+      const bar = budgetBar({ segments: segs, limit: cls, margin: r.margin_g, total: t.best_known, name: r.configs && r.configs.length ? cfgName(r, r.active_config) : r.name });
       b.append(h('div', { class: 'lbl' }, `${r.class_name || 'class'} · limit `, h('b', null, fmt(cls, 1) + ' g'), ' · margin ', h('b', null, fmt(r.margin_g, 1) + ' g')), bar,
         h('div', { class: 'status ' + (over > 0 ? 'over' : 'under') }, over > 0 ? `${fmt(over)} g over` : `${fmt(-over)} g under`));
     }
@@ -444,7 +481,7 @@
     if (r) {
       nav.append(h('div', { class: 'sec' }, 'This robot'));
       const nParts = r.sections.reduce((a, s) => a + s.items.filter(i => i.part).length, 0);
-      nav.append(item('sheet', 'Weight sheet', r.totals.flags || null, 'warn'), item('parts', 'Printed parts', nParts), item('part', 'Part detail'), item('optimizer', 'Optimizer'), item('runs', 'Runs'), item('events', 'Event log'));
+      nav.append(item('sheet', 'Weight sheet', r.totals.flags || null, 'warn'), item('parts', 'Printed parts', nParts), item('part', 'Part detail'), item('optimizer', 'Optimizer'), item('runs', 'Runs'), item('events', 'Competition log'));
     }
     nav.append(h('div', { class: 'sec' }, 'Library'), item('library', 'Components'), item('filaments', 'Filaments & profiles'));
     nav.append(h('div', { class: 'sec' }, 'Tool'), item('calc', 'Calculators'), item('jobs', 'Jobs & setup', st.slicer.slicer ? null : '!', 'warn'));
@@ -494,7 +531,7 @@
 
   V.home = function (m) {
     const st = S.state;
-    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Robots'), h('p', null, 'Each robot has its own weight sheet, printed parts, runs and event log. The library is shared.')),
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Robots'), h('p', null, 'Each robot has its own weight sheet, printed parts, runs and competition log. The library is shared.')),
       h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: importArchive }, 'Import archive…'), h('button', { class: 'btn primary', onClick: newRobotModal }, '＋ New robot…'))));
     const grid = h('div', { class: 'robots' });
     const active = st.robots.filter(r => r.status === 'active'), archived = st.robots.filter(r => r.status !== 'active');
@@ -508,12 +545,7 @@
   };
   function robotCard(r) {
     const t = r.totals, over = t.over_under, cls = r.weight_class_g;
-    const miniBar = (best, printed, title) => {
-      // non-printed (slate) + printed (orange) against the class limit; the black line is the limit, the dotted one the margin
-      const span = Math.max(best, cls) * 1.04;
-      return h('div', { class: 'bar mini', title }, h('i', { style: { left: 0, width: (best - printed) / span * 100 + '%', background: 'var(--slate)' } }), h('i', { style: { left: (best - printed) / span * 100 + '%', width: printed / span * 100 + '%', background: 'var(--accent)' } }),
-        h('i', { class: 'mrg', style: { left: (cls - (r.margin_g || 0)) / span * 100 + '%' } }), h('i', { class: 'lim', style: { left: cls / span * 100 + '%' } }));
-    };
+    const miniBar = (best, sections, name) => budgetBar({ segments: sections || [], limit: cls, margin: r.margin_g, total: best, name, mini: true });
     const ouPill = (ou) => h('span', { class: 'pill ' + (ou > 0 ? 'bad' : 'good') }, ou > 0 ? `${fmt(ou)} g over` : `${fmt(-ou)} g under`);
     const cfgs = r.configs || [];
     const meta = [];
@@ -528,8 +560,8 @@
     return h('div', { class: 'rcard' + (r.status === 'active' ? '' : ' archived'), role: 'button', tabindex: '0', onClick: async () => { await loadRobot(r.id); go('sheet'); }, onKeydown: async e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); await loadRobot(r.id); go('sheet'); } } },
       h('div', { class: 't' }, h('b', null, r.name), h('span', { class: 'cls' }, r.class_name ? `${r.class_name} · ${fmt(cls, 0)} g` : `${fmt(cls, 0)} g`)),
       cfgs.length ? h('div', { class: 'cfgs' }, ...cfgs.map(c => h('div', { class: 'cfgrow' + (c.active ? ' active' : ''), title: `${c.name}: ${fmt(c.best_known)} g best known, ${fmt(c.printed)} g printed${c.active ? ' · selected on the sheet' : ''}` },
-          h('span', { class: 'n' }, c.name), h('span', { class: 'g mono' }, fmt(c.best_known), h('small', null, ' g')), ouPill(c.over_under), miniBar(c.best_known, c.printed, `${c.name}: ${fmt(c.best_known)} g of ${fmt(cls)} g`))))
-        : h('div', null, h('div', { class: 'g' }, fmt(t.best_known), h('small', null, ' g best known'), ' ', ouPill(over)), miniBar(t.best_known, t.printed, `${fmt(t.best_known)} g of ${fmt(cls)} g · ${fmt(t.printed)} g printed`)),
+          h('span', { class: 'n' }, c.name), h('span', { class: 'g mono' }, fmt(c.best_known), h('small', null, ' g')), ouPill(c.over_under), miniBar(c.best_known, c.sections, c.name))))
+        : h('div', null, h('div', { class: 'g' }, fmt(t.best_known), h('small', null, ' g best known'), ' ', ouPill(over)), miniBar(t.best_known, r.sections_summary, r.name)),
       h('div', { class: 'meta' }, ...meta.map(x => h('span', null, x))),
       warn.length ? h('div', { class: 'meta' }, ...warn) : null,
       h('div', { class: 'meta foot' }, h('span', null, `Printed ${fmt(t.printed)} g · budget ${fmt(t.printed_budget)} g`), h('span', null, r.status === 'active' ? `updated ${dayStr(r.updated)}` : 'archived'), r.last_weigh_in && h('span', null, `last weigh-in ${dayStr(r.last_weigh_in)}`), r.last_optimize && h('span', null, `last optimizer run ${dayStr(r.last_optimize)}`)),
@@ -915,12 +947,11 @@
     const st = S.state;
     const parts = r.sections.flatMap(s => s.items.filter(i => i.part).map(i => ({ it: i, p: i.part, s })));
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Printed parts'), h('p', null, 'Every printed line on the sheet with its mesh, profile and slicer result. Drop STL/OBJ/3MF files anywhere on this page to add parts.')),
-      h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => pickFiles() }, '＋ Add STLs / 3MF'),
-        h('button', { class: 'btn', title: 'Upload one STL with every part in it (or several files / a 3MF) and choose which existing part each body replaces', onClick: () => pickFiles({ assign: true }) }, 'Update meshes from file…'),
+      h('div', { class: 'tb' }, h('button', { class: 'btn', title: 'STL, OBJ, PLY or a 3MF project — one file per part, or your whole robot in one file. Every body can become a new part, replace an existing part’s mesh, or be skipped.', onClick: () => pickFiles() }, '＋ Add / update parts from files…'),
         h('button', { class: 'btn', onClick: () => applyProfileModal(parts) }, 'Apply profile to all ▾'),
         h('button', { class: 'btn', onClick: async () => { await api('POST', `robots/${r.id}/slice_all`); toast('Re-slicing all parts'); await refreshRobot(); } }, 'Re-slice all'),
         h('button', { class: 'btn primary', onClick: () => go('optimizer') }, 'Optimize →'))));
-    const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ or PLY files here — one part per file. A file with several bodies (your whole robot exported as one STL) opens a dialog to say which part each body replaces or adds. Drop a Bambu Studio or PrusaSlicer .3mf project to import every object with its own walls/infill settings.');
+    const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ, PLY or 3MF files here — one part per file, or your whole robot exported as one file. A dialog lets you say, body by body, what becomes a new part, what replaces an existing part’s mesh, and what to skip. Objects from a Bambu Studio or PrusaSlicer .3mf bring their own walls/infill settings.');
     m.append(drop); setupDrop(m, drop);
     const tbl = h('table', { dataset: { tkey: 'parts' } }, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Cost'), h('th', null, 'Status'), h('th'))));
     const tb = h('tbody'); tbl.append(tb);
@@ -999,22 +1030,16 @@
     area.addEventListener('dragover', on); area.addEventListener('dragleave', off);
     area.addEventListener('drop', e => { e.preventDefault(); off(); uploadFiles([...e.dataTransfer.files]); });
   }
-  // Files dropped on Printed parts. Plain single-body files become new parts straight away (the original flow).
-  // A multi-body STL (everything exported from CAD as one file), or an upload started with "Update meshes from
-  // file…", opens the assignment dialog: every body can replace an existing part's mesh, become a new part or be
-  // skipped — with the likely matches pre-selected.
+  // Files dropped on Printed parts or chosen with "Add / update parts from files…". Every body — one per file, one per
+  // connected solid of a multi-body STL, one per object of a 3MF — goes through the same dialog: new part, replace an
+  // existing part's mesh, or skip, with the likely matches pre-selected. 3MF objects bring their slicer settings along
+  // for new parts.
   async function uploadFiles(files, opts = {}) {
     if (!S.robotId) return toast('Choose a robot first', true);
-    const hasParts = (S.robot || { sections: [] }).sections.some(s => s.items.some(i => i.part && i.part.mesh));
     const bodies = [];   // meshes to assign
     for (const f of files) {
       try {
         toast(`Uploading ${f.name}…`);
-        if (/\.3mf$/i.test(f.name) && !opts.assign) {
-          const r = await api('POST', `robots/${S.robotId}/import3mf`, await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } });
-          toast(`${f.name}: ${r.created} part${r.created === 1 ? '' : 's'} imported with their slicer settings`);
-          continue;
-        }
         const res = await api('POST', 'meshes?split=1', await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } });
         const many = res.meshes.length > 1;
         for (const mesh of res.meshes) {
@@ -1024,15 +1049,7 @@
       } catch (e) { fail(e); }
     }
     if (!bodies.length) { await refreshRobot(); await loadState(); return; }
-    if (opts.assign || (hasParts && bodies.some(b => b.many))) return assignMeshesModal(bodies);
-    for (const b of bodies) {
-      try {
-        let scale = 1.0;
-        if (b.mesh.units_scale_guess && b.mesh.units_scale_guess !== 1.0) { if (confirm(`${b.file} is only ${b.mesh.bbox.size.map(v => v.toFixed(1)).join('×')} mm — does it use inches? OK to scale ×25.4.`)) scale = 25.4; }
-        await api('POST', `robots/${S.robotId}/parts`, { name: b.name, mesh_id: b.mesh.id, scale });
-      } catch (e) { fail(e); }
-    }
-    await refreshRobot(); await loadState();
+    return assignMeshesModal(bodies);
   }
   async function assignMeshesModal(bodies) {
     let matches = { matches: [], parts: [] };
@@ -1042,7 +1059,7 @@
     // one real 3D viewer for the whole dialog: click any picture to load that mesh into it (drag to orbit, wheel to zoom)
     const canvas = h('canvas', { class: 'inspect', width: 600, height: 300 });
     const inspectLbl = h('span', { class: 'sub' }, 'Click a picture to inspect it here — drag to orbit, wheel to zoom, right-drag to pan');
-    let inspector = null, inspecting = null;
+    let inspector = null;
     const inspect = async (mid, title, el) => {
       if (!mid) return;
       try {
@@ -1050,7 +1067,7 @@
         inspectLbl.textContent = `Loading ${title}…`;
         const buf = await (await fetch(`/api/meshes/${mid}/stl?lod=1`)).arrayBuffer();
         inspector.load(buf); inspectLbl.textContent = title;
-        document.querySelectorAll('.modal .thumb.active').forEach(x => x.classList.remove('active')); if (el) el.classList.add('active'); inspecting = mid;
+        document.querySelectorAll('.modal .thumb.active').forEach(x => x.classList.remove('active')); if (el) el.classList.add('active');
       } catch (e) { inspectLbl.textContent = 'Could not load that mesh: ' + e.message; }
     };
     const thumb = (mid, title) => {
@@ -1059,36 +1076,70 @@
       img.addEventListener('click', () => inspect(mid, title, img));
       return img;
     };
+    const cm3 = m => m ? (m.volume_mm3 / 1000).toFixed(1) + ' cm³' : 'no mesh yet';
+    const counter = h('span', { class: 'rng' });
     const rows = bodies.map(b => {
       const sg = sug[b.mesh.id];
-      const sel = h('select', null,
-        h('option', { value: 'skip' }, '— skip this body —'),
-        h('option', { value: 'new' }, `＋ New part “${b.name}”`),
-        ...parts.map(pt => h('option', { value: String(pt.id) }, `Replace mesh of: ${pt.description}${pt.mesh ? ` (now ${(pt.mesh.volume_mm3 / 1000).toFixed(1)} cm³)` : ' (no mesh yet)'}`)));
-      sel.value = sg ? (sg.why === 'identical file' ? 'skip' : String(sg.part_id)) : 'new';
-      const why = sg ? h('span', { class: 'pill ' + (sg.score >= 0.9 ? 'ok' : 'warn'), title: sg.why }, sg.why === 'identical file' ? 'unchanged' : sg.score >= 0.9 ? 'match' : 'likely') : h('span', { class: 'pill' }, 'new');
+      const imp = b.mesh.import;   // 3MF object: its slicer settings
+      const sel = h('select', { class: 'assign', 'aria-label': `Assign ${b.name}` },
+        h('option', { value: 'new' }, `＋ New part “${b.name}”${imp ? ` · ${imp.profile_string}` : ''}`),
+        ...parts.map(pt => h('option', { value: String(pt.id) }, `Replace mesh of: ${pt.description} · ${cm3(pt.mesh)}`)));
+      const row = { b, sel, skip: false };
+      sel.value = sg && sg.why !== 'identical file' ? String(sg.part_id) : 'new';
+      if (sg && sg.why === 'identical file') row.skip = true;
+      const why = sg ? h('span', { class: 'pill ' + (sg.score >= 0.9 ? 'good' : 'warn'), title: sg.why }, sg.why === 'identical file' ? 'unchanged' : sg.score >= 0.9 ? 'match' : 'likely') : h('span', { class: 'pill auto' }, 'new');
       // right-hand picture: what the chosen part looks like today, so a wrong guess is obvious before Apply
       const target = h('div', { class: 'thumbcell' });
-      const drawTarget = () => { target.textContent = ''; const pt = parts.find(x => String(x.id) === sel.value); if (pt) { target.append(thumb(pt.mesh && pt.mesh.id, pt.description), h('span', { class: 'sub' }, pt.description)); } else target.append(h('span', { class: 'sub' }, sel.value === 'new' ? 'becomes a new part' : 'skipped')); };
-      sel.addEventListener('change', drawTarget); drawTarget();
-      return { b, sel, tr: h('tr', null,
-        h('td', { class: 'thumbcell' }, thumb(b.mesh.id, b.name), h('b', null, b.name), h('span', { class: 'sub' }, `${b.mesh.bbox ? b.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ') + ' mm · ' : ''}${(b.mesh.volume_mm3 / 1000).toFixed(1)} cm³`)),
+      const drawTarget = () => {
+        target.textContent = '';
+        if (row.skip) { target.append(h('span', { class: 'sub' }, 'skipped — nothing happens to this body')); return; }
+        const pt = parts.find(x => String(x.id) === sel.value);
+        if (pt) target.append(thumb(pt.mesh && pt.mesh.id, pt.description), h('span', { class: 'sub' }, pt.description, ' · ', cm3(pt.mesh)));
+        else target.append(h('span', { class: 'sub' }, 'becomes a new part', imp ? h('span', { class: 'sub' }, `profile from the 3MF: ${imp.profile_string}`) : null));
+      };
+      const skipBtn = h('button', { class: 'btn small skip', 'aria-pressed': 'false', title: 'Leave this body out (one click; click again to include it)' }, 'Skip');
+      const tr = h('tr');
+      const sync = () => { tr.classList.toggle('skipped', row.skip); skipBtn.setAttribute('aria-pressed', String(row.skip)); skipBtn.textContent = row.skip ? 'Skipped' : 'Skip'; sel.disabled = row.skip; drawTarget(); count(); };
+      skipBtn.addEventListener('click', () => { row.skip = !row.skip; sync(); });
+      sel.addEventListener('change', () => { count(); drawTarget(); });
+      row.sync = sync;
+      tr.append(
+        h('td', { class: 'thumbcell' }, thumb(b.mesh.id, b.name), h('b', null, b.name), h('span', { class: 'sub' }, `${b.mesh.bbox ? b.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ') + ' mm · ' : ''}${cm3(b.mesh)}${b.many ? '' : ` · ${b.file}`}`)),
         h('td', null, why),
-        h('td', null, sel),
-        h('td', null, target)) };
+        h('td', { class: 'assigncell' }, sel),
+        h('td', null, skipBtn),
+        h('td', null, target));
+      row.tr = tr;
+      return row;
     });
-    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Body from the file'), h('th', null, 'Guess'), h('th', null, 'Assign to'), h('th', null, 'That part today'))), h('tbody', null, ...rows.map(r => r.tr)));
+    const count = () => {
+      let n = 0, r = 0, k = 0; const used = {};
+      for (const x of rows) { if (x.skip) k++; else if (x.sel.value === 'new') n++; else { r++; used[x.sel.value] = (used[x.sel.value] || 0) + 1; } }
+      const dup = Object.values(used).some(v => v > 1);
+      counter.textContent = `${n} new · ${r} replaced · ${k} skipped${dup ? ' — two bodies point at the same part' : ''}`;
+      counter.classList.toggle('bad', dup);
+    };
+    rows.forEach(r => r.sync());
+    const tbl = h('table', { class: 'assign-tbl nores' }, h('colgroup', null, h('col', { style: { width: '24%' } }), h('col', { style: { width: '8%' } }), h('col', { style: { width: '38%' } }), h('col', { style: { width: '8%' } }), h('col', { style: { width: '22%' } })),
+      h('thead', null, h('tr', null, h('th', null, 'Body from the file'), h('th', null, 'Guess'), h('th', null, 'Assign to'), h('th', null, ''), h('th', null, 'That part today'))), h('tbody', null, ...rows.map(r => r.tr)));
+    const has3mf = bodies.some(b => b.mesh.import);
     modal(`Assign ${bodies.length} bod${bodies.length === 1 ? 'y' : 'ies'} to parts`, h('div', null,
-      h('p', { class: 'hint', style: { marginTop: 0 } }, 'Each body can replace an existing part’s mesh (orientation, profile, filament, modifiers and history stay; the part re-slices), become a new part, or be skipped. Guesses come from matching volume and size against the parts’ current meshes' + (bodies.some(b => b.mesh.body_name) ? ', and object names from the 3MF' : '') + '.'),
+      h('p', { class: 'hint', style: { marginTop: 0 } }, 'Each body can become a new part, replace an existing part’s mesh (orientation, profile, filament, modifiers and history stay; the part re-slices), or be skipped. Guesses come from matching volume and size against the parts’ current meshes' + (bodies.some(b => b.mesh.body_name) ? ', and object names from the 3MF' : '') + '.' + (has3mf ? ' New parts from a 3MF start with the slicer settings and filament the object had in the project.' : '')),
       h('div', { class: 'inspector' }, canvas, inspectLbl),
+      h('div', { class: 'tb', style: { justifyContent: 'flex-end', marginBottom: '6px' } }, counter, h('button', { class: 'btn small', onClick: () => { rows.forEach(r => { r.skip = true; r.sync(); }); } }, 'Skip all'), h('button', { class: 'btn small', onClick: () => { rows.forEach(r => { r.skip = false; r.sync(); }); } }, 'Include all')),
       h('div', { class: 'tw' }, tbl)),
       [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: async () => {
         let replaced = 0, created = 0, skipped = 0;
         const used = new Set();
         for (const r of rows) {
+          if (r.skip) { skipped++; continue; }
           const v = r.sel.value;
-          if (v === 'skip') { skipped++; continue; }
-          if (v === 'new') { await api('POST', `robots/${S.robotId}/parts`, { name: r.b.name, mesh_id: r.b.mesh.id }); created++; continue; }
+          if (v === 'new') {
+            const body = { name: r.b.name, mesh_id: r.b.mesh.id };
+            if (r.b.mesh.units_scale_guess && r.b.mesh.units_scale_guess !== 1.0 && confirm(`${r.b.name} is only ${r.b.mesh.bbox.size.map(x => x.toFixed(1)).join('×')} mm — does it use inches? OK to scale ×25.4.`)) body.scale = 25.4;
+            if (r.b.mesh.import) { body.params = r.b.mesh.import.params; body.profile_note = `Imported from ${r.b.file}`; if (r.b.mesh.import.filament_id) body.filament_id = r.b.mesh.import.filament_id; body.orient = { mode: 'preset', quat: [0, 0, 0, 1], label: 'imported' }; body.auto_orient = false; }
+            await api('POST', `robots/${S.robotId}/parts`, body); created++; continue;
+          }
           if (used.has(v)) { toast(`Two bodies point at the same part — only the first was applied`, true); skipped++; continue; }
           used.add(v);
           await api('PUT', `parts/${v}`, { mesh_id: r.b.mesh.id, force: true }, { label: 'replace mesh' }); replaced++;
@@ -1096,7 +1147,7 @@
         await refreshRobot(); await loadState();
         if (S.view === 'part') await renderMain();
         toast(`${replaced} mesh${replaced === 1 ? '' : 'es'} replaced · ${created} new part${created === 1 ? '' : 's'}${skipped ? ` · ${skipped} skipped` : ''}${replaced ? ' — re-slicing' : ''}`);
-      } }], { width: '960px' });
+      } }], { width: 'min(1240px, 96vw)' });
     setTimeout(() => { const first = document.querySelector('.modal .thumb.clickable'); if (first) first.click(); }, 50);
   }
 
@@ -1577,10 +1628,10 @@
     const r = S.robot; if (!r) return needRobot(m);
     const evs = await api('GET', `robots/${r.id}/events`);
     const add = (ev) => {
-      const d = input({ type: 'date', value: ev ? ev.date : today() }), t = input({ value: ev ? ev.title : '', placeholder: 'Event name' }), pl = input({ value: ev ? ev.placing || '' : '', placeholder: 'e.g. 1st' }), n = h('textarea', null, ev ? ev.notes || '' : '');
-      modal(ev ? 'Edit entry' : 'New entry', h('div', null, field('Date', d), field('Event', t), field('Placing', pl), field('Notes', n)), [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { if (ev) await api('PUT', `events/${ev.id}`, { date: d.value, title: t.value, placing: pl.value, notes: n.value }); else await api('POST', `robots/${r.id}/events`, { date: d.value, title: t.value, placing: pl.value, notes: n.value }); render(); } }]);
+      const d = input({ type: 'date', value: ev ? ev.date : today() }), t = input({ value: ev ? ev.title : '', placeholder: 'e.g. Robot Ruckus 2026' }), pl = input({ value: ev ? ev.placing || '' : '', placeholder: 'e.g. 1st' }), n = h('textarea', null, ev ? ev.notes || '' : '');
+      modal(ev ? 'Edit competition' : 'New competition', h('div', null, field('Date', d), field('Competition', t), field('Placing', pl), field('Notes', n)), [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { if (ev) await api('PUT', `events/${ev.id}`, { date: d.value, title: t.value, placing: pl.value, notes: n.value }); else await api('POST', `robots/${r.id}/events`, { date: d.value, title: t.value, placing: pl.value, notes: n.value }); render(); } }]);
     };
-    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Event log'), h('p', null, 'Competitions and milestones, with the sheet total snapshotted at each entry.')), h('div', { class: 'tb' }, h('button', { class: 'btn primary', onClick: () => add() }, '＋ Entry…'))));
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Competition log'), h('p', null, 'Competitions and milestones for this robot, with the sheet total snapshotted at each entry — what it weighed at each event, how it placed, what you changed.')), h('div', { class: 'tb' }, h('button', { class: 'btn primary', onClick: () => add() }, '＋ Competition…'))));
     const card = h('div', { class: 'card' });
     if (!evs.length) card.append(h('p', { class: 'hint' }, 'Nothing logged yet.'));
     for (const ev of evs) card.append(h('div', { class: 'ev' }, h('div', { class: 'd' }, ev.date), h('div', null, h('b', null, ev.title, ev.placing ? ` · ${ev.placing}` : ''), h('span', null, ev.notes || ''), ev.total_snapshot_g != null && h('div', { class: 'rng' }, `sheet total at the time: ${fmt(ev.total_snapshot_g)} g`)),

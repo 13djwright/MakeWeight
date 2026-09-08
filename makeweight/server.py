@@ -1087,24 +1087,32 @@ class Handler(BaseHTTPRequestHandler):
             n_parts = sum(1 for it in items if it.get("part"))
             # one summary line per configuration (the sheet's totals follow the active one; the card shows them all)
             per = []
-            for c in det.get("configs") or []:
-                tot = printed = 0.0
+            def section_sums(cid):
+                """[{name, grams, printed}] per counted section for one configuration (None = the active one)."""
+                out_s = []
                 for s in det["sections"]:
                     if not s["counts"]:
                         continue
+                    g = pg = 0.0
                     for it in s["items"]:
                         cj = it.get("configs")
-                        if not it.get("counted", True) or (cj is not None and c["id"] not in cj):
+                        ok = it.get("in_total") if cid is None else (it.get("counted", True) and (cj is None or cid in cj))
+                        if not ok:
                             continue
-                        tot += it["total_grams"]
+                        g += it["total_grams"]
                         if it.get("part"):
-                            printed += it["total_grams"]
+                            pg += it["total_grams"]
+                    out_s.append({"name": s["name"], "grams": g, "printed": pg})
+                return out_s
+            for c in det.get("configs") or []:
+                secs = section_sums(c["id"])
+                tot = sum(x["grams"] for x in secs); printed = sum(x["printed"] for x in secs)
                 per.append({"id": c["id"], "name": c["name"], "best_known": tot, "printed": printed, "over_under": tot - rb["weight_class_g"],
-                            "over_under_margin": tot + (rb["margin_g"] or 0) - rb["weight_class_g"], "active": c["id"] == det.get("active_config")})
+                            "over_under_margin": tot + (rb["margin_g"] or 0) - rb["weight_class_g"], "active": c["id"] == det.get("active_config"), "sections": secs})
             weigh_dates = [w["date"] for it in items for w in it.get("weigh_ins", [])]
             last_run = self.app.db.one("SELECT MAX(date) d FROM runs WHERE robot_id=? AND kind='optimize'", [rb["id"]])["d"]
             out.append({k: rb[k] for k in rb if k != "configs_json"} | {
-                "totals": det["totals"], "printed_parts": n_parts, "configs": per, "active_config": det.get("active_config"),
+                "totals": det["totals"], "printed_parts": n_parts, "configs": per, "active_config": det.get("active_config"), "sections_summary": section_sums(None),
                 "lines": len(items), "parts_with_mesh": sum(1 for it in items if it.get("part") and it["part"].get("mesh")),
                 "parts_locked": sum(1 for it in items if it.get("part") and it["part"].get("locked")),
                 "measured_lines": sum(1 for it in items if it.get("measured_grams") is not None), "counted_lines": sum(1 for it in items if it.get("in_total")),
@@ -1203,6 +1211,7 @@ class Handler(BaseHTTPRequestHandler):
     def _store_mesh_inner(self, fname: str, data: bytes, split: bool = False) -> dict:
         db = self.app.db
         names: list[str] = []
+        imports: list[dict] = []          # per body, 3MF only: the object's slicer settings as a profile + project filament
         if split and fname.lower().endswith(".3mf"):
             # a 3MF already knows its objects (and their names): one body per object, no connectivity guessing
             objs = [o for o in meshio.load_3mf_objects(data) if o.get("tri") is not None and len(o["tri"])]
@@ -1210,6 +1219,19 @@ class Handler(BaseHTTPRequestHandler):
             names = [str(o.get("name") or "").strip() for o in objs]
             if not bodies:
                 bodies = [meshio.load_mesh(fname, data)]
+            else:
+                # what the project would slice each object with — offered as the starting profile/filament of a *new* part
+                base_prof = db.get("profiles", db.setting("default_profile_id") or 1)
+                base_params = profiles.normalize(loads(base_prof["params_json"], {})) if base_prof else profiles.default_params(0.4)
+                fil_cache: dict = {}
+                for o in objs:
+                    try:
+                        ext = int((o.get("settings") or {}).get("extruder") or 1)
+                    except (TypeError, ValueError):
+                        ext = 1
+                    params = profiles.normalize(base_params | meshio.slicer_settings_to_params(o.get("settings") or {}, o.get("project_defaults")))
+                    imports.append({"params": params, "profile_string": profiles.profile_string(params),
+                                    "filament_id": self._project_filament_id(o.get("project_defaults") or {}, ext, fname, fil_cache)})
         else:
             tri = meshio.load_mesh(fname, data)
             bodies = [tri]
@@ -1227,6 +1249,8 @@ class Handler(BaseHTTPRequestHandler):
                 row = dict(ex) | {"bbox": loads(ex["bbox_json"], None), "existing": True}
                 if i < len(names) and names[i]:
                     row["body_name"] = names[i]
+                if i < len(imports):
+                    row["import"] = imports[i]
                 out.append(row); continue
             bname = names[i] if i < len(names) and names[i] else ""
             name = fname if len(bodies) == 1 else (f"{re.sub(r'[^A-Za-z0-9._ -]+', '_', bname)}.stl" if bname else f"{Path(fname).stem}_body{i + 1}.stl")
@@ -1240,6 +1264,8 @@ class Handler(BaseHTTPRequestHandler):
             row = db.get("meshes", mid); row["bbox"] = a["bbox"]; row["units_scale_guess"] = a["units_scale_guess"]; row["area_mm2"] = a["area_mm2"]
             if bname:
                 row["body_name"] = bname
+            if i < len(imports):
+                row["import"] = imports[i]
             out.append(row)
         return {"meshes": out}
 
@@ -1312,6 +1338,8 @@ class Handler(BaseHTTPRequestHandler):
             item = self._create_item(sec_id, {"description": b.get("name") or "Printed part", "qty": b.get("qty") or 1, "est_source": "slicer", "status": b.get("status")})
             item_id = item["id"]
         robot = db.get("robots", rid)
+        if b.get("params") and not b.get("profile_id"):
+            b["profile_id"] = self._profile_for_params(b["params"], b.get("profile_note") or "From an imported 3MF object")["id"]
         profile_id = b.get("profile_id") or db.setting("default_profile_id") or (db.one("SELECT id FROM profiles WHERE builtin=1 AND nozzle=? ORDER BY id LIMIT 1", [robot.get("nozzle") or 0.4]) or {}).get("id")
         filament_id = b.get("filament_id") or db.setting("default_filament_id") or (db.one("SELECT id FROM filaments ORDER BY builtin DESC, id LIMIT 1") or {}).get("id")
         orient_json = json.dumps(b.get("orient") or {"mode": "auto", "quat": [0, 0, 0, 1]})
@@ -1459,6 +1487,42 @@ class Handler(BaseHTTPRequestHandler):
             created.append(self.app._filament_view(db.get("filaments", fid)))
         return {"created": created, "reused": reused}
 
+    def _project_filament_id(self, project_defaults: dict, extruder: int, fname: str, cache: dict | None = None) -> int | None:
+        """The project's filament for this extruder (Bambu Studio 3MF), created in the library when new."""
+        db = self.app.db
+        pf = meshio.bambu_project_filament(project_defaults or {}, extruder)
+        if not pf:
+            return None
+        key_f = (pf["name"], round(pf["density"], 4), round(pf["flow"], 4))
+        if cache is not None and key_f in cache:
+            return cache[key_f]
+        row = db.one("SELECT * FROM filaments WHERE name=? AND ABS(density-?)<1e-4 AND ABS(flow-?)<1e-4", [pf["name"], pf["density"], pf["flow"]])
+        if not row:
+            row = db.one("SELECT * FROM filaments WHERE name=?", [pf["name"]])
+            if row and (abs(row["density"] - pf["density"]) > 1e-4 or abs((row["flow"] or 1) - pf["flow"]) > 1e-4):
+                row = None  # same name, different numbers → keep the project's as a separate filament
+                pf["name"] = f"{pf['name']} (flow {pf['flow']:g})"
+                row = db.one("SELECT * FROM filaments WHERE name=?", [pf["name"]])
+        if not row:
+            fid = db.insert("filaments", {"name": pf["name"], "material": pf["material"], "density": pf["density"], "flow": pf["flow"],
+                                          "max_vol_speed": pf["max_vol_speed"], "color": "#8a8a8a", "correction_json": "{}", "builtin": 0,
+                                          "notes": f"Imported from {fname}"})
+            row = db.get("filaments", fid)
+        if cache is not None:
+            cache[key_f] = row["id"]
+        return row["id"]
+
+    def _profile_for_params(self, params: dict, note: str) -> dict:
+        """The profile with exactly these settings, created (named after its string) when none exists."""
+        db = self.app.db
+        params = profiles.normalize(params)
+        ph = profiles.profile_hash(params)
+        prof = next((r for r in db.q("SELECT * FROM profiles") if profiles.profile_hash(profiles.normalize(loads(r["params_json"], {}))) == ph), None)
+        if not prof:
+            pid = db.insert("profiles", {"name": profiles.profile_string(params), "printer_id": None, "nozzle": params["nozzle"], "params_json": json.dumps(params), "builtin": 0, "notes": note})
+            prof = db.get("profiles", pid)
+        return prof
+
     def _import_3mf(self, rid: int, data: bytes, fname: str) -> dict:
         """One printed part per 3MF object; per-object slicer settings become the starting profile."""
         db = self.app.db
@@ -1479,24 +1543,7 @@ class Handler(BaseHTTPRequestHandler):
                 ext = int((o.get("settings") or {}).get("extruder") or 1)
             except (TypeError, ValueError):
                 ext = 1
-            pf = meshio.bambu_project_filament(o.get("project_defaults") or {}, ext)
-            if pf:
-                key_f = (pf["name"], round(pf["density"], 4), round(pf["flow"], 4))
-                if key_f not in fil_cache:
-                    row = db.one("SELECT * FROM filaments WHERE name=? AND ABS(density-?)<1e-4 AND ABS(flow-?)<1e-4", [pf["name"], pf["density"], pf["flow"]])
-                    if not row:
-                        row = db.one("SELECT * FROM filaments WHERE name=?", [pf["name"]])
-                        if row and (abs(row["density"] - pf["density"]) > 1e-4 or abs((row["flow"] or 1) - pf["flow"]) > 1e-4):
-                            row = None  # same name, different numbers → keep the project's as a separate filament
-                            pf["name"] = f"{pf['name']} (flow {pf['flow']:g})"
-                            row = db.one("SELECT * FROM filaments WHERE name=?", [pf["name"]])
-                    if not row:
-                        fid = db.insert("filaments", {"name": pf["name"], "material": pf["material"], "density": pf["density"], "flow": pf["flow"],
-                                                      "max_vol_speed": pf["max_vol_speed"], "color": "#8a8a8a", "correction_json": "{}", "builtin": 0,
-                                                      "notes": f"Imported from {fname}"})
-                        row = db.get("filaments", fid)
-                    fil_cache[key_f] = row["id"]
-                fil_id = fil_cache[key_f]
+            fil_id = self._project_filament_id(o.get("project_defaults") or {}, ext, fname, fil_cache)
             ph = profiles.profile_hash(params)
             key = (sha, ph)
             if key in merged:  # same geometry + same settings → one line with qty+1
@@ -1505,10 +1552,7 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             res = self._store_mesh(re.sub(r"[\\/:*?\"<>|]+", "_", o["name"]) + ".stl", blob)
             mesh = res["meshes"][0]
-            prof = next((r for r in db.q("SELECT * FROM profiles") if profiles.profile_hash(profiles.normalize(loads(r["params_json"], {}))) == ph), None)
-            if not prof:
-                pid = db.insert("profiles", {"name": profiles.profile_string(params), "printer_id": None, "nozzle": params["nozzle"], "params_json": json.dumps(params), "builtin": 0, "notes": f"Imported from {fname}"})
-                prof = db.get("profiles", pid)
+            prof = self._profile_for_params(params, f"Imported from {fname}")
             spec = {"name": o["name"], "mesh_id": mesh["id"], "profile_id": prof["id"], "orient": {"mode": "preset", "quat": [0, 0, 0, 1], "label": "imported"}, "auto_orient": False}
             if fil_id:
                 spec["filament_id"] = fil_id
