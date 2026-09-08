@@ -303,6 +303,7 @@
   // ------------------------------------------------------------ shell
   function renderShell() {
     const st = S.state, r = S.robot;
+    if (!st) return;                         // an SSE event or timer can fire before the first /api/state has arrived
     // robot switcher
     const sw = $('#robot-switch'); sw.textContent = '';
     const sel = select([['', '— choose a robot —'], ...st.robots.filter(x => x.status === 'active').map(x => [x.id, x.name])], S.robotId || '', { onChange: async e => { const id = +e.target.value; if (!id) return; await loadRobot(id); if (['home', 'library', 'filaments', 'jobs'].includes(S.view)) go('sheet'); else render(); } });
@@ -707,9 +708,19 @@
     if (j.status === 'error') return h('span', { class: 'pill bad', title: j.error }, 'error');
     return h('span', { class: 'pill auto' }, j.status);
   }
+  function renameModal(it) {
+    const name = input({ value: it.description || '' });
+    modal('Rename part', field('Name', name), [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => {
+      const v = name.value.trim(); if (!v) return false;
+      await api('PUT', `items/${it.id}`, { description: v }, { label: `rename “${it.description}”` });
+      await refreshRobot(); if (S.view === 'part') await renderMain();
+    } }]);
+    setTimeout(() => { name.focus(); name.select(); }, 30);
+  }
   function partMenu(anchor, it, p) {
     menu(anchor, [
       { label: 'Open part detail', onClick: () => go('part', p.id) },
+      { label: 'Rename…', onClick: () => renameModal(it) },
       { label: p.locked ? 'Unlock' : 'Lock (profile + orientation + filament)', onClick: () => api('PUT', `parts/${p.id}`, { locked: !p.locked }).then(refreshRobot).catch(fail) },
       { label: 'Re-slice', onClick: () => api('POST', `parts/${p.id}/slice`, { purpose: 'current', priority: 2 }).then(refreshRobot).catch(fail) },
       { label: 'Add weigh-in…', onClick: () => weighInModal(it) },
@@ -849,7 +860,7 @@
     const it = all.find(i => i.part.id === pid); if (!it) { m.append(h('div', { class: 'empty' }, 'Part not found. ', h('button', { class: 'btn small', onClick: () => go('parts') }, 'Printed parts'))); return; }
     const p = await api('GET', `parts/${pid}`); const st = S.state;
     const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(async () => { await refreshRobot(); await renderMain(); }).catch(fail);
-    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, it.description, p.locked && h('span', { class: 'pill lock', style: { marginLeft: '8px' } }, '🔒 locked')),
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, it.description, h('button', { class: 'btn icon', title: 'Rename part', 'aria-label': 'Rename part', style: { marginLeft: '6px', verticalAlign: 'middle' }, onClick: () => renameModal(it) }, '✎'), p.locked && h('span', { class: 'pill lock', style: { marginLeft: '8px' } }, '🔒 locked')),
       h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ' · mirrored' : ''}` : 'No mesh attached yet')),
       h('div', { class: 'tb' },
         h('select', { onChange: e => go('part', e.target.value) }, ...all.map(x => h('option', { value: x.part.id, selected: x.part.id === pid }, x.description))),
