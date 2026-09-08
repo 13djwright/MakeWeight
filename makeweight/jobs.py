@@ -374,8 +374,11 @@ class JobManager:
                 self.on_weighin_slice(job)
             except Exception:  # noqa
                 log.exception("weigh-in slice hook")
-        if job["status"] != "done" or job.get("purpose") not in ("current",):
+        if job["status"] != "done":
             return
+        # any purpose counts (anchor/confirm/sweep slices too): what matters is whether this job *is* the part's current
+        # geometry + profile — after "Apply to parts" the optimizer's confirm slice is exactly that, and used to be skipped
+        # here, which left the sheet's estimate at the previous profile's grams while the Estimated column showed the new one
         part = self.db.get("printed_parts", job["part_id"])
         if not part or not part.get("line_item_id"):
             return

@@ -198,6 +198,16 @@ class App:
             p = parts_by_item.get(it["id"])
             if p:
                 it["part"] = self._part_view(p)
+                pv = it["part"]
+                if pv.get("corrected_grams") is not None:
+                    # the sheet's estimate is the current slice (x correction) — heal it if a slice landed without being pushed
+                    g = pv["corrected_grams"]
+                    if it.get("est_grams") is None or abs((it["est_grams"] or 0) - g) > 0.005 or it.get("est_source") != "slicer":
+                        self.db.update("line_items", it["id"], {"est_grams": g, "est_source": "slicer"})
+                        it["est_grams"] = g; it["est_source"] = "slicer"
+                        if latest is None:
+                            it["best_grams"] = g; it["total_grams"] = (it["qty"] or 0) * g
+                        it["total_est"] = (it["qty"] or 0) * g
             s = sec_map.get(it["section_id"])
             if s is None:
                 continue
