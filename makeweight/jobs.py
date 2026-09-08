@@ -95,11 +95,11 @@ def filament_key(filament: dict, machine: str) -> str:
 
 
 class JobManager:
-    def __init__(self, db: DB, events: Events, data_dir: Path, workers: int = 2):
+    def __init__(self, db: DB, events: Events, data_dir: Path, workers: int = 2, work_dir: Path | None = None):
         self.db = db
         self.events = events
         self.data_dir = Path(data_dir)
-        self.work_dir = self.data_dir / "work"
+        self.work_dir = Path(work_dir) if work_dir else self.data_dir / "work"     # caches: this computer only
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.workers = max(1, int(workers))
         self._threads: list[threading.Thread] = []
@@ -186,6 +186,8 @@ class JobManager:
         self._stop = True
         with self._wake:
             self._wake.notify_all()
+
+    pause = stop
 
     # ---- public API
     def machine_for_part(self, part: dict) -> str:

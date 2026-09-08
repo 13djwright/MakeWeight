@@ -1712,6 +1712,7 @@
         h('dt', null, 'App'), h('dd', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all', textAlign: 'left' } }, st.install_dir || ''),
         h('dt', null, 'Version'), h('dd', null, st.version, st.portable ? h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, 'portable') : null)),
       h('p', { class: 'hint' }, st.portable ? 'Portable mode: data lives inside the app folder (portable.txt is present).' : 'Data lives in your user folder, separate from the app, so any version finds it. Update from here, or unzip a new version anywhere and start it.'),
+      dataLocationPanel(st),
       updatePanel(st),
       h('div', { class: 'tb', style: { marginTop: '8px' } }, h('button', { class: 'btn small', onClick: async () => { const r = await api('POST', 'backup'); toast('Backup written: ' + r.file); } }, 'Back up now'), S.robot && h('button', { class: 'btn small', onClick: () => window.open(`/api/robots/${S.robotId}/export/archive`) }, 'Export robot archive'), h('button', { class: 'btn small', onClick: importArchive }, 'Import robot archive'))));
     // diagnostics: the log, live, and a bundle to send along with a bug report
@@ -1774,12 +1775,65 @@
     };
     return box;
   }
-  async function waitForNewVersion() {
-    const was = S.state.version;
-    toast('Updating — the new version is starting, this page will reload.');
+  // ---- shared data folder (the same robots/filaments/profiles on every computer, through a cloud drive)
+  function dataLocationPanel(st) {
+    const d = st.data || {};
+    const box = h('div', { class: 'callout', style: { marginTop: '10px' } });
+    box.append(h('b', null, d.shared ? 'Shared data folder' : 'Data on this computer only'), ' ',
+      h('span', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all' } }, d.root || st.root));
+    if (d.unreachable) box.append(h('p', { class: 'hint', style: { color: 'var(--bad)' } }, `⚠ The shared folder ${d.unreachable} was not reachable when the app started (cloud drive not signed in or not mounted?). You are looking at this computer's own copy until it is back — restart the app once it is.`));
+    if (d.lock_conflict) box.append(h('p', { class: 'hint', style: { color: 'var(--bad)' } }, `⚠ ${d.lock_conflict.host} also had MakeWeight open (last seen ${Math.round((Date.now() / 1000 - d.lock_conflict.heartbeat) / 60)} min ago). Two computers editing at the same time through a cloud drive can corrupt the database — close it on one of them.`));
+    box.append(h('p', { class: 'hint' }, d.shared
+      ? 'Robots, filaments, profiles and weigh-ins are read from and written to this folder; the slicer install and caches stay on this computer. Close the app on one computer and let the cloud drive finish syncing before opening it on another.'
+      : 'To use the same data on more than one computer, move it into a folder your cloud drive syncs (iCloud Drive, OneDrive, Dropbox, Google Drive) and point the other computers at the same folder.'));
+    box.append(h('div', { class: 'tb' },
+      h('button', { class: 'btn small', onClick: () => shareDataModal(st) }, d.shared ? 'Change shared folder…' : 'Use a shared folder…'),
+      d.shared ? h('button', { class: 'btn small', onClick: () => confirmModal('Stop sharing? The data is copied back to this computer and the app restarts. The shared folder is left as it is for the other computers.', async () => { await relocate({ mode: 'local', copy_back: true }); }, 'Stop sharing') }, 'Stop sharing') : null));
+    return box;
+  }
+  async function relocate(body) {
+    const r = await api('POST', 'data/relocate', body);
+    if (r.needs_choice) return r;
+    toast('Data folder changed — restarting…');
+    waitForNewVersion(true);
+    return r;
+  }
+  function shareDataModal(st) {
+    const d = st.data || {};
+    const path = input({ value: d.shared ? d.root : '', placeholder: 'full path of a folder inside your cloud drive', style: { width: '100%' } });
+    const sugg = h('div', { class: 'tb', style: { flexWrap: 'wrap', marginTop: '6px' } });
+    for (const c of d.cloud_folders || []) sugg.append(h('button', { class: 'btn small', title: c.path, onClick: () => { path.value = c.path.replace(/[\\/]+$/, '') + (c.path.includes('\\') ? '\\' : '/') + 'MakeWeight'; } }, c.label));
+    const status = h('p', { class: 'hint' });
+    const go = async (mode, extra = {}) => {
+      status.textContent = 'Working…';
+      try {
+        const r = await relocate({ mode, path: path.value.trim(), ...extra });
+        if (r && r.needs_choice) {
+          status.textContent = '';
+          confirmModal(r.message, () => go('adopt'), 'Use the data already there');
+          const alt = h('button', { class: 'btn small danger', onClick: () => { document.querySelectorAll('.modal-bg').forEach(m => m.remove()); go('move', { overwrite: true }); } }, 'Replace it with this computer’s data');
+          setTimeout(() => { const f = document.querySelector('.modal footer'); if (f) f.prepend(alt); }, 30);
+          return false;
+        }
+      } catch (e) { status.textContent = e.message; return false; }
+    };
+    modal('Share data between computers', h('div', null,
+      h('p', { class: 'hint', style: { marginTop: 0 } }, 'Pick a folder that your cloud drive syncs. On the first computer choose “Move my data there”; on every other computer point at the same folder and choose “Use the data already there”. Each computer keeps its own slicer install and caches.'),
+      field('Folder', path), (d.cloud_folders || []).length ? h('div', null, h('span', { class: 'rng' }, 'Cloud drives found on this computer — click to fill in:'), sugg) : h('p', { class: 'hint' }, 'No cloud-drive folder was detected automatically; type the path of one (it must already be syncing).'),
+      status),
+      [{ label: 'Cancel' }, { label: 'Use the data already there', onClick: () => go('adopt') }, { label: 'Move my data there', cls: 'primary', onClick: () => go('move') }], { width: '640px' });
+  }
+  async function waitForNewVersion(sameVersion) {
+    const was = S.state.version, wasRoot = (S.state.data || {}).root;
+    if (!sameVersion) toast('Updating — the new version is starting, this page will reload.');
+    let sawDown = false;
     for (let i = 0; i < 90; i++) {
       await new Promise(r => setTimeout(r, 1000));
-      try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok) { const j = await r.json(); if (j.version && j.version !== was) { location.reload(); return; } } } catch { }
+      try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (r.status === 503) { sawDown = true; continue; }
+        if (r.ok) { const j = await r.json(); if ((j.version && j.version !== was) || (sameVersion && (sawDown || (j.data && j.data.root !== wasRoot)))) { location.reload(); return; } }
+      } catch { sawDown = true; }
     }
     toast('The new version did not come back on this address — check the window that opened.', true);
   }

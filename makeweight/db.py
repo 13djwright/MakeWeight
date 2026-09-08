@@ -91,12 +91,18 @@ _lock = threading.RLock()
 
 
 class DB:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, sync_safe: bool = False):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        if sync_safe:
+            # On a cloud-drive folder: no -wal/-shm side files (sync clients copy them at the wrong moment and other
+            # computers see a stale database); every change lands in the single .db file straight away.
+            self._conn.execute("PRAGMA journal_mode=DELETE")
+            self._conn.execute("PRAGMA synchronous=FULL")
+        else:
+            self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         with _lock:
             self._conn.executescript(SCHEMA)
@@ -117,6 +123,15 @@ class DB:
             for c, typ in cols.items():
                 if c not in have:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {c} {typ}")
+
+    def close(self):
+        """Flush and close so the files can be copied/moved (WAL is checkpointed into the main file first)."""
+        with _lock:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            self._conn.close()
 
     # ---- primitives -------------------------------------------------------
     def q(self, sql: str, args: Iterable = ()) -> list[dict]:
@@ -150,11 +165,32 @@ class DB:
     def get(self, table: str, id_: int) -> dict | None:
         return self.one(f"SELECT * FROM {table} WHERE id=?", [id_])
 
+    # Settings that describe *this computer* (where its slicer is, how many cores to use) live in a small JSON file in
+    # the local folder when the database itself is shared between computers, so one machine's paths never leak into
+    # another's. Everything else (defaults, appearance, update source) is in the database like before.
+    LOCAL_KEYS = {"bambu_path", "slicer_path", "workers", "keep_gcode", "slicer_engine"}
+    local_file: Path | None = None
+
+    def _local(self) -> dict:
+        try:
+            return json.loads(self.local_file.read_text(encoding="utf-8")) if self.local_file and self.local_file.exists() else {}
+        except Exception:
+            return {}
+
     def setting(self, key: str, default: Any = None) -> Any:
+        if self.local_file is not None and key in self.LOCAL_KEYS:
+            loc = self._local()
+            if key in loc:
+                return loc[key]
         r = self.one("SELECT value FROM settings WHERE key=?", [key])
         return json.loads(r["value"]) if r else default
 
     def set_setting(self, key: str, value: Any) -> None:
+        if self.local_file is not None and key in self.LOCAL_KEYS:
+            loc = self._local(); loc[key] = value
+            self.local_file.parent.mkdir(parents=True, exist_ok=True)
+            self.local_file.write_text(json.dumps(loc, indent=1), encoding="utf-8")
+            return
         self.x("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                [key, json.dumps(value)])
 

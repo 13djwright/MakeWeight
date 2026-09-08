@@ -41,10 +41,15 @@ def main():
         os.environ["MAKEWEIGHT_HOME"] = str(Path(args.root).resolve())
     from . import paths
     from .server import serve
+    local = paths.local_root()
     root = paths.data_root()
-    (root / "data").mkdir(parents=True, exist_ok=True)
     from . import log as applog
-    applog.setup(root / "data")
+    applog.setup(local)
+    if paths.is_shared() and not root.exists():
+        applog.log.warning("shared data folder %s is not reachable — falling back to this computer's own data until it is", root)
+        os.environ["MAKEWEIGHT_SHARED_UNREACHABLE"] = str(root)
+        root = local
+    (root / "data").mkdir(parents=True, exist_ok=True)
     try:
         notes = paths.migrate_legacy_data(applog.log)
         for n in notes:
@@ -53,8 +58,8 @@ def main():
         applog.log.exception("data migration failed")
     port = args.port
     no_browser = args.no_browser
-    # started by the self-updater? then take over the previous version's port and leave the user's tab alone
-    marker = root / "updates" / "handover.json"
+    # started by the self-updater (or a data-folder move)? then take over the previous port and leave the user's tab alone
+    marker = local / "updates" / "handover.json"
     try:
         if marker.exists():
             h = json.loads(marker.read_text(encoding="utf-8"))
@@ -77,7 +82,7 @@ def main():
             if s.connect_ex((args.host, p)) != 0:
                 port = p
                 break
-    httpd = serve(root, args.host, port)
+    httpd = serve(root, args.host, port, local=local)
     url = f"http://{args.host}:{port}/"
     from .log import log
     log.info("%s running at %s   (app in %s, data in %s)", paths.APP_NAME, url, paths.install_dir(), root / "data")
@@ -89,6 +94,10 @@ def main():
         pass
     finally:
         httpd.server_close()
+        try:
+            getattr(getattr(httpd.RequestHandlerClass, "app", None), "lock", None).release()
+        except Exception:  # noqa
+            pass
     # a finished self-update asked us to hand over: the port is free now, start the new version and leave
     app = getattr(httpd.RequestHandlerClass, "app", None)
     launch = getattr(getattr(app, "updater", None), "launch_path", None)
@@ -96,7 +105,7 @@ def main():
         from .updater import Updater
         log.info("update: starting %s and exiting", launch)
         try:
-            Updater.launch(launch)
+            Updater.launch(launch, getattr(app.updater, "launch_args", None))
         except Exception:  # noqa
             log.exception("update: could not start the new version")
         time.sleep(1.0)

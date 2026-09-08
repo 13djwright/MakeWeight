@@ -35,9 +35,10 @@ class SlicerNotFound(Exception):
 
 
 def app_root() -> Path:
-    """Folder that holds slicer/ and data/ (the user data directory, see paths.py)."""
-    from .paths import data_root
-    return data_root()
+    """This computer's folder that holds slicer/ (and work caches) — see paths.local_root(). The shareable data/
+    folder may live elsewhere (paths.data_root()); slicer installs are platform-specific and never shared."""
+    from .paths import local_root
+    return local_root()
 
 
 def slicer_dir() -> Path:

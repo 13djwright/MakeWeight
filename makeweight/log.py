@@ -49,10 +49,10 @@ def _slug() -> str:
     return paths.APP_SLUG
 
 
-def setup(data_dir: Path) -> Path:
-    """Call once at startup. Returns the log file path."""
+def setup(local_dir: Path) -> Path:
+    """Call once at startup with this computer's local folder. Returns the log file path."""
     global _LOG_FILE
-    logs = Path(data_dir) / "logs"
+    logs = Path(local_dir) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     _LOG_FILE = logs / f"{_slug()}.log"
     fmt = logging.Formatter("%(asctime)s %(levelname)-5s %(threadName)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S")
@@ -113,7 +113,7 @@ def environment(app=None) -> dict:
     info = {
         "app_version": _app_version(), "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "os": platform.platform(), "machine": platform.machine(), "python": sys.version.split()[0], "executable": sys.executable,
-        "data_root": str(root), "install_dir": str(paths.install_dir()), "portable": paths.is_portable(), "root_path_length": len(str(root)), "cwd": os.getcwd(),
+        "data_root": str(paths.data_root()), "shared_data": paths.is_shared(), "local_root": str(root), "install_dir": str(paths.install_dir()), "portable": paths.is_portable(), "root_path_length": len(str(root)), "cwd": os.getcwd(),
         "env": {k: os.environ.get(k) for k in ("MAKEWEIGHT_HOME", "MAKEWEIGHT_PORT", "SSL_CERT_FILE", "PATH") if os.environ.get(k)},
     }
     try:

@@ -32,6 +32,15 @@ Jobs & setup → **Check for updates** → **Update now**. The app downloads the
 over; your data is in your user data folder and untouched. Older version folders are listed on that page and are safe
 to delete. Data from any earlier version (or an earlier name of the app) is adopted automatically on first start.
 
+## Using it on more than one computer
+
+Jobs & setup → **Use a shared folder…**: pick a folder inside a cloud drive (iCloud Drive, OneDrive, Dropbox, Google
+Drive — the ones present on the machine are offered), choose **Move my data there** on the first computer and **Use the
+data already there** on each other one. Robots, filaments, profiles and weigh-ins are then read from and written to
+that folder; the slicer install, caches and machine-specific settings stay on each computer. Close the app on one
+computer and let the drive finish syncing before opening it on another — a heartbeat file warns if two are open at
+once. **Stop sharing** copies the data back to the computer.
+
 ## First run
 
 Open **Jobs & setup** and click **Install Bambu Studio** (or PrusaSlicer). MakeWeight downloads it into its data

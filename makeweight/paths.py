@@ -64,8 +64,8 @@ def os_data_dir(name: str | None = None) -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / (APP_SLUG if name == APP_NAME else name.lower())
 
 
-def data_root() -> Path:
-    """Folder that holds data/ and slicer/."""
+def local_root() -> Path:
+    """This computer's own folder: slicer installs, work caches, logs, update downloads. Never shared."""
     v = os.environ.get(ENV_HOME)
     if v:
         return Path(v)
@@ -74,8 +74,71 @@ def data_root() -> Path:
     return os_data_dir()
 
 
+POINTER_FILE = "data_location.txt"
+
+
+def shared_data_pointer() -> Path | None:
+    """Where this computer was told to keep its data/ folder (a cloud-drive folder shared with other computers),
+    or None for the default. Stored per computer in local_root()/data_location.txt because the same cloud folder has
+    a different path on each machine."""
+    try:
+        f = local_root() / POINTER_FILE
+        if f.exists():
+            t = f.read_text(encoding="utf-8").strip()
+            if t:
+                return Path(os.path.expanduser(t))
+    except OSError:
+        pass
+    return None
+
+
+def set_shared_data_pointer(path: Path | None) -> None:
+    f = local_root() / POINTER_FILE
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if path is None:
+        f.unlink(missing_ok=True)
+    else:
+        f.write_text(str(path) + "\n", encoding="utf-8")
+
+
+def data_root() -> Path:
+    """Folder that holds data/ (database, meshes, backups). Equal to local_root() unless a shared folder is set."""
+    return shared_data_pointer() or local_root()
+
+
+def is_shared() -> bool:
+    return shared_data_pointer() is not None
+
+
 def is_portable() -> bool:
     return (install_dir() / "portable.txt").exists() or bool(os.environ.get(ENV_HOME))
+
+
+def cloud_folders() -> list[dict]:
+    """Cloud-drive folders present on this computer, for the "share my data" dialog."""
+    home = Path.home()
+    cands = [
+        ("iCloud Drive", home / "Library" / "Mobile Documents" / "com~apple~CloudDocs"),
+        ("iCloud Drive", Path(os.environ.get("USERPROFILE", str(home))) / "iCloudDrive"),
+        ("OneDrive", Path(os.environ["OneDrive"]) if os.environ.get("OneDrive") else None),
+        ("OneDrive", home / "OneDrive"),
+        ("Dropbox", home / "Dropbox"),
+        ("Google Drive", home / "Google Drive"),
+        ("Google Drive", home / "My Drive"),
+    ]
+    out: list[dict] = []
+    seen = set()
+    for label, p in cands:
+        if p and p.is_dir() and str(p) not in seen:
+            out.append({"label": label, "path": str(p)}); seen.add(str(p))
+    cs = home / "Library" / "CloudStorage"          # macOS: OneDrive-*, GoogleDrive-*, Dropbox …
+    if cs.is_dir():
+        for d in sorted(cs.iterdir()):
+            if d.is_dir() and str(d) not in seen:
+                label = d.name.split("-")[0].replace("GoogleDrive", "Google Drive")
+                sub = d / "My Drive" if (d / "My Drive").is_dir() else d
+                out.append({"label": label, "path": str(sub)}); seen.add(str(d))
+    return out
 
 
 def _db_in(folder: Path) -> Path | None:
@@ -193,3 +256,62 @@ def migrate_legacy_data(log) -> list[str]:
             log.warning("could not adopt slicer folder from %s: %s", ssrc, e)
     (root / "MIGRATED.txt").write_text(time.strftime("%Y-%m-%d %H:%M:%S") + "\n" + "\n".join(notes) + "\n", encoding="utf-8")
     return notes
+
+
+class DataLock:
+    """A heartbeat file in the shared data/ folder saying which computer has the app open. Two computers writing the
+    same SQLite file through a cloud drive at once is how databases get corrupted, so the second one to start gets a
+    warning (it is not blocked — the lock file may simply be stale after a crash)."""
+
+    def __init__(self, data_dir: Path, ttl: float = 150.0):
+        import socket
+        import threading
+        self.path = Path(data_dir) / "LOCK.json"
+        self.host = socket.gethostname()
+        self.ttl = ttl
+        self.conflict: dict | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def read(self) -> dict | None:
+        try:
+            import json
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _write(self):
+        import json
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps({"host": self.host, "pid": os.getpid(), "started": self._started, "heartbeat": time.time()}), encoding="utf-8")
+        except OSError:
+            pass
+
+    def acquire(self) -> dict | None:
+        """Returns the other computer's record when it looks live (heartbeat younger than ttl), else None."""
+        import threading
+        self._started = time.time()
+        cur = self.read()
+        if cur and cur.get("host") != self.host and time.time() - float(cur.get("heartbeat") or 0) < self.ttl:
+            self.conflict = cur
+        self._write()
+        self._thread = threading.Thread(target=self._beat, name="data-lock", daemon=True)
+        self._thread.start()
+        return self.conflict
+
+    def _beat(self):
+        while not self._stop.wait(30):
+            other = self.read()
+            if other and other.get("host") != self.host and time.time() - float(other.get("heartbeat") or 0) < self.ttl:
+                self.conflict = other          # someone else started while we run: surface it too
+            self._write()
+
+    def release(self):
+        self._stop.set()
+        cur = self.read()
+        if cur and cur.get("host") == self.host and cur.get("pid") == os.getpid():
+            try:
+                self.path.unlink()
+            except OSError:
+                pass

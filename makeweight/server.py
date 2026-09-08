@@ -34,25 +34,36 @@ STATIC = Path(__file__).parent / "static"
 
 
 class App:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, local: Path | None = None):
+        # root  = where data/ lives (database, meshes, backups) — may be a cloud-drive folder shared between computers
+        # local = this computer's own folder (slicer installs, work caches, logs, update downloads)
         self.root = Path(root)
+        self.local = Path(local) if local else self.root
         self.data_dir = self.root / "data"
+        self.work_dir = self.local / "work"
         self.mesh_dir = self.data_dir / "meshes"
         self.mesh_dir.mkdir(parents=True, exist_ok=True)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
         meshio.MESH_DIR = self.mesh_dir
         if not applog.log_file():
-            applog.setup(self.data_dir)
-        log.info("%s %s starting; data=%s; %s; python %s", paths.APP_NAME, applog._app_version(), self.root, platform.platform(), sys.version.split()[0])
+            applog.setup(self.local)
+        self.shared = paths.is_shared()
+        log.info("%s %s starting; data=%s%s; local=%s; %s; python %s", paths.APP_NAME, applog._app_version(), self.root, " (shared folder)" if self.shared else "", self.local, platform.platform(), sys.version.split()[0])
         paths.migrate_db_filename(self.data_dir, log)
-        self.db = DB(self.data_dir / paths.DB_FILE)
+        self.lock = paths.DataLock(self.data_dir)
+        self.lock_conflict = self.lock.acquire()          # another computer's live heartbeat → warn in the UI, keep going
+        self.db = DB(self.data_dir / paths.DB_FILE, sync_safe=self.shared)
+        if self.shared:
+            self.db.local_file = self.local / "settings.json"       # machine-specific settings stay on this machine
         self._repair_mesh_paths()
         self.events = Events()
         cores = os.cpu_count() or 2
         workers = self.db.setting("workers") or max(1, cores // 2)
-        self.jobs = JobManager(self.db, self.events, self.data_dir, workers=workers)
+        self.jobs = JobManager(self.db, self.events, self.data_dir, workers=workers, work_dir=self.work_dir)
         self.undo = UndoManager(self.db, self.events)
         self.updater = Updater(self.db, self.events)
         self.httpd = None  # set by serve()
+        self.restarting = False
         from . import seed
         seed.ensure_seed(self.db)
         self.jobs.start()
@@ -112,7 +123,7 @@ class App:
         tri = meshio.load_mesh(meshio.mesh_path(mesh))
         if len(tri) <= self.PREVIEW_MAX_TRIS:
             return tri
-        ldir = self.root / "data" / "work" / "lod"; ldir.mkdir(parents=True, exist_ok=True)
+        ldir = self.work_dir / "lod"; ldir.mkdir(parents=True, exist_ok=True)
         f = ldir / f"{mesh['sha256'][:24]}.stl"
         if f.exists():
             return meshio.load_mesh(f)
@@ -133,7 +144,10 @@ class App:
                 continue
             alt = self.mesh_dir / old.name
             if old.name and alt.exists():
-                self.db.update("meshes", m["id"], {"path": str(alt)}); fixed += 1
+                # with a shared data folder every computer has a different absolute path: leave the row alone (mesh_path()
+                # resolves by file name at read time) instead of rewriting it on every switch of computer
+                if not self.shared:
+                    self.db.update("meshes", m["id"], {"path": str(alt)}); fixed += 1
             else:
                 log.warning("mesh %s (%s) is missing on disk: %s", m["id"], m["filename"], old)
         if fixed:
@@ -403,6 +417,8 @@ class Handler(BaseHTTPRequestHandler):
                             self.app.undo.record(before, method, api_path, urllib.parse.unquote(hint) if hint else None)
                         except Exception:  # noqa
                             log.exception("undo record failed")
+                if getattr(self.app, "restarting", False):
+                    return self._json({"error": "restarting"}, 503)
                 return self._api(method, api_path, qs)
             return self._static(path)
         except KeyError as e:
@@ -456,7 +472,10 @@ class Handler(BaseHTTPRequestHandler):
                 "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
                 "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
                 "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
-                "robots": self._robot_list(), "update_repo": app.updater.repo(), "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": paths.BRAND, "install_dir": str(paths.install_dir()), "portable": paths.is_portable(),
+                "robots": self._robot_list(), "update_repo": app.updater.repo(),
+                "data": {"root": str(app.root), "local": str(app.local), "shared": app.shared and app.root.resolve() != app.local.resolve(), "lock_conflict": app.lock.conflict, "host": app.lock.host,
+                         "unreachable": os.environ.get("MAKEWEIGHT_SHARED_UNREACHABLE"), "cloud_folders": paths.cloud_folders()},
+                "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": paths.BRAND, "install_dir": str(paths.install_dir()), "portable": paths.is_portable(),
                 "classes": CLASSES,
             })
         if path == "settings" and m == "PUT":
@@ -484,6 +503,8 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 self.app.events.emit("robot", {"robot_id": act.get("robot_id")})
             return self._json({"done": act["label"] if act else None, **app.undo.state()})
+        if path == "data/relocate" and m == "POST":
+            return self._json(self._relocate_data(self._jbody()))
         if path == "update/check" and m == "POST":
             try:
                 return self._json(app.updater.check())
@@ -772,7 +793,7 @@ class Handler(BaseHTTPRequestHandler):
             if not mesh:
                 raise KeyError("mesh")
             if parts[2] == "thumb.png":
-                tdir = app.root / "data" / "work" / "thumbs"; tdir.mkdir(parents=True, exist_ok=True)
+                tdir = app.work_dir / "thumbs"; tdir.mkdir(parents=True, exist_ok=True)
                 f = tdir / f"{mesh['sha256'][:24]}.png"
                 if not f.exists():
                     with self._thumb_lock:                       # one render at a time: six 1.5M-triangle bodies in parallel is what froze the app
@@ -1185,6 +1206,88 @@ class Handler(BaseHTTPRequestHandler):
         db.update("robots", rid, {"updated": now()})
         return self.app._part_view(db.get("printed_parts", pid))
 
+    def _relocate_data(self, b: dict) -> dict:
+        """Move this computer's data/ to a shared (cloud-drive) folder, adopt the data already in one, or go back to the
+        local folder. Writes the per-computer pointer, then restarts the app the same way an update does."""
+        app = self.app
+        mode = b.get("mode") or "move"            # move | adopt | local
+        if paths.is_portable():
+            raise ValueError("Portable mode keeps its data next to the app; a shared folder is not available here.")
+        if mode == "local":
+            target = app.local
+        else:
+            raw = str(b.get("path") or "").strip()
+            if not raw:
+                raise ValueError("Choose a folder first.")
+            target = Path(os.path.expanduser(raw))
+            if not target.is_absolute():
+                raise ValueError("Give the full path of the folder (e.g. the MakeWeight folder inside your cloud drive).")
+            if target.resolve() == app.local.resolve():
+                mode = "local"
+        target_data = target / "data"
+        has_db = (target_data / paths.DB_FILE).exists() or (target_data / "slicebudget.db").exists()
+        if mode == "move":
+            if has_db and not b.get("overwrite"):
+                return {"needs_choice": True, "message": f"{target} already holds MakeWeight data. Use it (this computer's current data is kept as a backup) or replace it with this computer's data?"}
+            try:
+                target_data.mkdir(parents=True, exist_ok=True)
+                probe = target_data / ".write-test"; probe.write_text("ok"); probe.unlink()
+            except OSError as e:
+                raise ValueError(f"Cannot write to {target}: {e}")
+        elif mode == "adopt":
+            if not has_db:
+                raise ValueError(f"{target} has no MakeWeight data yet — use “Move my data there” on the computer that has it.")
+        # stop writing: checkpoint and close the database, then copy
+        log.info("data relocate: mode=%s target=%s", mode, target)
+        app.restarting = True
+        app.jobs.pause() if hasattr(app.jobs, "pause") else None
+        app.db.close()
+        src_data = app.data_dir
+        if mode == "move":
+            if has_db:
+                bak = target / f"data-replaced-{time.strftime('%Y%m%d-%H%M%S')}"; shutil.move(str(target_data), str(bak))
+            shutil.copytree(src_data, target_data, dirs_exist_ok=True, ignore=shutil.ignore_patterns("LOCK.json", "logs", "work"))
+            (target_data / "LOCK.json").unlink(missing_ok=True)
+        if mode in ("move", "adopt") and app.local.resolve() != app.root.resolve() and mode == "adopt":
+            pass                                   # adopting: the current (shared or local) data stays where it is
+        if mode == "local":
+            # copy the shared data back to this computer unless it already has a (newer-looking) copy the user chose to keep
+            if app.root.resolve() != app.local.resolve() and b.get("copy_back", True):
+                shutil.copytree(src_data, app.local / "data", dirs_exist_ok=True, ignore=shutil.ignore_patterns("LOCK.json", "logs", "work"))
+            paths.set_shared_data_pointer(None)
+        else:
+            if mode == "move" and app.root.resolve() == app.local.resolve():
+                # keep this computer's copy as a safety net, clearly named
+                keep = app.local / f"data-before-sharing-{time.strftime('%Y%m%d-%H%M%S')}"
+                try:
+                    shutil.move(str(src_data), str(keep))
+                except OSError as e:
+                    log.warning("could not set aside the local data copy: %s", e)
+            paths.set_shared_data_pointer(target)
+        app.lock.release()
+        # restart on the same port, no new tab — the launcher of the running version
+        launcher = None
+        for n in (f"{paths.APP_NAME}.bat", f"{paths.APP_NAME}.command", f"{paths.APP_SLUG}.sh"):
+            if (paths.install_dir() / n).exists():
+                launcher = paths.install_dir() / n; break
+        if launcher is None:
+            launcher = Path(sys.executable)          # dev: python -m makeweight from the source tree
+            app.updater.launch_args = ["-m", "makeweight", *[a for a in sys.argv[1:]]]
+        try:
+            (app.local / "updates").mkdir(parents=True, exist_ok=True)
+            (app.local / "updates" / "handover.json").write_text(json.dumps({"port": app.httpd.server_address[1] if app.httpd else None, "no_browser": True, "ts": time.time(), "from": "relocate"}), encoding="utf-8")
+        except OSError:
+            pass
+        app.updater.launch_path = launcher
+        def stop():
+            time.sleep(0.6)
+            try:
+                app.httpd.shutdown(); app.httpd.server_close()
+            except Exception:  # noqa
+                log.exception("httpd stop failed")
+        threading.Thread(target=stop, daemon=True).start()
+        return {"ok": True, "restarting": True, "data_root": str(target if mode != "local" else app.local)}
+
     def _import_filaments(self, data: bytes, fname: str) -> dict:
         """Filaments from a Bambu Studio export: a filament preset .json (Export → Export preset bundle / filament) or a
         .3mf project (every filament in its project_settings.config). Same name + same numbers → reused, not duplicated."""
@@ -1389,8 +1492,8 @@ class QuietServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def serve(root: Path, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    app = App(root)
+def serve(root: Path, host: str = "127.0.0.1", port: int = 8765, local: Path | None = None) -> ThreadingHTTPServer:
+    app = App(root, local)
     Handler.app = app
     httpd = QuietServer((host, port), Handler)
     app.httpd = httpd

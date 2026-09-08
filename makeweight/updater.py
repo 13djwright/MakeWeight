@@ -96,6 +96,7 @@ class Updater:
         self.state = {"status": "idle", "message": "", "progress": 0.0}
         self.latest: dict | None = None
         self.launch_path: Path | None = None
+        self.launch_args: list[str] | None = None      # dev mode / relocation: explicit argv for the relaunch
         self.port: int | None = None
         self._thread: threading.Thread | None = None
 
@@ -147,7 +148,7 @@ class Updater:
             dest = here.parent / f"{APP}-{info['version']}-{target()}"
             if dest.exists() and any(dest.iterdir()):
                 dest = here.parent / f"{APP}-{info['version']}-{target()}-{int(time.time())}"
-            tmp = paths.data_root() / "updates"
+            tmp = paths.local_root() / "updates"
             tmp.mkdir(parents=True, exist_ok=True)
             zpath = tmp / info["asset"]
             log.info("update: downloading %s -> %s", info["url"], zpath)
@@ -232,6 +233,10 @@ class Updater:
             if a.startswith("--root="): continue
             args.append(a)
         quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if launcher.name.startswith("python") or launcher.suffix == ".exe" and "python" in launcher.name.lower():
+            # running from source: re-exec the interpreter with the same arguments, detached
+            subprocess.Popen([str(launcher), *args], cwd=os.getcwd(), start_new_session=True, **quiet)
+            return
         if s == "Windows":
             # a fresh console window like a double-click, detached from this process
             subprocess.Popen(["cmd", "/c", "start", "", str(launcher), *args], cwd=cwd, close_fds=True,
