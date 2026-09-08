@@ -19,6 +19,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -153,9 +154,17 @@ class App:
         sec_map = {s["id"]: s for s in sections}
         for s in sections:
             s["counts"] = bool(s["counts"]); s["items"] = []; s["subtotal"] = 0.0; s["subtotal_est"] = 0.0
+        # configurations (loadouts): a line is in every configuration unless configs_json names the ones it belongs to
+        configs = loads(robot.pop("configs_json", None), []) or []
+        robot["configs"] = configs
+        active = robot.get("active_config") if any(c.get("id") == robot.get("active_config") for c in configs) else (configs[0]["id"] if configs else None)
+        robot["active_config"] = active
         total = est_total = measured_mass = 0.0
         flags = 0
         for it in items:
+            cj = loads(it.pop("configs_json", None), None)
+            it["configs"] = cj                                   # None = all configurations, [] = none, [ids] = these
+            it["in_config"] = (cj is None) or (active is not None and active in cj)
             ws = by_item.get(it["id"], [])
             it["weigh_ins"] = ws
             latest = ws[-1]["grams"] if ws else None
@@ -170,15 +179,17 @@ class App:
             if s is None:
                 continue
             s["items"].append(it)
-            s["subtotal"] += it["total_grams"]; s["subtotal_est"] += it["total_est"]
             it["counted"] = bool(it.get("counted", 1))
-            if s["counts"] and it["counted"]:
+            it["in_total"] = bool(s["counts"] and it["counted"] and it["in_config"])
+            if it["counted"] and it["in_config"]:
+                s["subtotal"] += it["total_grams"]; s["subtotal_est"] += it["total_est"]
+            if it["in_total"]:
                 total += it["total_grams"]; est_total += it["total_est"]
                 if latest is not None:
                     measured_mass += it["total_grams"]
                 if it["needs_reweigh"]:
                     flags += 1
-        printed = sum(it["total_grams"] for s in sections if s["counts"] for it in s["items"] if it.get("part") and it["counted"])
+        printed = sum(it["total_grams"] for s in sections for it in s["items"] if it.get("part") and it["in_total"])
         robot["sections"] = sections
         robot["totals"] = {
             "best_known": total, "estimated_only": est_total, "measured_fraction": (measured_mass / total) if total else 0.0,
@@ -529,8 +540,25 @@ class Handler(BaseHTTPRequestHandler):
                 if m == "GET":
                     return self._json(app.robot_detail(rid))
                 if m == "PUT":
-                    b = self._jbody(); allowed = {"name", "weight_class_g", "class_name", "margin_g", "printer_id", "nozzle", "status", "notes"}
-                    db.update("robots", rid, {k: v for k, v in b.items() if k in allowed} | {"updated": now()})
+                    b = self._jbody(); allowed = {"name", "weight_class_g", "class_name", "margin_g", "printer_id", "nozzle", "status", "notes", "active_config"}
+                    upd = {k: v for k, v in b.items() if k in allowed}
+                    if "configs" in b:
+                        cfgs = b["configs"] or []
+                        if not isinstance(cfgs, list) or any(not isinstance(c, dict) or not str(c.get("name", "")).strip() for c in cfgs):
+                            raise ValueError("configs must be a list of {id, name}")
+                        for c in cfgs:
+                            c.setdefault("id", "cfg" + uuid.uuid4().hex[:8]); c["name"] = str(c["name"]).strip()
+                        ids = {c["id"] for c in cfgs}
+                        # lines that were limited to a configuration that no longer exists: drop that id; an empty list
+                        # means "in no configuration" and is shown as such, rather than silently joining every loadout
+                        for it in db.q("SELECT li.id, li.configs_json FROM line_items li JOIN sections s ON s.id=li.section_id WHERE s.robot_id=? AND li.configs_json IS NOT NULL", [rid]):
+                            keep = [x for x in (loads(it["configs_json"], []) or []) if x in ids]
+                            db.update("line_items", it["id"], {"configs_json": json.dumps(keep)})
+                        upd["configs_json"] = json.dumps(cfgs)
+                        cur = db.get("robots", rid)
+                        if (b.get("active_config") or cur.get("active_config")) not in ids:
+                            upd["active_config"] = cfgs[0]["id"] if cfgs else None
+                    db.update("robots", rid, upd | {"updated": now()})
                     return self._json(app.robot_detail(rid))
                 if m == "DELETE":
                     self._delete_robot(rid); return self._json({"ok": True})
@@ -965,6 +993,8 @@ class Handler(BaseHTTPRequestHandler):
         upd = {k: v for k, v in b.items() if k in allowed}
         if "est_grams" in upd and "est_source" not in upd:
             upd["est_source"] = "manual"
+        if "configs" in b:
+            upd["configs_json"] = None if b["configs"] is None else json.dumps([str(x) for x in b["configs"]])
         for k in ("needs_reweigh", "to_buy", "counted"):
             if k in upd:
                 upd[k] = 1 if upd[k] else 0

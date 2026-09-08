@@ -283,3 +283,13 @@ td.ed.dlg{cursor:pointer} td.ed.dlg:not(.editing)::after{content:"⚖"}
 .thumb.clickable{cursor:pointer}
 .thumb.clickable:hover{border-color:var(--accent)}
 .thumb.active{outline:2px solid var(--accent);outline-offset:-2px}
+
+/* configurations */
+.cfgbar{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding:8px 12px;border:1px solid var(--rule);border-radius:8px;background:var(--panel)}
+.cfgbar .seg button{padding:4px 12px}
+.pill.cfg{cursor:pointer;margin-left:6px;font:inherit;font-size:11px;border:0}
+.pill.cfg:hover{filter:brightness(.95)}
+/* weight sheet: numbers stay narrow, text gets the room */
+table.sheet th.num,table.sheet td.num{width:1%;white-space:nowrap}
+table.sheet th.qty,table.sheet td.qty{width:44px;min-width:44px}
+table.sheet tr.new-row td.qty input{width:44px}

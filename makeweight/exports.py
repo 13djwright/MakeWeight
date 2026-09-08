@@ -35,6 +35,9 @@ def _rows(det: dict):
     t = det["totals"]
     price_total = sum((it["price"] or 0) * (it["qty"] or 0) for s in det["sections"] for it in s["items"])
     yield ["", "", "", round(price_total, 2), "", "", "", round(t["best_known"], 2), round(t["over_under"], 3), "over(+)/under(-)", ""]
+    cfg = next((c["name"] for c in det.get("configs") or [] if c["id"] == det.get("active_config")), None)
+    if cfg:
+        yield ["", "", "", "", f"Configuration: {cfg}", "lines that are not part of this configuration are listed with a total of 0", "", "", "", "", "", ""]
     for s in det["sections"]:
         first = True
         for it in s["items"]:
@@ -44,7 +47,7 @@ def _rows(det: dict):
             if it.get("part") and it["part"].get("profile"):
                 purpose = (purpose + " · " if purpose else "") + it["part"]["profile"]["string"] + (" · " + it["part"]["filament"]["name"] if it["part"].get("filament") else "")
             yield [name, it["qty"], it.get("price"), round((it["price"] or 0) * (it["qty"] or 0), 2) if it.get("price") else None, it["description"], purpose,
-                   round(it["best_grams"], 3) if it["best_grams"] is not None else None, round(it["total_grams"], 3) if it["counted"] else 0,
+                   round(it["best_grams"], 3) if it["best_grams"] is not None else None, round(it["total_grams"], 3) if it.get("in_total", it["counted"]) else 0,
                    it.get("measured_grams"), ("measured" if it.get("measured_grams") is not None else it.get("est_source") or ""), it.get("dimensions") or "", it.get("link") or ""]
         if first:
             yield [s["name"], "", "", "", "", "", "", "", "", "", "", ""]
@@ -197,13 +200,13 @@ def robot_archive(app, rid: int) -> bytes:
     db = app.db
     det = app.robot_detail(rid)
     data = {"format": "makeweight-robot", "version": 1, "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "robot": {k: det[k] for k in ("name", "weight_class_g", "class_name", "margin_g", "nozzle", "notes")},
+            "robot": {k: det[k] for k in ("name", "weight_class_g", "class_name", "margin_g", "nozzle", "notes")} | {"configs": det.get("configs") or [], "active_config": det.get("active_config")},
             "sections": [], "events": db.q("SELECT date,title,placing,notes,total_snapshot_g FROM events WHERE robot_id=?", [rid]),
             "profiles": {}, "filaments": {}, "meshes": {}}
     for s in det["sections"]:
         sec = {"name": s["name"], "counts": s["counts"], "items": []}
         for it in s["items"]:
-            item = {k: it.get(k) for k in ("qty", "description", "purpose", "link", "dimensions", "price", "est_grams", "est_source", "status", "needs_reweigh", "to_buy", "counted", "notes")}
+            item = {k: it.get(k) for k in ("qty", "description", "purpose", "link", "dimensions", "price", "est_grams", "est_source", "status", "needs_reweigh", "to_buy", "counted", "notes", "configs")}
             item["weigh_ins"] = [{k: w.get(k) for k in ("grams", "date", "note", "profile_string")} for w in it.get("weigh_ins", [])]
             p = it.get("part")
             if p:
@@ -240,7 +243,8 @@ def import_archive(handler, data: bytes) -> dict:
     meta = json.loads(z.read("robot.json"))
     rb = meta["robot"]
     rid = db.insert("robots", {"name": rb["name"], "weight_class_g": rb["weight_class_g"], "class_name": rb.get("class_name"), "margin_g": rb.get("margin_g") or 4.5,
-                               "printer_id": db.setting("default_printer_id"), "nozzle": rb.get("nozzle") or 0.4, "status": "active", "notes": rb.get("notes"), "created": now(), "updated": now()})
+                               "printer_id": db.setting("default_printer_id"), "nozzle": rb.get("nozzle") or 0.4, "status": "active", "notes": rb.get("notes"), "created": now(), "updated": now(),
+                               "configs_json": json.dumps(rb["configs"]) if rb.get("configs") else None, "active_config": rb.get("active_config")})
     fil_ids = {}
     for name, f in meta.get("filaments", {}).items():
         ex = db.one("SELECT id FROM filaments WHERE name=?", [name])
@@ -260,7 +264,8 @@ def import_archive(handler, data: bytes) -> dict:
         sid = db.insert("sections", {"robot_id": rid, "name": sec["name"], "ord": si, "counts": 1 if sec.get("counts", True) else 0})
         for ii, it in enumerate(sec["items"]):
             iid = db.insert("line_items", {"section_id": sid, "ord": ii, **{k: it.get(k) for k in ("qty", "description", "purpose", "link", "dimensions", "price", "est_grams", "est_source", "status", "notes")},
-                                           "needs_reweigh": 1 if it.get("needs_reweigh") else 0, "to_buy": 1 if it.get("to_buy") else 0, "counted": 0 if it.get("counted") is False else 1})
+                                           "needs_reweigh": 1 if it.get("needs_reweigh") else 0, "to_buy": 1 if it.get("to_buy") else 0, "counted": 0 if it.get("counted") is False else 1,
+                                           "configs_json": json.dumps(it["configs"]) if it.get("configs") is not None else None})
             for w in it.get("weigh_ins", []):
                 db.insert("weigh_ins", {"line_item_id": iid, "grams": w["grams"], "date": w.get("date"), "note": w.get("note"), "profile_string": w.get("profile_string")})
             p = it.get("part")

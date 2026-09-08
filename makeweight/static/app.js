@@ -316,8 +316,8 @@
       const bar = h('div', { class: 'bar', title: 'Sections left to right; orange = printed parts; black line = class limit' });
       let x = 0; const total = Math.max(t.best_known, cls) * 1.02;
       for (const s of r.sections.filter(s => s.counts)) {
-        const w = (s.items.filter(i => i.counted).reduce((a, i) => a + i.total_grams, 0)) / total * 100;
-        const printed = s.items.some(i => i.part) && s.items.every(i => i.part || !i.counted);
+        const w = (s.items.filter(i => i.in_total).reduce((a, i) => a + i.total_grams, 0)) / total * 100;
+        const printed = s.items.some(i => i.part) && s.items.every(i => i.part || !i.in_total);
         bar.append(h('i', { style: { left: x + '%', width: w + '%', background: printed ? 'var(--accent)' : 'var(--slate)', opacity: printed ? 1 : (0.55 + 0.1 * (x / 20 % 3)) } })); x += w;
       }
       bar.append(h('i', { class: 'lim', style: { left: (cls / total * 100) + '%' } }));
@@ -448,6 +448,7 @@
         h('button', { class: 'btn', onClick: robotWeighInModal }, 'Weigh-in…'),
         h('button', { class: 'btn', onClick: e => robotMenu(e.currentTarget) }, 'Robot ▾'),
         h('button', { class: 'btn primary', onClick: () => go('optimizer') }, 'Fix weight →'))));
+    m.append(configBar(r));
     const over = t.over_under;
     m.append(h('div', { class: 'hdr' },
       stat('Best known', fmt(t.best_known), 'g', h('div', null, h('div', { class: 'sbar' }, h('i', { style: { width: (t.measured_fraction * 100) + '%', background: 'var(--good)' } }), h('i', { style: { flex: 1, background: 'var(--slate-soft)' } })), h('div', { class: 'hint', style: { marginTop: '4px' } }, `${Math.round(t.measured_fraction * 100)}% of mass measured`))),
@@ -456,7 +457,7 @@
       stat('Printed parts', fmt(t.printed), `g · ${t.best_known ? Math.round(t.printed / t.best_known * 100) : 0}%`, h('div', { class: 'hint' }, `budget for printed parts: ${fmt(t.printed_budget)} g`)),
       stat('Flags', String(t.flags), '', h('div', { class: 'hint' }, 'need re-weigh'))));
 
-    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', { class: 'num' }, 'Qty'), h('th', null, 'Description'), h('th', null, 'Purpose / notes'), h('th', { class: 'num' }, 'Estimated'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Best'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Status'), h('th', null, ''), h('th', null, ''))));
+    const tbl = h('table', { class: 'sheet' }, h('thead', null, h('tr', null, h('th', { class: 'num qty' }, 'Qty'), h('th', null, 'Description'), h('th', null, 'Purpose / notes'), h('th', { class: 'num' }, 'Estimated'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Best'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Status'), h('th', null, ''), h('th', null, ''))));
     const tb = h('tbody'); tbl.append(tb);
     for (const s of r.sections) {
       tb.append(h('tr', { class: 'sec-h', dataset: { key: 's' + s.id } }, h('td', { colspan: 6 }, s.name, !s.counts && h('span', { class: 'off' }, 'not counted toward weigh-in')),
@@ -467,18 +468,97 @@
     }
     tb.append(h('tr', { class: 'sum', dataset: { key: 'sum' } }, h('td'), h('td', null, 'Weigh-in total'), h('td'), h('td', { class: 'num' }, fmt(t.estimated_only)), h('td'), h('td'), h('td', { class: 'num' }, fmt(t.best_known)), h('td', { class: 'num' }, money(r.sections.reduce((a, s) => a + s.items.reduce((b, i) => b + (i.price || 0) * (i.qty || 0), 0), 0))), h('td', { colspan: 3 })));
     m.append(h('div', { class: 'tw' }, tbl));
-    m.append(h('p', { class: 'hint' }, 'Cells with a text cursor (and a ✎ on hover) edit in place — Enter saves, Esc cancels; buttons ending in “…” open a dialog. Red dot = needs re-weigh (set automatically when a profile, mesh or library weight changes after a measurement). Grey rows are excluded from the total (e.g. an assembly line supersedes them).'));
+    m.append(h('p', { class: 'hint' }, 'Greyed-out lines are not in the weight total: they are excluded by hand (“not in total” — click the pill to include), not part of the selected configuration (click the pill to change), or in a section that does not count. Cells with a text cursor (and a ✎ on hover) edit in place — Enter saves, Esc cancels; buttons ending in “…” open a dialog. Red dot = needs re-weigh (set automatically when a profile, mesh or library weight changes after a measurement). Grey rows are excluded from the total (e.g. an assembly line supersedes them).'));
   };
+  // ---- configurations (loadouts): the same robot with different armour / weapon for different opponents
+  const cfgName = (r, id) => ((r.configs || []).find(c => c.id === id) || {}).name || '?';
+  async function setActiveConfig(id) { await api('PUT', `robots/${S.robotId}`, { active_config: id }, { label: 'switch configuration' }); await refreshRobot(); }
+  function configBar(r) {
+    const cfgs = r.configs || [];
+    const bar = h('div', { class: 'cfgbar' });
+    if (!cfgs.length) {
+      bar.append(h('span', { class: 'rng' }, 'One configuration. '), h('button', { class: 'btn small', title: 'Set up loadouts — e.g. “standard” and “vs horizontal spinner” with a wedge — and pick which lines belong to which', onClick: () => configsModal(r) }, 'Configurations…'));
+      return bar;
+    }
+    const seg = h('div', { class: 'seg', role: 'tablist', 'aria-label': 'Configuration' });
+    for (const c of cfgs) seg.append(h('button', { role: 'tab', 'aria-pressed': String(c.id === r.active_config), 'aria-selected': String(c.id === r.active_config), onClick: () => c.id !== r.active_config && setActiveConfig(c.id).catch(fail) }, c.name));
+    const nOut = r.sections.reduce((a, s) => a + s.items.filter(i => !i.in_config).length, 0);
+    bar.append(h('span', { class: 'rng' }, 'Configuration'), seg,
+      ...(nOut ? [h('span', { class: 'rng' }, `${nOut} line${nOut === 1 ? '' : 's'} not in this one (greyed out)`)] : []),
+      h('button', { class: 'btn small', style: { marginLeft: 'auto' }, onClick: () => configsModal(r) }, 'Configurations…'));
+    return bar;
+  }
+  function configsModal(r) {
+    let cfgs = (r.configs || []).map(c => ({ ...c }));
+    const list = h('div');
+    const draw = () => {
+      list.textContent = '';
+      if (!cfgs.length) list.append(h('p', { class: 'hint' }, 'No configurations yet. Add two — the first one becomes what every line is in today; then mark the lines that belong to only one of them.'));
+      for (const c of cfgs) {
+        const name = input({ value: c.name, placeholder: 'e.g. vs horizontal spinner' }); name.addEventListener('input', () => { c.name = name.value; });
+        list.append(h('div', { class: 'tb', style: { marginBottom: '6px' } }, name,
+          h('button', { class: 'btn small', title: 'Copy: every line in this configuration is also in the copy', onClick: () => { cfgs.push({ name: c.name + ' copy', _copyOf: c.id }); draw(); } }, 'Duplicate'),
+          h('button', { class: 'btn icon del', title: 'Remove this configuration (lines only in it stay on the sheet, marked “in no configuration”)', onClick: () => { cfgs = cfgs.filter(x => x !== c); draw(); } }, '✕')));
+      }
+      list.append(h('button', { class: 'btn small', onClick: () => { cfgs.push({ name: cfgs.length ? '' : 'Standard' }); draw(); if (!cfgs.length || cfgs.length === 1) cfgs.push({ name: '' }); draw(); const ins = list.querySelectorAll('input'); if (ins.length) ins[ins.length - 1].focus(); } }, '＋ Add configuration'));
+    };
+    draw();
+    modal('Configurations', h('div', null,
+      h('p', { class: 'hint', style: { marginTop: 0 } }, 'A configuration is a loadout of the same robot — standard, vs horizontal spinner with a wedge, vs flipper… Shared lines are in every configuration; use a line’s ⋯ menu to put it in only some of them. The weight total, the budget bar and the optimizer follow the configuration selected on the sheet.'),
+      list),
+      [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => {
+        const clean = cfgs.filter(c => (c.name || '').trim());
+        if (clean.length === 1) { toast('Add at least two configurations (or none)', true); return false; }
+        const res = await api('PUT', `robots/${S.robotId}`, { configs: clean.map(c => ({ id: c.id, name: c.name.trim() })) }, { label: 'edit configurations' });
+        // duplicates: copy the source configuration's membership onto the new id
+        const copies = clean.filter(c => c._copyOf);
+        if (copies.length) {
+          const byName = Object.fromEntries((res.configs || []).map(c => [c.name, c.id]));
+          for (const cp of copies) {
+            const newId = byName[cp.name.trim()]; if (!newId) continue;
+            for (const s of res.sections) for (const it of s.items) if (Array.isArray(it.configs) && it.configs.includes(cp._copyOf) && !it.configs.includes(newId)) await api('PUT', `items/${it.id}`, { configs: [...it.configs, newId] });
+          }
+        }
+        await refreshRobot(); await loadState();
+      } }], { width: '560px' });
+  }
+  function itemConfigsModal(it) {
+    const r = S.robot, cfgs = r.configs || [];
+    if (!cfgs.length) return configsModal(r);
+    const all = h('input', { type: 'radio', name: 'cfgmode', checked: it.configs === null });
+    const some = h('input', { type: 'radio', name: 'cfgmode', checked: it.configs !== null });
+    const boxes = cfgs.map(c => ({ c, box: h('input', { type: 'checkbox', checked: Array.isArray(it.configs) ? it.configs.includes(c.id) : true }) }));
+    const sync = () => boxes.forEach(b => { b.box.disabled = all.checked; });
+    all.addEventListener('change', sync); some.addEventListener('change', sync); sync();
+    modal(`Configurations · ${it.description}`, h('div', null,
+      field('', h('label', null, all, ' In every configuration (shared part)')),
+      field('', h('label', null, some, ' Only in:')),
+      h('div', { style: { marginLeft: '24px' } }, ...boxes.map(b => h('label', { style: { display: 'block', margin: '4px 0' } }, b.box, ' ', b.c.name)))),
+      [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => {
+        const configs = all.checked ? null : boxes.filter(b => b.box.checked).map(b => b.c.id);
+        await api('PUT', `items/${it.id}`, { configs }, { label: `configurations of “${it.description}”` });
+        await refreshRobot();
+      } }]);
+  }
+  function cfgChip(it, r) {
+    // which loadouts a line belongs to, when it is not simply shared; click = edit
+    if (it.configs === null || !(r.configs || []).length) return null;
+    const names = it.configs.map(id => cfgName(r, id));
+    const txt = !names.length ? 'in no configuration' : names.length === r.configs.length ? 'every configuration' : names.join(' · ');
+    return h('button', { class: 'pill cfg ' + (it.in_config ? 'ok' : 'warn'), title: (it.in_config ? 'In this configuration. ' : 'Not in the selected configuration — not counted. ') + 'Click to change which configurations this line is in', onClick: e => { e.stopPropagation(); itemConfigsModal(it); } }, txt);
+  }
   function stat(label, value, unit, extra, cls) { return h('div', { class: 'stat ' + (cls || '') }, h('div', { class: 'l' }, label), h('div', { class: 'v' }, value, unit && h('small', null, unit)), extra); }
   function needRobot(m) { m.append(h('div', { class: 'empty' }, 'Choose a robot first.', h('br'), h('button', { class: 'btn primary', style: { marginTop: '10px' }, onClick: () => go('home') }, 'All robots'))); }
 
   function lineRow(it, s) {
     const upd = (patch) => api('PUT', `items/${it.id}`, patch).then(refreshRobot);
     const p = it.part;
-    const tr = h('tr', { class: (!it.counted ? 'dim ' : '') + (p && p.locked ? 'locked' : ''), dataset: { key: 'i' + it.id } });
-    tr.append(edCell(it.qty, v => upd({ qty: v }), { type: 'number', cls: 'num', fmt: v => Number(v) % 1 ? v : String(v) }));
+    const r = S.robot;
+    const tr = h('tr', { class: (!it.in_total && s.counts ? 'dim ' : '') + (p && p.locked ? 'locked' : ''), dataset: { key: 'i' + it.id } });
+    tr.append(edCell(it.qty, v => upd({ qty: v }), { type: 'number', cls: 'num qty', fmt: v => Number(v) % 1 ? v : String(v) }));
     // description
-    const descCell = edCell(it.description, v => upd({ description: v }), { render: v => h('span', null, v || h('i', { style: { color: 'var(--ink3)' } }, 'untitled'), p && p.locked && h('span', { class: 'pill lock', style: { marginLeft: '6px' } }, '🔒'), p && h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.filament ? p.filament.name : ''}` : 'printed part · no mesh attached', p.role ? ` · ${p.role}` : '')) });
+    const descCell = edCell(it.description, v => upd({ description: v }), { render: v => h('span', null, v || h('i', { style: { color: 'var(--ink3)' } }, 'untitled'), p && p.locked && h('span', { class: 'pill lock', style: { marginLeft: '6px' } }, '🔒'),
+      !it.counted && h('button', { class: 'pill cfg warn', title: 'Excluded from the total by hand — click to include it again', onClick: e => { e.stopPropagation(); upd({ counted: true }).catch(fail); } }, 'not in total'), cfgChip(it, r), p && h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.filament ? p.filament.name : ''}` : 'printed part · no mesh attached', p.role ? ` · ${p.role}` : '')) });
     tr.append(descCell);
     if (p) tr.append(h('td', { class: 'wrap' }, h('a', { href: '#/part/' + p.id, class: 'prof' }, p.profile ? p.profile.string : '—')));
     else tr.append(edCell(it.purpose, v => upd({ purpose: v }), { cls: 'wrap', render: v => h('span', { class: 'rng' }, v || '') }));
@@ -524,7 +604,7 @@
     desc.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
     est.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
     const tr = h('tr', { class: 'new-row nosort', dataset: { key: 'n' + s.id } },
-      h('td', { class: 'num' }, qty), h('td', null, desc), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
+      h('td', { class: 'num qty' }, qty), h('td', null, desc), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
       h('td', { colspan: 6, class: 'rng' }, 'Enter adds the line · more fields via ⋯ after adding'),
       h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'Add with all fields…', 'aria-label': 'Add a line with all fields', onClick: () => addLineModal(s.id) }, '⋯')));
     if (S.cache.focusNewLine === s.id) { S.cache.focusNewLine = null; setTimeout(() => desc.focus(), 30); }
@@ -536,7 +616,14 @@
     else items.push({ label: 'Attach a mesh (make this a printed part)…', onClick: () => attachMeshModal(it) });
     items.push({ label: 'Add weigh-in…', onClick: () => weighInModal(it) });
     if (it.weigh_ins.length) items.push({ label: 'Weigh-in history…', onClick: () => weighHistoryModal(it) });
-    items.push({ label: it.counted ? 'Exclude from total' : 'Include in total', onClick: () => api('PUT', `items/${it.id}`, { counted: !it.counted }).then(refreshRobot).catch(fail) });
+    items.push({ label: it.counted ? 'Exclude from total (keep on sheet)' : 'Include in total', onClick: () => api('PUT', `items/${it.id}`, { counted: !it.counted }).then(refreshRobot).catch(fail) });
+    if ((r.configs || []).length) {
+      const act = r.active_config, inAct = it.configs === null || (it.configs || []).includes(act);
+      items.push({ label: 'Configurations…', onClick: () => itemConfigsModal(it) });
+      if (it.configs === null) items.push({ label: `Only in “${cfgName(r, act)}”`, onClick: () => api('PUT', `items/${it.id}`, { configs: [act] }).then(refreshRobot).catch(fail) });
+      else if (!inAct) items.push({ label: `Add to “${cfgName(r, act)}”`, onClick: () => api('PUT', `items/${it.id}`, { configs: [...it.configs, act] }).then(refreshRobot).catch(fail) });
+      else items.push({ label: 'In every configuration', onClick: () => api('PUT', `items/${it.id}`, { configs: null }).then(refreshRobot).catch(fail) });
+    } else items.push({ label: 'Configurations (loadouts)…', onClick: () => configsModal(r) });
     items.push({ label: it.to_buy ? 'Unmark “to buy”' : 'Mark “to buy”', onClick: () => api('PUT', `items/${it.id}`, { to_buy: !it.to_buy }).then(refreshRobot).catch(fail) });
     if (it.needs_reweigh) items.push({ label: 'Clear re-weigh flag', onClick: () => api('PUT', `items/${it.id}`, { needs_reweigh: 0 }).then(refreshRobot).catch(fail) });
     items.push({ label: 'Edit link / dimensions / notes…', onClick: () => editLineModal(it) });
@@ -1153,7 +1240,7 @@
     const optRuns = runs.filter(x => x.kind === 'optimize');
     const run = S.param ? (optRuns.find(x => x.id === +S.param) || await api('GET', `runs/${S.param}`)) : optRuns[0];
     const t = r.totals;
-    const parts = r.sections.flatMap(s => s.items.filter(i => i.part && i.counted && s.counts));
+    const parts = r.sections.flatMap(s => s.items.filter(i => i.part && i.in_total));
     const locked = parts.filter(i => i.part.locked), free = parts.filter(i => !i.part.locked && i.part.mesh), noMesh = parts.filter(i => !i.part.locked && !i.part.mesh);
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Optimizer'), h('p', null, 'Finds profile plans that put the robot under its limit. Every plan shown has been re-sliced for real before it appears.'))));
     const left = h('div'), right = h('div'); m.append(h('div', { class: 'cols' }, left, right));
@@ -1723,7 +1810,8 @@
   window.addEventListener('resize', () => { clearTimeout(S.fitTimer); S.fitTimer = setTimeout(fitTables, 150); });
   // Background refresh (slice results landing while you work): re-render into a detached tree and patch only what
   // changed, keeping scroll position, open menus and any cell you are editing.
-  const busy = el => el.matches(':focus-within') || el.querySelector('.editing, :focus');
+  // "busy" = the user is typing in it; a focused button (e.g. the one that just opened a dialog) must not pin stale content
+  const busy = el => !!el.querySelector('.editing, input:focus, select:focus, textarea:focus');
   function patchRows(oldTb, newTb) {
     const oldMap = new Map([...oldTb.children].filter(r => r.dataset.key).map(r => [r.dataset.key, r]));
     let prev = null;

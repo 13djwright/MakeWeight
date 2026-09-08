@@ -106,10 +106,10 @@ class DB:
         # additive migrations: add columns that older databases lack
         wanted = {
             "printed_parts": {"mirror": "INTEGER DEFAULT 0", "modifiers_json": "TEXT DEFAULT '[]'"},
-            "line_items": {"to_buy": "INTEGER DEFAULT 0", "counted": "INTEGER DEFAULT 1"},
+            "line_items": {"to_buy": "INTEGER DEFAULT 0", "counted": "INTEGER DEFAULT 1", "configs_json": "TEXT"},
             "slice_jobs": {"print_time_s": "REAL", "priority": "INTEGER DEFAULT 5", "profile_json": "TEXT"},
             "runs": {"status": "TEXT DEFAULT 'done'", "name": "TEXT"},
-            "robots": {"nozzle": "REAL DEFAULT 0.4", "class_name": "TEXT"},
+            "robots": {"nozzle": "REAL DEFAULT 0.4", "class_name": "TEXT", "configs_json": "TEXT", "active_config": "TEXT"},
             "filaments": {"max_vol_speed": "REAL"},
         }
         for table, cols in wanted.items():

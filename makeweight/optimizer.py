@@ -191,7 +191,7 @@ class Optimization:
     def _run(self):
         det = self.app.robot_detail(self.rid)
         robot = det
-        items = [it for s in det["sections"] if s["counts"] for it in s["items"] if it.get("part") and it["counted"]]
+        items = [it for s in det["sections"] for it in s["items"] if it.get("part") and it.get("in_total")]      # active configuration only
         single = self.body.get("mode") == "single"
         free: list[PartModel] = []
         fixed_g = 0.0
@@ -488,7 +488,7 @@ class Optimization:
             assigns.append({"part_id": pm.part["id"], "name": pm.item["description"], "qty": pm.qty, "params": params, "profile_string": profiles.profile_string(params),
                             "role": pm.role, "grams": None, "model_grams": pm.predict(W, s, d), "status": "pending", "locked": False})
         det = self.app.robot_detail(self.rid)
-        for it in [it for s in det["sections"] if s["counts"] for it in s["items"] if it.get("part") and it["counted"] and (it["part"]["locked"] or not it["part"].get("mesh"))]:
+        for it in [it for s in det["sections"] for it in s["items"] if it.get("part") and it.get("in_total") and (it["part"]["locked"] or not it["part"].get("mesh"))]:
             if self.body.get("mode") == "single":
                 continue
             assigns.append({"part_id": it["part"]["id"], "name": it["description"], "qty": it["qty"], "params": None, "profile_string": it["part"]["profile"]["string"] if it["part"].get("profile") else "",
