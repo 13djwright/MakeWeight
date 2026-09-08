@@ -660,10 +660,11 @@
     const parts = r.sections.flatMap(s => s.items.filter(i => i.part).map(i => ({ it: i, p: i.part, s })));
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Printed parts'), h('p', null, 'Every printed line on the sheet with its mesh, profile and slicer result. Drop STL/OBJ/3MF files anywhere on this page to add parts.')),
       h('div', { class: 'tb' }, h('button', { class: 'btn', onClick: () => pickFiles() }, '＋ Add STLs / 3MF'),
+        h('button', { class: 'btn', title: 'Upload one STL with every part in it (or several files / a 3MF) and choose which existing part each body replaces', onClick: () => pickFiles({ assign: true }) }, 'Update meshes from file…'),
         h('button', { class: 'btn', onClick: () => applyProfileModal(parts) }, 'Apply profile to all ▾'),
         h('button', { class: 'btn', onClick: async () => { await api('POST', `robots/${r.id}/slice_all`); toast('Re-slicing all parts'); await refreshRobot(); } }, 'Re-slice all'),
         h('button', { class: 'btn primary', onClick: () => go('optimizer') }, 'Optimize →'))));
-    const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ or PLY files here — one part per file (multi-body files are split). Drop a Bambu Studio or PrusaSlicer .3mf project to import every object with its own walls/infill settings.');
+    const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ or PLY files here — one part per file. A file with several bodies (your whole robot exported as one STL) opens a dialog to say which part each body replaces or adds. Drop a Bambu Studio or PrusaSlicer .3mf project to import every object with its own walls/infill settings.');
     m.append(drop); setupDrop(m, drop);
     const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Cost'), h('th', null, 'Status'), h('th'))));
     const tb = h('tbody'); tbl.append(tb);
@@ -723,35 +724,84 @@
     modal('Apply to all unlocked parts', h('div', null, field('Profile', sel), field('Filament', fil), h('p', { class: 'hint' }, `${parts.filter(x => !x.p.locked).length} unlocked parts will be re-sliced.`)),
       [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: async () => { for (const { p } of parts) if (!p.locked) { const patch = { profile_id: +sel.value }; if (fil.value) patch.filament_id = +fil.value; await api('PUT', `parts/${p.id}`, patch); } await refreshRobot(); } }]);
   }
-  function pickFiles() {
+  function pickFiles(opts = {}) {
     const inp = h('input', { type: 'file', multiple: true, accept: '.stl,.obj,.3mf,.ply' });
-    inp.addEventListener('change', () => uploadFiles([...inp.files])); inp.click();
+    inp.addEventListener('change', () => uploadFiles([...inp.files], opts)); inp.click();
   }
   function setupDrop(area, drop) {
     const on = e => { e.preventDefault(); drop.classList.add('over'); }, off = () => drop.classList.remove('over');
     area.addEventListener('dragover', on); area.addEventListener('dragleave', off);
     area.addEventListener('drop', e => { e.preventDefault(); off(); uploadFiles([...e.dataTransfer.files]); });
   }
-  async function uploadFiles(files) {
+  // Files dropped on Printed parts. Plain single-body files become new parts straight away (the original flow).
+  // A multi-body STL (everything exported from CAD as one file), or an upload started with "Update meshes from
+  // file…", opens the assignment dialog: every body can replace an existing part's mesh, become a new part or be
+  // skipped — with the likely matches pre-selected.
+  async function uploadFiles(files, opts = {}) {
     if (!S.robotId) return toast('Choose a robot first', true);
+    const hasParts = (S.robot || { sections: [] }).sections.some(s => s.items.some(i => i.part && i.part.mesh));
+    const bodies = [];   // meshes to assign
     for (const f of files) {
       try {
         toast(`Uploading ${f.name}…`);
-        if (/\.3mf$/i.test(f.name)) {
+        if (/\.3mf$/i.test(f.name) && !opts.assign) {
           const r = await api('POST', `robots/${S.robotId}/import3mf`, await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } });
           toast(`${f.name}: ${r.created} part${r.created === 1 ? '' : 's'} imported with their slicer settings`);
           continue;
         }
         const res = await api('POST', 'meshes?split=1', await f.arrayBuffer(), { headers: { 'X-Filename': encodeURIComponent(f.name) } });
+        const many = res.meshes.length > 1;
         for (const mesh of res.meshes) {
-          const name = res.meshes.length > 1 ? mesh.filename.replace(/\.stl$/i, '') : f.name.replace(/\.(stl|obj|3mf|ply)$/i, '');
-          let scale = 1.0;
-          if (mesh.units_scale_guess && mesh.units_scale_guess !== 1.0) { if (confirm(`${f.name} is only ${mesh.bbox.size.map(v => v.toFixed(1)).join('×')} mm — does it use inches? OK to scale ×25.4.`)) scale = 25.4; }
-          await api('POST', `robots/${S.robotId}/parts`, { name, mesh_id: mesh.id, scale });
+          const name = mesh.body_name || (many ? mesh.filename.replace(/\.stl$/i, '') : f.name.replace(/\.(stl|obj|3mf|ply)$/i, ''));
+          bodies.push({ mesh, name, file: f.name, many });
         }
       } catch (e) { fail(e); }
     }
+    if (!bodies.length) { await refreshRobot(); await loadState(); return; }
+    if (opts.assign || (hasParts && bodies.some(b => b.many))) return assignMeshesModal(bodies);
+    for (const b of bodies) {
+      try {
+        let scale = 1.0;
+        if (b.mesh.units_scale_guess && b.mesh.units_scale_guess !== 1.0) { if (confirm(`${b.file} is only ${b.mesh.bbox.size.map(v => v.toFixed(1)).join('×')} mm — does it use inches? OK to scale ×25.4.`)) scale = 25.4; }
+        await api('POST', `robots/${S.robotId}/parts`, { name: b.name, mesh_id: b.mesh.id, scale });
+      } catch (e) { fail(e); }
+    }
     await refreshRobot(); await loadState();
+  }
+  async function assignMeshesModal(bodies) {
+    let matches = { matches: [], parts: [] };
+    try { matches = await api('POST', `robots/${S.robotId}/mesh_matches`, { mesh_ids: bodies.map(b => b.mesh.id) }); } catch (e) { fail(e); }
+    const sug = Object.fromEntries(matches.matches.map(m => [m.mesh_id, m.suggested]));
+    const parts = (S.robot || { sections: [] }).sections.flatMap(s => s.items.filter(i => i.part).map(i => ({ id: i.part.id, description: i.description, mesh: i.part.mesh })));
+    const rows = bodies.map(b => {
+      const sg = sug[b.mesh.id];
+      const sel = h('select', null,
+        h('option', { value: 'skip' }, '— skip this body —'),
+        h('option', { value: 'new' }, `＋ New part “${b.name}”`),
+        ...parts.map(pt => h('option', { value: String(pt.id) }, `Replace mesh of: ${pt.description}${pt.mesh ? ` (now ${(pt.mesh.volume_mm3 / 1000).toFixed(1)} cm³)` : ' (no mesh yet)'}`)));
+      sel.value = sg ? (sg.why === 'identical file' ? 'skip' : String(sg.part_id)) : (parts.some(pt => !pt.mesh) ? 'new' : 'new');
+      const why = sg ? h('span', { class: 'pill ' + (sg.score >= 0.9 ? 'ok' : 'warn'), title: sg.why }, sg.why === 'identical file' ? 'unchanged' : sg.score >= 0.9 ? 'match' : 'likely') : h('span', { class: 'pill' }, 'new');
+      return { b, sel, tr: h('tr', null, h('td', null, h('b', null, b.name), h('span', { class: 'sub' }, b.file)), h('td', { class: 'num' }, b.mesh.bbox ? b.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ') + ' mm' : ''), h('td', { class: 'num' }, (b.mesh.volume_mm3 / 1000).toFixed(2)), h('td', null, why), h('td', null, sel)) };
+    });
+    const tbl = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Body'), h('th', { class: 'num' }, 'Size'), h('th', { class: 'num' }, 'cm³'), h('th', null, 'Guess'), h('th', null, 'Assign to'))), h('tbody', null, ...rows.map(r => r.tr)));
+    modal(`Assign ${bodies.length} bod${bodies.length === 1 ? 'y' : 'ies'} to parts`, h('div', null,
+      h('p', { class: 'hint', style: { marginTop: 0 } }, 'Each body can replace an existing part’s mesh (orientation, profile, filament, modifiers and history stay; the part re-slices), become a new part, or be skipped. Guesses come from matching volume and size against the parts’ current meshes' + (bodies.some(b => b.mesh.body_name) ? ', and object names from the 3MF' : '') + '.'),
+      h('div', { class: 'tw' }, tbl)),
+      [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: async () => {
+        let replaced = 0, created = 0, skipped = 0;
+        const used = new Set();
+        for (const r of rows) {
+          const v = r.sel.value;
+          if (v === 'skip') { skipped++; continue; }
+          if (v === 'new') { await api('POST', `robots/${S.robotId}/parts`, { name: r.b.name, mesh_id: r.b.mesh.id }); created++; continue; }
+          if (used.has(v)) { toast(`Two bodies point at the same part — only the first was applied`, true); skipped++; continue; }
+          used.add(v);
+          await api('PUT', `parts/${v}`, { mesh_id: r.b.mesh.id, force: true }, { label: 'replace mesh' }); replaced++;
+        }
+        await refreshRobot(); await loadState();
+        if (S.view === 'part') await renderMain();
+        toast(`${replaced} mesh${replaced === 1 ? '' : 'es'} replaced · ${created} new part${created === 1 ? '' : 's'}${skipped ? ` · ${skipped} skipped` : ''}${replaced ? ' — re-slicing' : ''}`);
+      } }], { width: '820px' });
   }
 
   // ---------------------------------------------------------------- part detail

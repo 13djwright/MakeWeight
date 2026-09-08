@@ -364,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
             qs = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
             if path.startswith("/api/"):
                 api_path = path[5:].rstrip("/")
-                if method in ("POST", "PUT", "DELETE") and not re.match(r"^(undo|redo|settings|slicer/|jobs|backup|log|diagnostics|meshes$|parts/\d+/(slice|orientation_sweep)$|robots/\d+/(optimize|slice_all)$|runs/\d+/cancel$|filaments/\d+/recalc$)", api_path):
+                if method in ("POST", "PUT", "DELETE") and not re.match(r"^(undo|redo|settings|slicer/|jobs|backup|log|diagnostics|meshes$|parts/\d+/(slice|orientation_sweep)$|robots/\d+/(optimize|slice_all|mesh_matches)$|runs/\d+/cancel$|filaments/\d+/recalc$)", api_path):
                     before = self.app.undo.snapshot()
                     try:
                         return self._api(method, api_path, qs)
@@ -539,6 +539,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(db.get("events", eid))
             if sub == "parts" and m == "POST":
                 return self._json(self._create_part(rid, self._jbody()))
+            if sub == "mesh_matches" and m == "POST":
+                return self._json(self._mesh_matches(rid, [int(x) for x in (self._jbody().get("mesh_ids") or [])]))
             if sub == "import3mf" and m == "POST":
                 return self._json(self._import_3mf(rid, self._body(), urllib.parse.unquote(self.headers.get("X-Filename") or "project.3mf")))
             if sub == "runs" and m == "GET":
@@ -982,19 +984,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def _store_mesh(self, fname: str, data: bytes, split: bool = False) -> dict:
         db = self.app.db
-        tri = meshio.load_mesh(fname, data)
-        bodies = [tri]
-        if split and len(tri) < 400000:
-            bodies = meshio.split_bodies(tri)
-            bodies = [b for b in bodies if meshio.volume_mm3(b) > 1.0] or [tri]
+        names: list[str] = []
+        if split and fname.lower().endswith(".3mf"):
+            # a 3MF already knows its objects (and their names): one body per object, no connectivity guessing
+            objs = [o for o in meshio.load_3mf_objects(data) if o.get("tri") is not None and len(o["tri"])]
+            bodies = [o["tri"] for o in objs]
+            names = [str(o.get("name") or "").strip() for o in objs]
+            if not bodies:
+                bodies = [meshio.load_mesh(fname, data)]
+        else:
+            tri = meshio.load_mesh(fname, data)
+            bodies = [tri]
+            if split and len(tri) < 400000:
+                bodies = meshio.split_bodies(tri)
+                bodies = [b for b in bodies if meshio.volume_mm3(b) > 1.0] or [tri]
         out = []
         for i, b in enumerate(bodies):
             blob = meshio.to_binary_stl_bytes(b) if (len(bodies) > 1 or not fname.lower().endswith(".stl")) else data
             sha = meshio.sha256_of(blob)
             ex = db.one("SELECT * FROM meshes WHERE sha256=?", [sha])
             if ex:
-                out.append(ex | {"bbox": loads(ex["bbox_json"], None)}); continue
-            name = fname if len(bodies) == 1 else f"{Path(fname).stem}_body{i + 1}.stl"
+                row = dict(ex) | {"bbox": loads(ex["bbox_json"], None), "existing": True}
+                if i < len(names) and names[i]:
+                    row["body_name"] = names[i]
+                out.append(row); continue
+            bname = names[i] if i < len(names) and names[i] else ""
+            name = fname if len(bodies) == 1 else (f"{re.sub(r'[^A-Za-z0-9._ -]+', '_', bname)}.stl" if bname else f"{Path(fname).stem}_body{i + 1}.stl")
             path = self.app.mesh_dir / f"{sha[:16]}_{re.sub(r'[^A-Za-z0-9._-]+', '_', name)}"
             if not path.suffix.lower() == ".stl":
                 path = path.with_suffix(".stl")
@@ -1003,8 +1018,64 @@ class Handler(BaseHTTPRequestHandler):
             mid = db.insert("meshes", {"sha256": sha, "filename": name, "path": str(path), "triangles": a["triangles"], "volume_mm3": a["volume_mm3"],
                                        "bbox_json": json.dumps(a["bbox"]), "watertight": 1 if a["watertight"] else 0, "bodies": a["bodies"], "created": now()})
             row = db.get("meshes", mid); row["bbox"] = a["bbox"]; row["units_scale_guess"] = a["units_scale_guess"]; row["area_mm2"] = a["area_mm2"]
+            if bname:
+                row["body_name"] = bname
             out.append(row)
         return {"meshes": out}
+
+    def _mesh_matches(self, rid: int, mesh_ids: list[int]) -> dict:
+        """For each uploaded body, which printed part of this robot it most likely replaces. Compared against each
+        part's current mesh by volume and sorted bounding-box dimensions (a re-export of the same part changes those
+        very little; a different part rarely agrees on all four), and by name when the body has one (3MF objects)."""
+        db = self.app.db
+        parts = db.q("SELECT p.id, p.mesh_id, li.description FROM printed_parts p JOIN line_items li ON li.id=p.line_item_id WHERE p.robot_id=? AND p.mesh_id IS NOT NULL", [rid])
+        cur = {}
+        for pt in parts:
+            m = db.get("meshes", pt["mesh_id"])
+            if m:
+                bb = loads(m["bbox_json"], None) or {}
+                cur[pt["id"]] = {"desc": pt["description"], "sha": m["sha256"], "vol": float(m["volume_mm3"] or 0), "dims": sorted(float(x) for x in (bb.get("size") or [0, 0, 0])), "fname": m["filename"]}
+
+        def norm(t):
+            return re.sub(r"[^a-z0-9]+", " ", str(t or "").lower().replace(".stl", "")).strip()
+
+        results = []
+        for mid in mesh_ids:
+            m = db.get("meshes", int(mid))
+            if not m:
+                continue
+            bb = loads(m["bbox_json"], None) or {}
+            vol = float(m["volume_mm3"] or 0); dims = sorted(float(x) for x in (bb.get("size") or [0, 0, 0]))
+            best = None
+            for pid, c in cur.items():
+                if c["sha"] == m["sha256"]:
+                    best = {"part_id": pid, "score": 1.0, "why": "identical file"}; break
+                dv = abs(vol - c["vol"]) / max(vol, c["vol"], 1e-9)
+                dd = max(abs(a - b) / max(a, b, 1e-9) for a, b in zip(dims, c["dims"])) if all(c["dims"]) else 1.0
+                geo = max(0.0, 1.0 - dv / 0.10) * max(0.0, 1.0 - dd / 0.10)      # 1 = same, 0 = >10 % volume or >10 % size off
+                name_hit = False
+                bn = norm(m.get("filename"))
+                for cand in (norm(c["desc"]), norm(c["fname"])):
+                    if bn and cand and (bn == cand or (len(bn) > 3 and bn in cand) or (len(cand) > 3 and cand in bn)):
+                        name_hit = True
+                score = max(geo, 0.9 if name_hit and geo > 0.2 else (0.6 if name_hit else 0.0))
+                if score > 0 and (best is None or score > best["score"]):
+                    best = {"part_id": pid, "score": round(score, 3), "why": ("same name" if name_hit else "") + (" · " if name_hit and geo > 0.5 else "") + (f"volume within {dv * 100:.1f}%, size within {dd * 100:.1f}%" if geo > 0.5 else "")}
+            results.append({"mesh_id": int(mid), "suggested": best if best and best["score"] >= 0.5 else None, "candidates": []})
+        # one part should not be suggested for two bodies: keep the better one
+        seen: dict[int, dict] = {}
+        for r_ in results:
+            sg = r_["suggested"]
+            if not sg:
+                continue
+            other = seen.get(sg["part_id"])
+            if other is None:
+                seen[sg["part_id"]] = r_
+            elif other["suggested"]["score"] >= sg["score"]:
+                r_["suggested"] = None
+            else:
+                other["suggested"] = None; seen[sg["part_id"]] = r_
+        return {"matches": results, "parts": [{"id": pid, "description": c["desc"], "volume_mm3": c["vol"], "filename": c["fname"]} for pid, c in cur.items()]}
 
     def _create_part(self, rid: int, b: dict) -> dict:
         db = self.app.db
