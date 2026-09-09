@@ -141,6 +141,73 @@ def cloud_folders() -> list[dict]:
     return out
 
 
+def data_folder_at(folder: Path) -> Path | None:
+    """The MakeWeight folder (the one holding data/<db>) that `folder` refers to, accepting the folder itself, its data/
+    subfolder, or a folder whose *single* child holds one. None when there is no database."""
+    try:
+        if _db_in(folder):
+            return folder
+        if folder.name.lower() == "data" and any((folder / n).exists() for n in _DB_FILES):
+            return folder.parent
+    except OSError:
+        return None
+    return None
+
+
+def find_data_folders(roots: list[Path], depth: int = 3, limit: int = 40) -> list[Path]:
+    """Folders under `roots` (a few levels deep) that hold MakeWeight data — for the "use a shared folder" dialog when the
+    typed path is not quite right. Hidden folders and very large trees are skipped."""
+    found: list[Path] = []
+    budget = [4000]
+
+    def walk(d: Path, lvl: int):
+        if budget[0] <= 0 or len(found) >= limit:
+            return
+        try:
+            kids = [k for k in d.iterdir() if k.is_dir() and not k.name.startswith(".")]
+        except OSError:
+            return
+        budget[0] -= len(kids)
+        if _db_in(d):
+            found.append(d)
+        if lvl >= depth:
+            return
+        for k in kids:
+            if k.name.lower() in ("node_modules", "library", "applications", "__pycache__", "work", "meshes", "backups", "logs"):
+                continue
+            walk(k, lvl + 1)
+
+    for r in roots:
+        if r.is_dir():
+            walk(r, 0)
+    return found
+
+
+def browse(path: str | None) -> dict:
+    """Folder listing for the picker: subfolders (with a flag for those holding MakeWeight data), parent, and whether the
+    folder itself holds data."""
+    home = Path.home()
+    p = Path(os.path.expanduser(path)).resolve() if path else home
+    if not p.is_dir():
+        raise ValueError(f"{p} is not a folder")
+    dirs = []
+    try:
+        for k in sorted(p.iterdir(), key=lambda x: x.name.lower()):
+            try:
+                if not k.is_dir() or k.name.startswith(".") or k.name.startswith("$"):
+                    continue
+                dirs.append({"name": k.name, "path": str(k), "has_data": data_folder_at(k) is not None})
+            except OSError:
+                continue
+            if len(dirs) >= 400:
+                break
+    except OSError as e:
+        raise ValueError(f"Cannot read {p}: {e}")
+    here = data_folder_at(p)
+    return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "dirs": dirs, "has_data": here is not None,
+            "data_folder": str(here) if here else None, "home": str(home)}
+
+
 def _db_in(folder: Path) -> Path | None:
     for n in _DB_FILES:
         if (folder / "data" / n).exists():

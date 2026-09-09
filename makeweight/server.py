@@ -578,6 +578,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"done": act["label"] if act else None, **app.undo.state()})
         if path == "data/relocate" and m == "POST":
             return self._json(self._relocate_data(self._jbody()))
+        if path == "data/browse" and m == "GET":
+            out = paths.browse(qs.get("path") or None)
+            if qs.get("scan"):
+                roots = [Path(c["path"]) for c in paths.cloud_folders()]
+                out["found"] = [str(f) for f in paths.find_data_folders(roots)]
+            return self._json(out)
         if path == "update/check" and m == "POST":
             try:
                 return self._json(app.updater.check())
@@ -1371,16 +1377,31 @@ class Handler(BaseHTTPRequestHandler):
         if mode == "local":
             target = app.local
         else:
-            raw = str(b.get("path") or "").strip()
+            raw = str(b.get("path") or "").strip().strip('"').strip("'").replace("\\ ", " ")
             if not raw:
                 raise ValueError("Choose a folder first.")
             target = Path(os.path.expanduser(raw))
             if not target.is_absolute():
                 raise ValueError("Give the full path of the folder (e.g. the MakeWeight folder inside your cloud drive).")
+            if not target.is_dir():
+                raise ValueError(f"There is no folder at {target} on this computer. Check the path — a cloud drive usually has a different path on each computer.")
+            # be forgiving about where inside the folder the user pointed: the data/ folder itself, or the folder above
+            hit = paths.data_folder_at(target)
+            if hit is not None:
+                target = hit
             if target.resolve() == app.local.resolve():
                 mode = "local"
         target_data = target / "data"
-        has_db = (target_data / paths.DB_FILE).exists() or (target_data / "slicebudget.db").exists()
+        has_db = paths.data_folder_at(target) is not None
+        if mode == "adopt" and not has_db:
+            near = paths.find_data_folders([target], depth=3, limit=6)
+            try:
+                names = sorted(k.name for k in target.iterdir() if not k.name.startswith("."))[:12]
+            except OSError:
+                names = []
+            hint = (" Found MakeWeight data in: " + "; ".join(str(x) for x in near) + " — use one of those.") if near else ""
+            inside = (f" That folder contains: {', '.join(names)}." if names else " That folder is empty.")
+            raise ValueError(f"No MakeWeight data in {target} (looked for data/{paths.DB_FILE}).{inside}{hint}")
         if mode == "move":
             if has_db and not b.get("overwrite"):
                 return {"needs_choice": True, "message": f"{target} already holds MakeWeight data. Use it (this computer's current data is kept as a backup) or replace it with this computer's data?"}
@@ -1389,9 +1410,8 @@ class Handler(BaseHTTPRequestHandler):
                 probe = target_data / ".write-test"; probe.write_text("ok"); probe.unlink()
             except OSError as e:
                 raise ValueError(f"Cannot write to {target}: {e}")
-        elif mode == "adopt":
-            if not has_db:
-                raise ValueError(f"{target} has no MakeWeight data yet — use “Move my data there” on the computer that has it.")
+        elif mode == "adopt" and not has_db:
+            raise ValueError(f"{target} has no MakeWeight data yet — use “Move my data there” on the computer that has it.")
         # stop writing: checkpoint and close the database, then copy
         log.info("data relocate: mode=%s target=%s", mode, target)
         app.restarting = True

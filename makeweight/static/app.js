@@ -2051,10 +2051,27 @@
   }
   function shareDataModal(st) {
     const d = st.data || {};
+    const sep = (p) => p.includes('\\') ? '\\' : '/';
     const path = input({ value: d.shared ? d.root : '', placeholder: 'full path of a folder inside your cloud drive', style: { width: '100%' } });
     const sugg = h('div', { class: 'tb', style: { flexWrap: 'wrap', marginTop: '6px' } });
-    for (const c of d.cloud_folders || []) sugg.append(h('button', { class: 'btn small', title: c.path, onClick: () => { path.value = c.path.replace(/[\\/]+$/, '') + (c.path.includes('\\') ? '\\' : '/') + 'MakeWeight'; } }, c.label));
+    for (const c of d.cloud_folders || []) sugg.append(h('button', { class: 'btn small', title: c.path, onClick: () => { browseTo(c.path); } }, c.label));
     const status = h('p', { class: 'hint' });
+    // folder picker: the browser cannot hand us a real path, so the app lists folders itself; ✓ marks one holding MakeWeight data
+    const list = h('div', { class: 'fbrowse' }), crumbs = h('div', { class: 'tb', style: { flexWrap: 'wrap', gap: '4px' } });
+    const found = h('div');
+    let cur = null;
+    const browseTo = async (p) => {
+      try {
+        const r = await api('GET', 'data/browse' + (p ? '?path=' + encodeURIComponent(p) : ''));
+        cur = r; path.value = r.data_folder || r.path;
+        crumbs.textContent = ''; list.textContent = '';
+        crumbs.append(h('button', { class: 'btn small', disabled: !r.parent, title: 'Up one level', onClick: () => browseTo(r.parent) }, '↑ Up'), h('span', { class: 'mono', style: { fontSize: '12px', wordBreak: 'break-all' } }, r.path), ...(r.has_data ? [h('span', { class: 'pill good' }, 'holds MakeWeight data')] : []));
+        if (!r.dirs.length) list.append(h('div', { class: 'row rng' }, 'No subfolders'));
+        for (const x of r.dirs) list.append(h('button', { class: 'row' + (x.has_data ? ' has' : ''), onClick: () => browseTo(x.path) }, h('span', { class: 'ic' }, x.has_data ? '✓' : '▸'), x.name, x.has_data ? h('span', { class: 'pill good', style: { marginLeft: 'auto' } }, 'MakeWeight data') : null));
+      } catch (e) { status.textContent = e.message; }
+    };
+    path.addEventListener('change', () => browseTo(path.value.trim()));
+    path.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); browseTo(path.value.trim()); } });
     const go = async (mode, extra = {}) => {
       status.textContent = 'Working…';
       try {
@@ -2069,10 +2086,19 @@
       } catch (e) { status.textContent = e.message; return false; }
     };
     modal('Share data between computers', h('div', null,
-      h('p', { class: 'hint', style: { marginTop: 0 } }, 'Pick a folder that your cloud drive syncs. On the first computer choose “Move my data there”; on every other computer point at the same folder and choose “Use the data already there”. Each computer keeps its own slicer install and caches.'),
-      field('Folder', path), (d.cloud_folders || []).length ? h('div', null, h('span', { class: 'rng' }, 'Cloud drives found on this computer — click to fill in:'), sugg) : h('p', { class: 'hint' }, 'No cloud-drive folder was detected automatically; type the path of one (it must already be syncing).'),
+      h('p', { class: 'hint', style: { marginTop: 0 } }, 'Pick a folder that your cloud drive syncs. On the first computer choose “Move my data there”; on every other computer point at the same folder and choose “Use the data already there”. The folder is the one that contains the app’s data folder (choosing the data folder itself works too). Each computer keeps its own slicer install and caches.'),
+      field('Folder', path),
+      (d.cloud_folders || []).length ? h('div', null, h('span', { class: 'rng' }, 'Cloud drives on this computer — click to open:'), sugg) : h('p', { class: 'hint' }, 'No cloud-drive folder was detected automatically; type the path of one (it must already be syncing).'),
+      found,
+      h('div', { class: 'fpick' }, crumbs, list),
       status),
-      [{ label: 'Cancel' }, { label: 'Use the data already there', onClick: () => go('adopt') }, { label: 'Move my data there', cls: 'primary', onClick: () => go('move') }], { width: '640px' });
+      [{ label: 'Cancel' }, { label: 'Use the data already there', onClick: () => go('adopt') }, { label: 'Move my data there', cls: 'primary', onClick: () => go('move') }], { width: '720px', enterSubmits: false });
+    browseTo(d.shared ? d.root : ((d.cloud_folders || [])[0] || {}).path || '');
+    // look through the cloud drives for folders that already hold MakeWeight data (another computer's "Move my data there")
+    api('GET', 'data/browse?scan=1').then(r => {
+      if (!r.found || !r.found.length) return;
+      found.append(h('div', { class: 'hint', style: { margin: '6px 0 0' } }, 'MakeWeight data found in your cloud drives: '), ...r.found.map(f => h('button', { class: 'btn small', style: { margin: '4px 4px 0 0' }, title: f, onClick: () => browseTo(f) }, '✓ ' + f.split(/[\\/]/).slice(-2).join(sep(f)))));
+    }).catch(() => { });
   }
   async function waitForNewVersion(sameVersion) {
     const was = S.state.version, wasRoot = (S.state.data || {}).root;

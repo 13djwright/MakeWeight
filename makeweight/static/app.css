@@ -357,3 +357,13 @@ table.assign-tbl tr.skipped td:nth-child(4){opacity:1}
 .bar:focus-visible{box-shadow:0 0 0 2px var(--accent-soft)}
 .bar i{transition:filter .1s}
 .bar:hover i:not(.lim):not(.mrg):hover{filter:brightness(1.15)}
+
+/* folder picker (share data dialog) */
+.fpick{border:1px solid var(--rule);border-radius:8px;margin-top:10px;overflow:hidden}
+.fpick > .tb{padding:6px 8px;background:var(--panel2);border-bottom:1px solid var(--rule)}
+.fbrowse{max-height:240px;overflow:auto}
+.fbrowse .row{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:6px 10px;border-bottom:1px solid var(--rule2);font-size:13px;color:var(--ink)}
+.fbrowse .row:hover{background:var(--panel2)}
+.fbrowse .row.has{color:var(--good);font-weight:600}
+.fbrowse .row .ic{width:14px;color:var(--ink3)}
+.fbrowse .row.has .ic{color:var(--good)}

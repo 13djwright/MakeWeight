@@ -35,8 +35,10 @@ to delete. Data from any earlier version (or an earlier name of the app) is adop
 ## Using it on more than one computer
 
 Jobs & setup → **Use a shared folder…**: pick a folder inside a cloud drive (iCloud Drive, OneDrive, Dropbox, Google
-Drive — the ones present on the machine are offered), choose **Move my data there** on the first computer and **Use the
-data already there** on each other one. Robots, filaments, profiles and weigh-ins are then read from and written to
+Drive — the ones present on the machine are offered, and the folder picker marks any folder that already holds MakeWeight
+data with a ✓). Choose **Move my data there** on the first computer and **Use the data already there** on each other one —
+point at the folder that contains `data/` (the drive has a different path on every computer, e.g.
+`~/Library/CloudStorage/GoogleDrive-…/My Drive/MakeWeight` on a Mac and `G:\My Drive\MakeWeight` on Windows). Robots, filaments, profiles and weigh-ins are then read from and written to
 that folder; the slicer install, caches and machine-specific settings stay on each computer. Close the app on one
 computer and let the drive finish syncing before opening it on another — a heartbeat file warns if two are open at
 once. **Stop sharing** copies the data back to the computer.
