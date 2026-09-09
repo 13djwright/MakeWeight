@@ -28,7 +28,7 @@ MAX_ACTIONS = 100
 
 _LABELS = [
     (r"^PUT items/\d+$", "edit line"), (r"^POST sections/\d+/items$", "add line"), (r"^DELETE items/\d+$", "delete line"),
-    (r"^POST items/\d+/weighins$", "weigh-in"), (r"^DELETE weighins/\d+$", "delete weigh-in"), (r"^PUT weighins/\d+$", "edit weigh-in"), (r"^POST items/\d+/move$", "move line"),
+    (r"^POST items/\d+/weighins$", "weigh-in"), (r"^DELETE weighins/\d+$", "delete weigh-in"), (r"^PUT weighins/\d+$", "edit weigh-in"), (r"^POST items/\d+/move$", "move line"), (r"^POST robots/\d+/reorder$", "rearrange lines"),
     (r"^PUT parts/\d+$", "edit part"), (r"^DELETE parts/\d+$", "delete part"), (r"^POST parts/\d+/(auto_orient|lay_on_face|rotate|preset)$", "change orientation"),
     (r"^POST parts/\d+/mirror_copy$", "mirror copy"), (r"^POST robots/\d+/parts$", "add part"), (r"^POST robots/\d+/import3mf$", "import 3MF"),
     (r"^PUT sections/\d+$", "edit section"), (r"^POST robots/\d+/sections$", "add section"), (r"^DELETE sections/\d+$", "delete section"),

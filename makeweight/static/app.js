@@ -616,19 +616,75 @@
       stat('Printed parts', fmt(t.printed), `g · ${t.best_known ? Math.round(t.printed / t.best_known * 100) : 0}%`, h('div', { class: 'hint' }, `budget for printed parts: ${fmt(t.printed_budget)} g`)),
       stat('Flags', String(t.flags), '', h('div', { class: 'hint' }, 'need re-weigh'))));
 
-    const tbl = h('table', { class: 'sheet', dataset: { tkey: 'sheet' } }, h('thead', null, h('tr', null, h('th', { class: 'num qty' }, 'Qty'), h('th', null, 'Description'), h('th', null, 'Purpose / notes'), h('th', { class: 'num' }, 'Estimated'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Best'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Status'), h('th', null, ''), h('th', null, ''))));
+    const tbl = h('table', { class: 'sheet', dataset: { tkey: 'sheet2' } }, h('thead', null, h('tr', null, h('th', { class: 'grip nosort' }, ''), h('th', { class: 'num qty' }, 'Qty'), h('th', null, 'Description'), h('th', null, 'Purpose / notes'), h('th', { class: 'num' }, 'Estimated'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Best'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Status'), h('th', null, ''), h('th', null, ''))));
     const tb = h('tbody'); tbl.append(tb);
     for (const s of r.sections) {
-      tb.append(h('tr', { class: 'sec-h', dataset: { key: 's' + s.id } }, h('td', { colspan: 6 }, s.name, !s.counts && h('span', { class: 'off' }, 'not counted toward weigh-in')),
+      tb.append(h('tr', { class: 'sec-h', dataset: { key: 's' + s.id, sid: s.id } }, h('td', { class: 'grip' }, h('span', { class: 'dragh', title: 'Drag to move this section' }, '⋮⋮')), h('td', { colspan: 6 }, s.name, !s.counts && h('span', { class: 'off' }, 'not counted toward weigh-in')),
         h('td', { class: 'num' }, s.counts ? fmt(s.subtotal) : `(${fmt(s.subtotal)})`), h('td', { colspan: 3 }),
         h('td', null, h('button', { class: 'btn icon', title: 'Section menu', onClick: e => sectionMenu(e.currentTarget, s) }, '⋯'))));
       for (const it of s.items) tb.append(lineRow(it, s));
       tb.append(newLineRow(s));
     }
-    tb.append(h('tr', { class: 'sum', dataset: { key: 'sum' } }, h('td'), h('td', null, 'Weigh-in total'), h('td'), h('td', { class: 'num' }, fmt(t.estimated_only)), h('td'), h('td'), h('td', { class: 'num' }, fmt(t.best_known)), h('td', { class: 'num' }, money(r.sections.reduce((a, s) => a + s.items.reduce((b, i) => b + (i.price || 0) * (i.qty || 0), 0), 0))), h('td', { colspan: 3 })));
+    tb.append(h('tr', { class: 'sum', dataset: { key: 'sum' } }, h('td'), h('td'), h('td', null, 'Weigh-in total'), h('td'), h('td', { class: 'num' }, fmt(t.estimated_only)), h('td'), h('td'), h('td', { class: 'num' }, fmt(t.best_known)), h('td', { class: 'num' }, money(r.sections.reduce((a, s) => a + s.items.reduce((b, i) => b + (i.price || 0) * (i.qty || 0), 0), 0))), h('td', { colspan: 3 })));
     m.append(h('div', { class: 'tw' }, tbl));
-    m.append(h('p', { class: 'hint' }, 'Greyed-out lines are not in the weight total: they are excluded by hand (“not in total” — click the pill to include), not part of the selected configuration (click the pill to change), or in a section that does not count. Cells with a text cursor (and a ✎ on hover) edit in place — Enter saves, Esc cancels; buttons ending in “…” open a dialog. Red dot = needs re-weigh (set automatically when a profile, mesh or library weight changes after a measurement). Grey rows are excluded from the total (e.g. an assembly line supersedes them).'));
+    enableSheetDrag(tbl, r);
+    m.append(h('p', { class: 'hint' }, 'Drag the ⋮⋮ handle to move a line (also into another section) or a whole section. Greyed-out lines are not in the weight total: they are excluded by hand (“not in total” — click the pill to include), not part of the selected configuration (click the pill to change), or in a section that does not count. Cells with a text cursor (and a ✎ on hover) edit in place — Enter saves, Esc cancels; buttons ending in “…” open a dialog. Red dot = needs re-weigh (set automatically when a profile, mesh or library weight changes after a measurement). Grey rows are excluded from the total (e.g. an assembly line supersedes them).'));
   };
+  // ---- drag to rearrange: lines within/between sections, and whole sections. Native HTML5 drag from the ⋮⋮ handle; a
+  // marker row shows where the drop lands; the new order is sent in one request (one undo step).
+  function enableSheetDrag(tbl, r) {
+    const tb = tbl.tBodies[0]; if (!tb) return;
+    const marker = h('tr', { class: 'dropmark nosort' }, h('td', { colspan: 99 }));
+    let dragging = null, block = null;      // block: the section's rows when a section header is dragged
+    const rowsOf = secRow => { const out = [secRow]; for (let n = secRow.nextElementSibling; n && !n.classList.contains('sec-h') && !n.classList.contains('sum'); n = n.nextElementSibling) out.push(n); return out; };
+    tb.addEventListener('mousedown', e => { const g = e.target.closest('.dragh'); if (!g) return; const tr = g.closest('tr'); tr.draggable = true; dragging = tr; });
+    tb.addEventListener('dragstart', e => {
+      if (!dragging) { e.preventDefault(); return; }
+      e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragging.dataset.key);
+      block = dragging.classList.contains('sec-h') ? rowsOf(dragging) : [dragging];
+      setTimeout(() => block.forEach(x => x.classList.add('dragging')), 0);
+    });
+    tb.addEventListener('dragover', e => {
+      if (!dragging) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+      const tr = e.target.closest('tr'); if (!tr || tr === marker || block.includes(tr)) return;
+      const rect = tr.getBoundingClientRect(), lower = e.clientY > rect.top + rect.height / 2;
+      if (dragging.classList.contains('sec-h')) {
+        // sections only land on section boundaries: before the hovered section, or after the last one
+        let target = tr.classList.contains('sec-h') ? tr : null;
+        if (!target) { let n = tr; while (n && !n.classList.contains('sec-h')) n = n.previousElementSibling; target = lower ? (n ? rowsOf(n).at(-1).nextElementSibling : null) : n; }
+        else if (lower) target = rowsOf(tr).at(-1).nextElementSibling;
+        if (target) tb.insertBefore(marker, target); else tb.insertBefore(marker, tb.querySelector('tr.sum'));
+        return;
+      }
+      if (tr.classList.contains('sum')) { tb.insertBefore(marker, tr); return; }
+      if (tr.classList.contains('sec-h')) { if (lower || !tr.previousElementSibling) tb.insertBefore(marker, tr.nextElementSibling); else tb.insertBefore(marker, tr); return; }
+      if (tr.classList.contains('new-row') && lower) { tb.insertBefore(marker, tr.nextElementSibling); return; }
+      tb.insertBefore(marker, lower ? tr.nextElementSibling : tr);
+    });
+    tb.addEventListener('dragleave', e => { if (!tb.contains(e.relatedTarget)) marker.remove(); });
+    const end = () => { marker.remove(); if (block) block.forEach(x => x.classList.remove('dragging')); if (dragging) dragging.draggable = false; dragging = null; block = null; };
+    tb.addEventListener('dragend', end);
+    tb.addEventListener('drop', async e => {
+      e.preventDefault();
+      if (!dragging || !marker.parentNode) { end(); return; }
+      const moving = block.slice();
+      for (const x of moving) tb.insertBefore(x, marker);
+      marker.remove();
+      // read the new order back from the DOM
+      const items = [], sections = []; let sec = null, ord = 0, sord = 0;
+      for (const row of tb.rows) {
+        if (row.classList.contains('sec-h')) { sec = +row.dataset.sid; sections.push({ id: sec, ord: sord++ }); ord = 0; continue; }
+        if (row.dataset.iid && sec != null) items.push({ id: +row.dataset.iid, section_id: sec, ord: ord++ });
+      }
+      // only what changed
+      const before = {}; (S.robot || r).sections.forEach((s, si) => { s.items.forEach((it, i) => { before['i' + it.id] = `${s.id}/${i}`; }); before['s' + s.id] = String(si); });
+      const body = { items: items.filter(x => before['i' + x.id] !== `${x.section_id}/${x.ord}`), sections: sections.filter(x => before['s' + x.id] !== String(x.ord)) };
+      end();
+      if (!body.items.length && !body.sections.length) return;
+      try { await api('POST', `robots/${S.robotId || r.id}/reorder`, body, { label: 'rearrange lines' }); await refreshRobot(); } catch (err) { fail(err); }
+    });
+  }
   // ---- configurations (loadouts): the same robot with different armour / weapon for different opponents
   const cfgName = (r, id) => ((r.configs || []).find(c => c.id === id) || {}).name || '?';
   async function setActiveConfig(id) { await api('PUT', `robots/${S.robotId}`, { active_config: id }, { label: 'switch configuration' }); await refreshRobot(); }
@@ -713,7 +769,8 @@
     const upd = (patch) => api('PUT', `items/${it.id}`, patch).then(refreshRobot);
     const p = it.part;
     const r = S.robot;
-    const tr = h('tr', { class: (!it.in_total && s.counts ? 'dim ' : '') + (p && p.locked ? 'locked' : ''), dataset: { key: 'i' + it.id } });
+    const tr = h('tr', { class: (!it.in_total && s.counts ? 'dim ' : '') + (p && p.locked ? 'locked' : ''), dataset: { key: 'i' + it.id, iid: it.id } });
+    tr.append(h('td', { class: 'grip' }, h('span', { class: 'dragh', title: 'Drag to move this line' }, '⋮⋮')));
     tr.append(edCell(it.qty, v => upd({ qty: v }), { type: 'number', cls: 'num qty', fmt: v => Number(v) % 1 ? v : String(v) }));
     // description
     const descCell = edCell(it.description, v => upd({ description: v }), { render: v => h('span', null, v || h('i', { style: { color: 'var(--ink3)' } }, 'untitled'), p && p.locked && h('span', { class: 'pill lock', style: { marginLeft: '6px' } }, '🔒'),
@@ -762,8 +819,8 @@
     }
     desc.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
     est.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
-    const tr = h('tr', { class: 'new-row nosort', dataset: { key: 'n' + s.id } },
-      h('td', { class: 'num qty' }, qty), h('td', null, desc), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
+    const tr = h('tr', { class: 'new-row nosort', dataset: { key: 'n' + s.id, sid: s.id } },
+      h('td', { class: 'grip' }), h('td', { class: 'num qty' }, qty), h('td', null, desc), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
       h('td', { colspan: 6, class: 'rng' }, 'Enter adds the line · more fields via ⋯ after adding'),
       h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'Add with all fields…', 'aria-label': 'Add a line with all fields', onClick: () => addLineModal(s.id) }, '⋯')));
     if (S.cache.focusNewLine === s.id) { S.cache.focusNewLine = null; setTimeout(() => desc.focus(), 30); }
@@ -1809,7 +1866,8 @@
             { label: 'Duplicate…', onClick: () => compModal(c, { duplicate: true }) },
             c.kind === 'fastener' && c.specs && { label: 'Estimate weight from specs', onClick: async () => { const g = fastenerEstimate(c.specs); if (g == null) return toast('Need at least a thread size and length', true); await api('PUT', `components/${c.id}`, { grams: +g.toFixed(3), grams_source: 'estimated', propagate: true }); render(); } },
             S.robot && { label: `Add to ${S.robot.name}`, onClick: () => fromLibraryModal() },
-            '-', { label: 'Delete', cls: 'danger', onClick: () => confirmModal(`Delete “${c.name}” from the library? Robot lines keep their values.`, async () => { await api('DELETE', `components/${c.id}`); render(); }) }].filter(Boolean)) }, '⋯')))))));
+            '-', { label: 'Delete', cls: 'danger', onClick: () => confirmModal(`Delete “${c.name}” from the library? Robot lines keep their values.`, async () => { await api('DELETE', `components/${c.id}`); render(); }) }].filter(Boolean)) }, '⋯'),
+            h('button', { class: 'btn icon del', title: c.uses ? `Delete from the library (used on ${c.uses} robot line${c.uses === 1 ? '' : 's'} — those keep their values; undo with Ctrl/⌘+Z)` : 'Delete from the library (undo with Ctrl/⌘+Z)', 'aria-label': 'Delete component', onClick: async () => { try { await api('DELETE', `components/${c.id}`); const i = comps.indexOf(c); if (i >= 0) comps.splice(i, 1); draw(); toastUndo(`Deleted “${c.name}”`); } catch (e) { fail(e); } } }, '✕')))))));
       if (!rows.length) tw.append(h('p', { class: 'empty' }, 'Nothing matches.'));
     };
     search.addEventListener('input', () => { st.q = search.value; S.cache.libq = st.q; draw(); });

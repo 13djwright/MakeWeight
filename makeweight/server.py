@@ -671,6 +671,19 @@ class Handler(BaseHTTPRequestHandler):
                 n = db.one("SELECT COALESCE(MAX(ord),-1)+1 o FROM sections WHERE robot_id=?", [rid])["o"]
                 sid = db.insert("sections", {"robot_id": rid, "name": b.get("name") or "Section", "ord": n, "counts": 1 if b.get("counts", True) else 0})
                 return self._json(db.get("sections", sid))
+            if sub == "reorder" and m == "POST":
+                # drag-and-drop on the sheet: new section + position for every line that moved, new order for sections
+                b = self._jbody()
+                own_secs = {x["id"] for x in db.q("SELECT id FROM sections WHERE robot_id=?", [rid])}
+                for it in b.get("items") or []:
+                    if int(it["section_id"]) in own_secs:
+                        db.update("line_items", int(it["id"]), {"section_id": int(it["section_id"]), "ord": int(it["ord"])})
+                for sc in b.get("sections") or []:
+                    if int(sc["id"]) in own_secs:
+                        db.update("sections", int(sc["id"]), {"ord": int(sc["ord"])})
+                db.update("robots", rid, {"updated": now()})
+                app.events.emit("robot", {"robot_id": rid})
+                return self._json(app.robot_detail(rid))
             if sub == "weighin" and m == "POST":
                 b = self._jbody(); det = app.robot_detail(rid)
                 run_id = db.insert("runs", {"robot_id": rid, "kind": "weigh-in", "date": now(), "name": "Whole-robot weigh-in",

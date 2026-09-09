@@ -381,3 +381,12 @@ table.libtbl td.cname{min-width:220px;max-width:340px}
 .cdlg .grid2 .field{grid-template-columns:88px 1fr}
 .cdlg .field label{white-space:nowrap}
 input.bad{border-color:var(--bad);box-shadow:0 0 0 2px var(--bad-soft)}
+
+/* drag to rearrange (weight sheet) */
+table.sheet th.grip,table.sheet td.grip{width:18px;min-width:18px;padding:0 2px;text-align:center}
+.dragh{display:inline-block;cursor:grab;color:var(--ink3);opacity:.35;font-size:12px;letter-spacing:-2px;user-select:none;padding:4px 2px}
+tr:hover .dragh{opacity:1}
+.dragh:active{cursor:grabbing}
+tr.dragging td{opacity:.35}
+tr.dropmark td{padding:0;height:0;border:0;border-top:2px solid var(--accent);background:transparent}
+tr.sec-h .dragh{color:var(--ink3)}
