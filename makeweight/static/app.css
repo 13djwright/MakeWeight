@@ -367,3 +367,9 @@ table.assign-tbl tr.skipped td:nth-child(4){opacity:1}
 .fbrowse .row.has{color:var(--good);font-weight:600}
 .fbrowse .row .ic{width:14px;color:var(--ink3)}
 .fbrowse .row.has .ic{color:var(--good)}
+
+/* component library */
+td.specs{font-size:12px;color:var(--ink2);min-width:230px}
+table.libtbl td.cname{min-width:220px;max-width:340px}
+.specform .field{margin-bottom:6px}
+.specform{padding:8px 10px 2px;border:1px solid var(--rule);border-radius:8px;background:var(--panel2);margin-bottom:8px}

@@ -921,8 +921,8 @@
     const draw = () => {
       const q = search.value.toLowerCase(); list.textContent = '';
       const tb = h('tbody');
-      for (const c of comps.filter(c => !q || (c.name + ' ' + (c.category || '')).toLowerCase().includes(q)).slice(0, 200)) {
-        tb.append(h('tr', { class: chosen === c ? 'sel' : '', style: { cursor: 'pointer' }, onClick: () => { chosen = c; draw(); } }, h('td', null, c.name, h('span', { class: 'sub' }, c.category || '')), h('td', { class: 'num' }, fmt(c.grams, 2)), h('td', null, h('span', { class: 'pill ' + (c.grams_source === 'measured' ? 'mea' : 'auto') }, c.grams_source || '')), h('td', { class: 'num' }, money(c.price))));
+      for (const c of comps.filter(c => !q || (c.name + ' ' + (c.category || '') + ' ' + (c.part_number || '') + ' ' + fastenerSpecText(c.specs)).toLowerCase().includes(q)).slice(0, 200)) {
+        tb.append(h('tr', { class: chosen === c ? 'sel' : '', style: { cursor: 'pointer' }, onClick: () => { chosen = c; draw(); } }, h('td', null, c.name, h('span', { class: 'sub' }, [c.category, c.part_number, c.kind === 'fastener' ? fastenerSpecText(c.specs) : ''].filter(Boolean).join(' · '))), h('td', { class: 'num' }, fmt(c.grams, 2)), h('td', null, h('span', { class: 'pill ' + (c.grams_source === 'measured' ? 'mea' : c.grams_source === 'estimated' ? 'est' : 'auto') }, c.grams_source || '')), h('td', { class: 'num' }, money(c.price))));
       }
       list.append(h('table', null, tb));
     };
@@ -1643,33 +1643,155 @@
   };
 
   // ---------------------------------------------------------------- library
+  // ---------------------------------------------------------------- fasteners: specs, labels, weight estimates
+  // A component can be "generic" (name + weight) or a "fastener" with McMaster-style structured attributes. The label is
+  // built from the attributes so every screw is named the same way, and the weight can be estimated from the geometry
+  // when the scale is not at hand (marked "estimated" until a weigh-in replaces it).
+  const FT = {
+    types: [['screw', 'Screw / bolt'], ['nut', 'Nut'], ['washer', 'Washer'], ['standoff', 'Standoff / spacer'], ['insert', 'Threaded insert'], ['other', 'Other hardware']],
+    heads: ['socket head', 'low-profile socket head', 'button head', 'flat head (countersunk)', 'pan head', 'hex head', 'cheese head', 'set screw', 'shoulder', 'thumb', 'wafer head'],
+    drives: ['hex (Allen)', 'Torx', 'Phillips', 'slotted', 'external hex', 'none'],
+    materials: ['alloy steel', '18-8 stainless steel', '316 stainless steel', 'grade 5 titanium', 'aluminum', 'brass', 'nylon', 'zinc-plated steel', 'grade 8 steel'],
+    finishes: ['black oxide', 'plain', 'zinc plated', 'passivated', 'anodized', 'nickel plated'],
+    nutTypes: ['hex nut', 'nylon-insert lock nut', 'thin hex nut', 'flange nut', 'square nut', 'wing nut', 'cap nut', 'heat-set insert'],
+    washerTypes: ['flat washer', 'split lock washer', 'fender washer', 'wave washer', 'thin flat washer'],
+    metric: ['M1.6', 'M2', 'M2.5', 'M3', 'M4', 'M5', 'M6', 'M8', 'M10'],
+    imperial: ['#2-56', '#4-40', '#6-32', '#8-32', '#10-24', '#10-32', '1/4"-20', '1/4"-28', '5/16"-18', '3/8"-16'],
+    density: { 'alloy steel': 7.85, '18-8 stainless steel': 7.9, '316 stainless steel': 8.0, 'grade 8 steel': 7.85, 'zinc-plated steel': 7.85, 'grade 5 titanium': 4.43, 'aluminum': 2.7, 'brass': 8.5, 'nylon': 1.15 },
+  };
+  // major diameter in mm for a thread string ("M3", "M3x0.5", "#6-32", '1/4"-20', "1/4-20")
+  function threadDia(t) {
+    if (!t) return null; t = String(t).trim();
+    let m = t.match(/^M\s*(\d+(?:\.\d+)?)/i); if (m) return parseFloat(m[1]);
+    m = t.match(/^#\s*(\d+)/); if (m) { const n = +m[1]; return (0.060 + 0.013 * n) * 25.4; }
+    m = t.match(/^(\d+)\s*\/\s*(\d+)/); if (m) return (+m[1] / +m[2]) * 25.4;
+    m = t.match(/^(\d*\.\d+)\s*"?/); if (m) return parseFloat(m[1]) * 25.4;
+    return null;
+  }
+  const lenMm = sp => sp.length == null || sp.length === '' ? null : (+sp.length) * (sp.length_unit === 'in' ? 25.4 : 1);
+  const lenTxt = sp => sp.length == null || sp.length === '' ? '' : (sp.length_unit === 'in' ? `${sp.length}"` : `${sp.length} mm`);
+  function fastenerLabel(sp) {
+    if (!sp) return '';
+    const th = sp.thread || '', mat = [sp.material, sp.finish].filter(Boolean).join(' ');
+    const tail = mat ? `, ${mat}` : '';
+    switch (sp.type) {
+      case 'nut': return `${th} ${sp.nut_type || 'nut'}${tail}`.trim();
+      case 'washer': return `${th} ${sp.washer_type || 'washer'}${sp.od ? ` ${sp.od} mm OD` : ''}${tail}`.trim();
+      case 'standoff': return `${th} × ${lenTxt(sp)} ${sp.shape || 'hex'} standoff${sp.gender ? ` (${sp.gender})` : ''}${tail}`.trim();
+      case 'insert': return `${th} ${sp.nut_type || 'threaded insert'}${sp.length ? ` × ${lenTxt(sp)}` : ''}${tail}`.trim();
+      case 'other': return `${th}${sp.length ? ` × ${lenTxt(sp)}` : ''} ${sp.head || ''}${tail}`.trim();
+      default: { const drv = sp.drive && sp.drive !== 'none' && !/hex \(Allen\)/.test(sp.drive) ? ` ${sp.drive}` : ''; return `${th} × ${lenTxt(sp)} ${sp.head || 'screw'}${drv}${sp.thread_type === 'partial' ? ', partially threaded' : ''}${tail}`.trim(); }
+    }
+  }
+  function fastenerSpecText(sp) {
+    if (!sp) return '';
+    const bits = [];
+    if (sp.thread) bits.push(sp.thread + (sp.pitch ? ` × ${sp.pitch}` : ''));
+    if (sp.length !== '' && sp.length != null) bits.push(lenTxt(sp));
+    if (sp.type === 'nut') bits.push(sp.nut_type || 'nut'); else if (sp.type === 'washer') bits.push(sp.washer_type || 'washer'); else if (sp.type === 'standoff') bits.push('standoff'); else if (sp.type === 'insert') bits.push('insert'); else if (sp.head) bits.push(sp.head);
+    if (sp.drive && sp.drive !== 'none' && sp.type === 'screw') bits.push(sp.drive);
+    if (sp.material) bits.push(sp.material); if (sp.finish) bits.push(sp.finish); if (sp.grade) bits.push(sp.grade);
+    if (sp.head_dia) bits.push(`head ⌀${sp.head_dia}`); if (sp.head_height) bits.push(`head h ${sp.head_height}`);
+    if (sp.od) bits.push(`OD ${sp.od}`); if (sp.thickness) bits.push(`t ${sp.thickness}`); if (sp.across_flats) bits.push(`${sp.across_flats} mm AF`);
+    return bits.join(' · ');
+  }
+  // Rough mass from geometry: thread shank as a cylinder at ~82 % of the major diameter's area (thread relief), head from
+  // ISO 4762 / 7380 / 10642 style proportions, nuts as a hex prism minus the bore, washers as an annulus. ±15 % is typical.
+  function fastenerEstimate(sp) {
+    const d = threadDia(sp.thread); if (!d) return null;
+    const rho = FT.density[sp.material] || 7.85, L = lenMm(sp);
+    const cyl = (dia, hgt) => Math.PI * (dia / 2) ** 2 * hgt;
+    let v = 0;
+    if (sp.type === 'screw' || sp.type === 'other' || sp.type === 'standoff') {
+      if (L == null) return null;
+      if (sp.type === 'standoff') {
+        const af = +sp.across_flats || 1.7 * d + 0.5; const area = sp.shape === 'round' ? Math.PI * (af / 2) ** 2 : 0.866 * af * af;
+        v = area * L - cyl(d * 0.85, L) * (sp.gender === 'female-female' || !sp.gender ? 1 : 0.5);
+        if (sp.gender === 'male-female' || sp.gender === 'male-male') v += cyl(d, (sp.gender === 'male-male' ? 2 : 1) * 1.5 * d) * 0.82;
+        return Math.max(0.01, v * rho / 1000);
+      }
+      v = cyl(d, L) * 0.86;
+      const head = (sp.head || 'socket head').toLowerCase();
+      let dk = +sp.head_dia || 0, k = +sp.head_height || 0, solid = 1;
+      if (/set screw/.test(head)) { dk = 0; k = 0; v -= cyl(d * 0.5, Math.min(L, d)); }
+      else if (/low-profile/.test(head)) { dk = dk || 1.5 * d + 1; k = k || 0.6 * d; solid = 0.7; }
+      else if (/socket|cheese|shoulder/.test(head)) { dk = dk || 1.5 * d + 1; k = k || d; solid = 0.78; }
+      else if (/button/.test(head)) { dk = dk || 1.75 * d + 0.5; k = k || 0.55 * d; solid = 0.6; }
+      else if (/flat|countersunk/.test(head)) { dk = dk || 2.2 * d; k = k || 0.6 * d; solid = 0.45; }
+      else if (/pan|wafer|thumb/.test(head)) { dk = dk || 2 * d; k = k || 0.6 * d; solid = 0.7; }
+      else if (/hex/.test(head)) { dk = dk || 1.7 * d; k = k || 0.7 * d; solid = 0.85; }
+      else { dk = dk || 1.5 * d + 1; k = k || d; solid = 0.78; }
+      v += cyl(dk, k) * solid;
+    } else if (sp.type === 'nut' || sp.type === 'insert') {
+      const af = +sp.across_flats || (1.6 * d + 0.9), m = +sp.thickness || (/lock|nylon/.test(sp.nut_type || '') ? 1.0 * d : /thin/.test(sp.nut_type || '') ? 0.5 * d : 0.8 * d);
+      v = (0.866 * af * af - cyl(d * 0.85, 1)) * m;
+      if (/nylon/.test(sp.nut_type || '')) v *= 0.9;
+      if (sp.type === 'insert') { const od = +sp.od || 1.6 * d; v = (cyl(od, L || 1.5 * d) - cyl(d * 0.85, L || 1.5 * d)) * 0.95; }
+    } else if (sp.type === 'washer') {
+      const od = +sp.od || 2.2 * d, id = +sp.id || d + 0.3, t = +sp.thickness || Math.max(0.3, 0.2 * d);
+      v = (cyl(od, t) - cyl(id, t)) * (/split|wave/.test(sp.washer_type || '') ? 0.8 : 1);
+    }
+    return v > 0 ? v * rho / 1000 : null;
+  }
+  // "M3x12", "M3 × 12 mm", "#6-32 x 3/8"", "3/8" 6-32 Screw" → {thread, length, length_unit}; used when an old plain
+  // component is switched to a fastener so the specs start filled in
+  function parseFastenerName(name) {
+    const out = {}; const n = String(name || '');
+    let m = n.match(/\bM\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)/i);
+    if (m) { out.thread = 'M' + m[1]; out.length = parseFloat(m[2]); out.length_unit = 'mm'; }
+    else { m = n.match(/\bM\s*(\d+(?:\.\d+)?)\b/i); if (m) out.thread = 'M' + m[1]; }
+    const frac = str => { const f = str.match(/(\d+)\s*\/\s*(\d+)/); if (f) return +f[1] / +f[2]; const d = str.match(/(\d*\.\d+|\d+)/); return d ? parseFloat(d[1]) : null; };
+    m = n.match(/#\s*(\d+)\s*-\s*(\d+)/); if (m) out.thread = `#${m[1]}-${m[2]}`;
+    if (!out.thread) { m = n.match(/(\d+\s*\/\s*\d+)"?\s*-\s*(\d+)/); if (m) out.thread = `${m[1].replace(/\s/g, '')}"-${m[2]}`; }
+    if (!out.thread) { m = n.match(/\b(\d{1,2})-(\d{2})\b/); if (m && +m[1] <= 12) out.thread = `#${m[1]}-${m[2]}`; }
+    if (!out.thread) { m = n.match(/#\s*(\d{1,2})\b/); if (m) out.thread = `#${m[1]}`; }
+    m = out.length == null && (n.match(/[x×]\s*(\d+\s*\/\s*\d+|\d*\.\d+|\d+)\s*(in|"|″)/i) || n.match(/(\d+\s*\/\s*\d+|\d*\.\d+)\s*(in|"|″)/i));
+    if (m) { const L = frac(m[1]); if (L) { out.length = L; out.length_unit = 'in'; } }
+    else if (out.length == null) { m = n.match(/[x×]\s*(\d+(?:\.\d+)?)\s*(mm)?\b/i); if (m && out.thread) { out.length = parseFloat(m[1]); out.length_unit = 'mm'; } }
+    if (/washer/i.test(n)) out.type = 'washer'; else if (/nut\b/i.test(n)) out.type = 'nut'; else if (/standoff|spacer/i.test(n)) out.type = 'standoff'; else if (/insert/i.test(n)) out.type = 'insert';
+    if (/socket/i.test(n)) out.head = 'socket head'; else if (/button/i.test(n)) out.head = 'button head'; else if (/flat head|countersunk/i.test(n)) out.head = 'flat head (countersunk)'; else if (/pan/i.test(n)) out.head = 'pan head'; else if (/hex head/i.test(n)) out.head = 'hex head';
+    if (/stainless/i.test(n)) out.material = '18-8 stainless steel'; else if (/titanium|\bTi\b/i.test(n)) out.material = 'grade 5 titanium'; else if (/alumin/i.test(n)) out.material = 'aluminum'; else if (/nylon/i.test(n)) out.material = 'nylon';
+    return out;
+  }
+  const specSort = c => { const sp = c.specs || {}; return [threadDia(sp.thread) || 0, lenMm(sp) || 0]; };
+
   V.library = async function (m) {
     const comps = await api('GET', 'components');
     const cats = [...new Set(comps.map(c => c.category || 'Other'))].sort();
     S.cache.cats = cats; catDatalist(cats);
     const st = { q: S.cache.libq || '', cat: S.cache.libcat || '' };
-    const search = input({ class: 'search', placeholder: 'Search…', value: st.q });
-    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Component library'), h('p', null, 'Shared across robots. Measured weights here propagate to every robot that uses the part.')),
-      h('div', { class: 'tb' }, search, h('button', { class: 'btn primary', onClick: () => compModal() }, '＋ Component…'))));
+    const search = input({ class: 'search', placeholder: 'Search name, specs, part number…', value: st.q });
+    m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Component library'), h('p', null, 'Shared across robots. Measured weights here propagate to every robot that uses the part. Fasteners carry McMaster-style specs, get a consistent label from them, and can be duplicated to make the next length in one step.')),
+      h('div', { class: 'tb' }, search, h('button', { class: 'btn', onClick: () => compModal({ kind: 'fastener', specs: { type: 'screw', length_unit: 'mm', head: 'socket head', drive: 'hex (Allen)', material: 'alloy steel', finish: 'black oxide' }, category: 'Fasteners' }, { isNew: true }) }, '＋ Fastener…'), h('button', { class: 'btn primary', onClick: () => compModal() }, '＋ Component…'))));
     const tabs = h('div', { class: 'sub-tabs' });
     const tw = h('div', { class: 'tw' });
+    const srcPill = c => h('span', { class: 'pill ' + (c.grams_source === 'measured' ? 'mea' : c.grams_source === 'estimated' ? 'est' : 'auto'), title: c.grams_source === 'estimated' ? 'Estimated from the specs — weigh a few to replace it' : '' }, c.grams_source || 'manual');
     const draw = () => {
       tabs.textContent = '';
       for (const [k, l] of [['', `All ${comps.length}`], ...cats.map(c => [c, `${c} ${comps.filter(x => (x.category || 'Other') === c).length}`])]) tabs.append(h('button', { 'aria-pressed': String(st.cat === k), onClick: () => { st.cat = k; S.cache.libcat = k; draw(); } }, l));
       const q = st.q.toLowerCase();
-      const rows = comps.filter(c => (!st.cat || (c.category || 'Other') === st.cat) && (!q || (c.name + ' ' + (c.category || '') + ' ' + (c.vendor || '')).toLowerCase().includes(q)));
+      let rows = comps.filter(c => (!st.cat || (c.category || 'Other') === st.cat) && (!q || (c.name + ' ' + (c.category || '') + ' ' + (c.vendor || '') + ' ' + (c.part_number || '') + ' ' + fastenerSpecText(c.specs) + ' ' + (c.notes || '')).toLowerCase().includes(q)));
+      // fasteners in thread-then-length order within their category, everything else by name
+      rows = rows.slice().sort((a, b) => (a.category || 'Other').localeCompare(b.category || 'Other') || ((a.kind === 'fastener') && (b.kind === 'fastener') ? (specSort(a)[0] - specSort(b)[0] || specSort(a)[1] - specSort(b)[1]) : 0) || a.name.localeCompare(b.name, undefined, { numeric: true }));
       tw.textContent = '';
-      tw.append(h('table', { dataset: { tkey: 'lib-components' } }, h('thead', null, h('tr', null, h('th', null, 'Component'), h('th', null, 'Category'), h('th', { class: 'num' }, 'Weight g'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Price'), h('th', null, 'Dimensions'), h('th', { class: 'num' }, 'Used'), h('th'))),
+      const anyF = rows.some(c => c.kind === 'fastener');
+      tw.append(h('table', { class: 'libtbl', dataset: { tkey: anyF ? 'lib-components-f' : 'lib-components' } }, h('thead', null, h('tr', null, h('th', null, 'Component'), h('th', null, 'Category'), anyF && h('th', null, 'Specs'), h('th', { class: 'num' }, 'Weight g'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Used'), h('th', { class: 'nosort' }))),
         h('tbody', null, ...rows.map(c => h('tr', null,
-          h('td', null, c.name, c.link && h('a', { href: c.link, target: '_blank', rel: 'noopener', class: 'src', style: { textTransform: 'none' } }, ' link ↗'), c.notes && h('span', { class: 'sub' }, c.notes)),
+          h('td', { class: 'wrap cname' }, c.name, c.link && h('a', { href: c.link, target: '_blank', rel: 'noopener', class: 'src', style: { textTransform: 'none' } }, ' link ↗'),
+            (c.vendor || c.part_number || c.dimensions) && h('span', { class: 'sub' }, [c.vendor, c.part_number && h('span', { class: 'mono' }, c.part_number), c.dimensions].filter(Boolean).flatMap((x, i) => i ? [' · ', x] : [x])), c.notes && h('span', { class: 'sub' }, c.notes)),
           edCell(c.category, v => api('PUT', `components/${c.id}`, { category: v }).then(() => { c.category = v; if (!cats.includes(v)) { cats.push(v); cats.sort(); catDatalist(cats); } }), { list: 'cat-list' }),
-          edCell(c.grams, v => api('PUT', `components/${c.id}`, { grams: v, grams_source: 'manual', propagate: true }).then(() => { c.grams = v; }), { type: 'number', cls: 'num', fmt: v => fmt(v, 2) }),
-          h('td', null, h('span', { class: 'pill ' + (c.grams_source === 'measured' ? 'mea' : 'auto') }, c.grams_source || 'manual')),
+          anyF && h('td', { class: 'wrap specs', dataset: { sort: String(specSort(c)[0] * 1000 + specSort(c)[1]) } }, c.kind === 'fastener' ? fastenerSpecText(c.specs) : ''),
+          edCell(c.grams, v => api('PUT', `components/${c.id}`, { grams: v, grams_source: 'manual', propagate: true }).then(() => { c.grams = v; c.grams_source = 'manual'; draw(); }), { type: 'number', cls: 'num', fmt: v => fmt(v, 2) }),
+          h('td', null, srcPill(c)),
           edCell(c.price, v => api('PUT', `components/${c.id}`, { price: v }).then(() => { c.price = v; }), { type: 'number', cls: 'num', fmt: v => Number(v).toFixed(2), placeholder: '' }),
-          h('td', null, c.dimensions || ''), h('td', { class: 'num' }, c.uses || 0),
-          h('td', null, h('button', { class: 'btn icon', onClick: e => menu(e.currentTarget, [
+          h('td', { class: 'num' }, c.uses || 0),
+          h('td', { class: 'acts' },
+            h('button', { class: 'btn icon', title: 'Duplicate — same specs, change the length or weight and save as a new component', 'aria-label': 'Duplicate', onClick: () => compModal(c, { duplicate: true }) }, '⧉'),
+            h('button', { class: 'btn icon', onClick: e => menu(e.currentTarget, [
             { label: 'Weigh-in (update everywhere)…', onClick: () => { const g = input({ type: 'number', step: '0.01' }); modal(`Weigh ${c.name}`, field('Measured (g)', g), [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { await api('POST', `components/${c.id}/weighins`, { grams: parseFloat(g.value), propagate: true }); render(); } }]); } },
             { label: 'Edit…', onClick: () => compModal(c) },
+            { label: 'Duplicate…', onClick: () => compModal(c, { duplicate: true }) },
+            c.kind === 'fastener' && c.specs && { label: 'Estimate weight from specs', onClick: async () => { const g = fastenerEstimate(c.specs); if (g == null) return toast('Need at least a thread size and length', true); await api('PUT', `components/${c.id}`, { grams: +g.toFixed(3), grams_source: 'estimated', propagate: true }); render(); } },
             S.robot && { label: `Add to ${S.robot.name}`, onClick: () => fromLibraryModal() },
             '-', { label: 'Delete', cls: 'danger', onClick: () => confirmModal(`Delete “${c.name}” from the library? Robot lines keep their values.`, async () => { await api('DELETE', `components/${c.id}`); render(); }) }].filter(Boolean)) }, '⋯')))))));
       if (!rows.length) tw.append(h('p', { class: 'empty' }, 'Nothing matches.'));
@@ -1683,11 +1805,65 @@
     dl.textContent = ''; for (const c of cats || S.cache.cats || []) dl.append(h('option', { value: c }));
     return dl;
   }
-  function compModal(c) {
+  function optList(id, values) {
+    let dl = document.getElementById(id);
+    if (!dl) { dl = h('datalist', { id }); document.body.append(dl); }
+    dl.textContent = ''; for (const v of values) dl.append(h('option', { value: v }));
+    return id;
+  }
+  // c: existing component (edit), or a template; opts.duplicate saves a copy, opts.isNew saves a new one from a template
+  function compModal(c, opts = {}) {
     catDatalist();
-    const f = { name: input({ value: c?.name || '' }), category: input({ value: c?.category || '', list: 'cat-list', autocomplete: 'off' }), vendor: input({ value: c?.vendor || '' }), link: input({ value: c?.link || '' }), price: input({ type: 'number', value: c?.price ?? '', step: '0.01' }), dimensions: input({ value: c?.dimensions || '' }), grams: input({ type: 'number', value: c?.grams ?? '', step: '0.01' }), notes: h('textarea', null, c?.notes || '') };
-    modal(c ? 'Edit component' : 'New component', h('div', null, field('Name', f.name), field('Category', f.category), field('Vendor', f.vendor), field('Link', f.link), field('Price', f.price), field('Dimensions', f.dimensions), field('Weight (g)', f.grams), field('Notes', f.notes)),
-      [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async () => { const body = { name: f.name.value, category: f.category.value || 'Other', vendor: f.vendor.value || null, link: f.link.value || null, price: f.price.value === '' ? null : parseFloat(f.price.value), dimensions: f.dimensions.value || null, grams: f.grams.value === '' ? null : parseFloat(f.grams.value), notes: f.notes.value || null }; if (c) await api('PUT', `components/${c.id}`, Object.assign(body, { propagate: true })); else await api('POST', 'components', body); render(); } }]);
+    const isEdit = !!(c && c.id && !opts.duplicate);
+    const kind = { v: (c && c.kind) || 'generic' };
+    const sp = Object.assign({ type: 'screw', length_unit: 'mm' }, (c && c.specs) || {});
+    const f = { name: input({ value: c?.name || '' }), category: input({ value: c?.category || '', list: 'cat-list', autocomplete: 'off' }), vendor: input({ value: c?.vendor || '', list: optList('vendor-list', ['McMaster-Carr', 'Bolt Depot', 'Amazon', 'AliExpress', 'Fingertech', 'Repeat Robotics', 'Just Cuz Robotics', 'Pololu', 'ServoCity']), autocomplete: 'off' }), part_number: input({ value: c?.part_number || '', placeholder: 'e.g. 91290A115', class: 'mono' }), link: input({ value: c?.link || '' }), price: input({ type: 'number', value: c?.price ?? '', step: '0.01', placeholder: 'each' }), dimensions: input({ value: c?.dimensions || '' }), grams: input({ type: 'number', value: c?.grams ?? '', step: '0.001' }), notes: h('textarea', null, c?.notes || '') };
+    let gramsSource = c?.grams_source || 'manual';
+    f.grams.addEventListener('input', () => { gramsSource = 'manual'; srcLbl.textContent = ''; });
+    const srcLbl = h('span', { class: 'rng' }, c?.grams_source === 'estimated' ? 'estimated from specs' : c?.grams_source === 'measured' ? 'measured' : '');
+    // --- fastener form
+    const auto = h('input', { type: 'checkbox', checked: !c?.name || (c.kind === 'fastener' && fastenerLabel(c.specs) === c.name) });
+    const preview = h('span', { class: 'prof' });
+    const sf = {};
+    const mk = (key, attrs = {}, list) => { const el = input(Object.assign({ value: sp[key] ?? '' }, attrs, list ? { list: optList('fl-' + key, list), autocomplete: 'off' } : {})); el.addEventListener('input', () => { sp[key] = el.type === 'number' ? (el.value === '' ? '' : parseFloat(el.value)) : el.value; sync(); }); sf[key] = el; return el; };
+    const typeSel = select(FT.types, sp.type, { onChange: e => { sp.type = e.target.value; drawSpecs(); sync(); } });
+    const unitSel = select([['mm', 'mm'], ['in', 'inch']], sp.length_unit || 'mm', { style: { width: '80px' }, onChange: e => { sp.length_unit = e.target.value; sync(); } });
+    const specBox = h('div', { class: 'specform' });
+    const estBtn = h('button', { class: 'btn small', title: 'Rough mass from the thread size, length, head style and material (±15 %). Marked “estimated” until you weigh one.', onClick: () => { const g = fastenerEstimate(sp); if (g == null) return toast('Need at least a thread size (and a length for screws)', true); f.grams.value = g.toFixed(3); gramsSource = 'estimated'; srcLbl.textContent = 'estimated from specs'; } }, 'Estimate from specs');
+    const drawSpecs = () => {
+      specBox.textContent = '';
+      const t = sp.type;
+      const threads = sp.thread && /^#|\/|"/.test(sp.thread) ? FT.imperial : sp.thread ? FT.metric : [...FT.metric, ...FT.imperial];
+      specBox.append(field('Type', typeSel), field('Thread', h('div', { class: 'tb' }, mk('thread', { placeholder: 'M3, #6-32, 1/4"-20', style: { width: '130px' } }, [...FT.metric, ...FT.imperial]), h('span', { class: 'rng' }, 'pitch'), mk('pitch', { placeholder: 'mm or TPI', style: { width: '90px' } }))));
+      if (t !== 'nut' && t !== 'washer') specBox.append(field('Length', h('div', { class: 'tb' }, mk('length', { type: 'number', step: 'any', style: { width: '90px' } }), unitSel, t === 'screw' && h('label', { class: 'rng' }, select([['full', 'fully threaded'], ['partial', 'partially threaded']], sp.thread_type || 'full', { style: { width: 'auto' }, onChange: e => { sp.thread_type = e.target.value; sync(); } })))));
+      if (t === 'screw' || t === 'other') specBox.append(field('Head', mk('head', { placeholder: 'socket head, button head…' }, FT.heads)), field('Drive', mk('drive', { placeholder: 'hex (Allen), Torx…' }, FT.drives)), field('Head size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, '⌀'), mk('head_dia', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'height'), mk('head_height', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'optional — improves the estimate'))));
+      if (t === 'nut' || t === 'insert') specBox.append(field('Nut type', mk('nut_type', { placeholder: 'hex nut, nylon-insert lock nut…' }, FT.nutTypes)), field('Size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'across flats'), mk('across_flats', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'thickness'), mk('thickness', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), t === 'insert' && h('span', { class: 'rng' }, 'OD'), t === 'insert' && mk('od', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }))));
+      if (t === 'washer') specBox.append(field('Washer type', mk('washer_type', { placeholder: 'flat washer, split lock…' }, FT.washerTypes)), field('Size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'OD'), mk('od', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'ID'), mk('id', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'thickness'), mk('thickness', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }))));
+      if (t === 'standoff') specBox.append(field('Shape', h('div', { class: 'tb' }, select([['hex', 'hex'], ['round', 'round']], sp.shape || 'hex', { style: { width: 'auto' }, onChange: e => { sp.shape = e.target.value; sync(); } }), h('span', { class: 'rng' }, 'across flats / ⌀'), mk('across_flats', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), select([['female-female', 'female–female'], ['male-female', 'male–female'], ['male-male', 'male–male']], sp.gender || 'female-female', { style: { width: 'auto' }, onChange: e => { sp.gender = e.target.value; sync(); } }))));
+      specBox.append(field('Material', mk('material', { placeholder: 'alloy steel, 18-8 stainless…' }, FT.materials)), field('Finish', mk('finish', { placeholder: 'black oxide, plain…' }, FT.finishes)), field('Grade / class', mk('grade', { placeholder: '12.9, A2-70, grade 8…', style: { width: '160px' } })));
+      specBox.append(field('Weight', h('div', { class: 'tb' }, estBtn, srcLbl)));
+    };
+    const sync = () => { preview.textContent = fastenerLabel(sp) || '—'; if (auto.checked) f.name.value = fastenerLabel(sp); };
+    auto.addEventListener('change', sync);
+    const fastBox = h('div', { hidden: kind.v !== 'fastener' }, specBox, field('Label', h('div', null, h('label', { class: 'tb' }, auto, h('span', null, 'name it from the specs: '), preview), h('p', { class: 'hint', style: { margin: '2px 0 0' } }, 'Untick to type your own name below.'))));
+    const kindSeg = h('div', { class: 'seg' }, ...[['generic', 'Component'], ['fastener', 'Fastener']].map(([k, l]) => h('button', { 'aria-pressed': String(kind.v === k), onClick: e => { kind.v = k; [...e.currentTarget.parentNode.children].forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); fastBox.hidden = k !== 'fastener'; if (k === 'fastener') { if (!f.category.value) f.category.value = 'Fasteners'; if (!sp.thread && f.name.value) { Object.assign(sp, parseFastenerName(f.name.value)); drawSpecs(); auto.checked = false; } sync(); } } }, l)));
+    drawSpecs(); if (kind.v === 'fastener') sync();
+    const title = isEdit ? 'Edit component' : opts.duplicate ? `Duplicate “${c.name}”` : 'New component';
+    modal(title, h('div', null,
+      opts.duplicate && h('p', { class: 'hint', style: { marginTop: 0 } }, 'A copy with the same details. Change what differs — usually the length and the weight — and save it as a new component.'),
+      field('Kind', kindSeg),
+      fastBox,
+      field('Name', f.name), field('Category', f.category),
+      h('div', { class: 'grid2' }, h('div', null, field('Vendor', f.vendor), field('Part number', f.part_number), field('Link', f.link)), h('div', null, field('Price (each)', f.price), field('Weight (g)', f.grams), field('Dimensions', f.dimensions))),
+      field('Notes', f.notes)),
+      [{ label: 'Cancel' }, { label: isEdit ? 'Save' : 'Create', cls: 'primary', onClick: async () => {
+        if (!f.name.value.trim()) { toast('Give it a name', true); return false; }
+        const body = { name: f.name.value.trim(), category: f.category.value || 'Other', vendor: f.vendor.value || null, part_number: f.part_number.value || null, link: f.link.value || null, price: f.price.value === '' ? null : parseFloat(f.price.value), dimensions: f.dimensions.value || null, grams: f.grams.value === '' ? null : parseFloat(f.grams.value), grams_source: f.grams.value === '' ? 'manual' : gramsSource, notes: f.notes.value || null, kind: kind.v, specs: kind.v === 'fastener' ? sp : null };
+        if (opts.duplicate && c.grams_source === 'measured' && body.grams === c.grams && kind.v === 'fastener' && lenMm(sp) !== lenMm(c.specs || {})) body.grams_source = 'manual';   // a different length is not the measured one
+        if (isEdit) await api('PUT', `components/${c.id}`, Object.assign(body, { propagate: true })); else await api('POST', 'components', body);
+        render();
+      } }], { width: '760px' });
+    if (opts.duplicate && sf.length) setTimeout(() => { sf.length.focus(); sf.length.select(); }, 60);
   }
 
   // ---------------------------------------------------------------- filaments & profiles

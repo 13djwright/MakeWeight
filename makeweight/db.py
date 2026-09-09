@@ -118,6 +118,7 @@ class DB:
             "robots": {"nozzle": "REAL DEFAULT 0.4", "class_name": "TEXT", "configs_json": "TEXT", "active_config": "TEXT"},
             "filaments": {"max_vol_speed": "REAL"},
             "weigh_ins": {"profile_id": "INTEGER", "sliced_grams": "REAL"},
+            "components": {"kind": "TEXT DEFAULT 'generic'", "part_number": "TEXT", "specs_json": "TEXT"},
         }
         for table, cols in wanted.items():
             have = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}

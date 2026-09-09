@@ -793,14 +793,16 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 1:
                 if m == "GET":
                     rows = db.q("SELECT c.*, (SELECT COUNT(*) FROM line_items li WHERE li.component_id=c.id) uses FROM components c ORDER BY category, name")
+                    for row in rows:
+                        row["specs"] = loads(row.pop("specs_json", None), None)
                     return self._json(rows)
                 b = self._jbody()
-                cid = db.insert("components", {k: b.get(k) for k in ("name", "category", "vendor", "link", "price", "dimensions", "grams", "grams_source", "notes")} | {"created": now(), "updated": now()})
+                cid = db.insert("components", self._component_fields(b) | {"created": now(), "updated": now()})
                 return self._json(db.get("components", cid))
             cid = r(1)
             if len(parts) == 2 and m == "PUT":
                 b = self._jbody()
-                db.update("components", cid, {k: v for k, v in b.items() if k in ("name", "category", "vendor", "link", "price", "dimensions", "grams", "grams_source", "notes")} | {"updated": now()})
+                db.update("components", cid, self._component_fields(b, partial=True) | {"updated": now()})
                 if b.get("propagate") and b.get("grams") is not None:
                     db.x("UPDATE line_items SET est_grams=?, est_source='library' WHERE component_id=?", [float(b["grams"]), cid])
                 return self._json(db.get("components", cid))
@@ -1507,6 +1509,17 @@ class Handler(BaseHTTPRequestHandler):
                                           "max_vol_speed": pf.get("max_vol_speed") or 12, "correction_json": "{}", "builtin": 0})
             created.append(self.app._filament_view(db.get("filaments", fid)))
         return {"created": created, "reused": reused}
+
+    COMPONENT_FIELDS = ("name", "category", "vendor", "link", "price", "dimensions", "grams", "grams_source", "notes", "kind", "part_number")
+
+    def _component_fields(self, b: dict, partial: bool = False) -> dict:
+        """Column values from a component POST/PUT body; `specs` (structured fastener attributes) is stored as JSON."""
+        out = {k: b.get(k) for k in self.COMPONENT_FIELDS if (k in b or not partial)}
+        if not partial:
+            out["kind"] = out.get("kind") or "generic"; out["grams_source"] = out.get("grams_source") or "manual"
+        if "specs" in b:
+            out["specs_json"] = json.dumps(b["specs"]) if b["specs"] else None
+        return out
 
     def _project_filament_id(self, project_defaults: dict, extruder: int, fname: str, cache: dict | None = None) -> int | None:
         """The project's filament for this extruder (Bambu Studio 3MF), created in the library when new."""
