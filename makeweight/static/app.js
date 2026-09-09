@@ -1672,6 +1672,15 @@
   const lenMm = sp => sp.length == null || sp.length === '' ? null : (+sp.length) * (sp.length_unit === 'in' ? 25.4 : 1);
   // 0.625 → 5/8", 1.25 → 1-1/4" (nearest 1/64), the way fasteners are sold
   function fracIn(v) { v = +v; if (!isFinite(v)) return ''; const whole = Math.floor(v); let n = Math.round((v - whole) * 64), d = 64; if (n === 64) return `${whole + 1}"`; while (n && n % 2 === 0) { n /= 2; d /= 2; } const f = n ? `${n}/${d}` : ''; return `${whole && f ? whole + '-' : whole || !f ? whole : ''}${f}"`; }
+  // typed length: "5/16", "1-1/4", "1 1/4", "3/8\"", ".375", "12" → number (in the current unit); null when unreadable
+  function parseLen(str) {
+    const t = String(str || '').trim().replace(/["″]/g, '').replace(/\s*(in|mm)$/i, '');
+    if (!t) return null;
+    let m = t.match(/^(\d+)[\s-]+(\d+)\s*\/\s*(\d+)$/); if (m) return +m[1] + (+m[2] / +m[3]);
+    m = t.match(/^(\d+)\s*\/\s*(\d+)$/); if (m && +m[2]) return +m[1] / +m[2];
+    m = t.match(/^(\d*\.?\d+)$/); if (m) return parseFloat(m[1]);
+    return null;
+  }
   const lenTxt = sp => sp.length == null || sp.length === '' ? '' : (sp.length_unit === 'in' ? fracIn(sp.length) : `${sp.length} mm`);
   function fastenerLabel(sp) {
     if (!sp || !sp.thread) return '';
@@ -1860,7 +1869,10 @@
     const sf = {};
     const mk = (key, attrs = {}, list) => { const el = input(Object.assign({ value: sp[key] ?? '' }, attrs, list ? { list: optList('fl-' + key, list), autocomplete: 'off' } : {})); el.addEventListener('input', () => { sp[key] = el.type === 'number' ? (el.value === '' ? '' : parseFloat(el.value)) : el.value; sync(); }); sf[key] = el; return el; };
     const typeSel = select(FT.types, sp.type, { onChange: e => { sp.type = e.target.value; drawSpecs(); sync(); } });
-    const unitSel = select([['mm', 'mm'], ['in', 'inch']], sp.length_unit || 'mm', { style: { width: '80px' }, onChange: e => { sp.length_unit = e.target.value; sync(); } });
+    // length as text so inches can be typed the way they are sold (5/16, 1-1/4); shown back as a fraction on blur
+    const lenShown = () => sp.length == null || sp.length === '' ? '' : (sp.length_unit === 'in' ? fracIn(sp.length).replace('"', '') : String(sp.length));
+    const lenInput = () => { const el = input({ value: lenShown(), inputmode: 'decimal', placeholder: sp.length_unit === 'in' ? '5/16' : '12', style: { width: '90px' } }); el.addEventListener('input', () => { const v = parseLen(el.value); sp.length = v == null ? '' : v; el.classList.toggle('bad', !!el.value.trim() && v == null); sync(); }); el.addEventListener('blur', () => { if (sp.length !== '' && sp.length != null) el.value = lenShown(); }); sf.length = el; return el; };
+    const unitSel = select([['mm', 'mm'], ['in', 'inch']], sp.length_unit || 'mm', { style: { width: '80px' }, onChange: e => { sp.length_unit = e.target.value; drawSpecs(); sync(); } });
     const specBox = h('div', { class: 'specform' });
     const estBtn = h('button', { class: 'btn small', title: 'Rough mass from the thread size, length, head style and material (±15 %). Marked “estimated” until you weigh one.', onClick: () => { const g = fastenerEstimate(sp); if (g == null) return toast('Need at least a thread size (and a length for screws)', true); f.grams.value = g.toFixed(3); gramsSource = 'estimated'; srcLbl.textContent = 'estimated from specs'; } }, 'Estimate from specs');
     const drawSpecs = () => {
@@ -1868,7 +1880,7 @@
       const t = sp.type;
       const threads = sp.thread && /^#|\/|"/.test(sp.thread) ? FT.imperial : sp.thread ? FT.metric : [...FT.metric, ...FT.imperial];
       specBox.append(field('Type', typeSel), field('Thread', h('div', { class: 'tb' }, mk('thread', { placeholder: 'M3, #6-32, 1/4"-20', style: { width: '130px' } }, [...FT.metric, ...FT.imperial]), h('span', { class: 'rng' }, 'pitch'), mk('pitch', { placeholder: 'mm or TPI', style: { width: '90px' } }))));
-      if (t !== 'nut' && t !== 'washer') specBox.append(field('Length', h('div', { class: 'tb' }, mk('length', { type: 'number', step: 'any', style: { width: '90px' } }), unitSel, t === 'screw' && h('label', { class: 'rng' }, select([['full', 'fully threaded'], ['partial', 'partially threaded']], sp.thread_type || 'full', { style: { width: 'auto' }, onChange: e => { sp.thread_type = e.target.value; sync(); } })))));
+      if (t !== 'nut' && t !== 'washer') specBox.append(field('Length', h('div', { class: 'tb' }, lenInput(), unitSel, h('span', { class: 'rng' }, sp.length_unit === 'in' ? 'fractions welcome: 5/16, 1-1/4' : ''), t === 'screw' && h('label', { class: 'rng' }, select([['full', 'fully threaded'], ['partial', 'partially threaded']], sp.thread_type || 'full', { style: { width: 'auto' }, onChange: e => { sp.thread_type = e.target.value; sync(); } })))));
       if (t === 'screw' || t === 'other') specBox.append(field('Screw type', mk('screw_type', { placeholder: 'machine screw, thread-forming (Plastite)…' }, FT.screwTypes)), field('Head', mk('head', { placeholder: 'socket head, button head…' }, FT.heads)), field('Drive', mk('drive', { placeholder: 'hex (Allen), Torx…' }, FT.drives)), field('Head size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, '⌀'), mk('head_dia', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'height'), mk('head_height', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'optional — improves the estimate'))));
       if (t === 'nut' || t === 'insert') specBox.append(field('Nut type', mk('nut_type', { placeholder: 'hex nut, nylon-insert lock nut…' }, FT.nutTypes)), field('Size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'across flats'), mk('across_flats', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'thickness'), mk('thickness', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), t === 'insert' && h('span', { class: 'rng' }, 'OD'), t === 'insert' && mk('od', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }))));
       if (t === 'washer') specBox.append(field('Washer type', mk('washer_type', { placeholder: 'flat washer, split lock…' }, FT.washerTypes)), field('Size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'OD'), mk('od', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'ID'), mk('id', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'thickness'), mk('thickness', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }))));

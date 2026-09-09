@@ -380,3 +380,4 @@ table.libtbl td.cname{min-width:220px;max-width:340px}
 .cdlg .grid2{gap:6px 18px}
 .cdlg .grid2 .field{grid-template-columns:88px 1fr}
 .cdlg .field label{white-space:nowrap}
+input.bad{border-color:var(--bad);box-shadow:0 0 0 2px var(--bad-soft)}
