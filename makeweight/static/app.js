@@ -501,13 +501,16 @@
   async function autoUpdateCheck() {
     try {
       const st = S.state; if (!st || !st.update_repo) return;
+      const vt = v => (String(v || '').match(/\d+/g) || ['0']).slice(0, 3).map(Number), newer = (a, b) => { const x = vt(a), y = vt(b); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
       const last = +localStorage.getItem('sb.updateCheck') || 0;
-      if (Date.now() - last < 6 * 3600e3) { const v = localStorage.getItem('sb.updateAvail'); if (v && v !== st.version) { S.updateAvail = v; renderShell(); } return; }
-      localStorage.setItem('sb.updateCheck', String(Date.now()));
+      // the remembered answer only counts if it was given for the version running now (updating 0.12 → 0.13.2 within the
+      // 6-hour window must not keep announcing the 0.13.0 that the old version saw) and is actually newer than it
+      if (Date.now() - last < 6 * 3600e3 && localStorage.getItem('sb.updateFor') === st.version) { const v = localStorage.getItem('sb.updateAvail'); if (v && newer(v, st.version)) { S.updateAvail = v; renderShell(); } return; }
+      localStorage.setItem('sb.updateCheck', String(Date.now())); localStorage.setItem('sb.updateFor', st.version);
       const r = await api('POST', 'update/check?quiet=1');
       if (r.error) return;
-      localStorage.setItem('sb.updateAvail', r.newer ? r.version : '');
-      if (r.newer) { S.updateAvail = r.version; renderShell(); toast(`${st.app.name} ${r.version} is available — Jobs & setup → Update.`); }
+      localStorage.setItem('sb.updateAvail', r.newer && newer(r.version, st.version) ? r.version : '');
+      if (r.newer && newer(r.version, st.version)) { S.updateAvail = r.version; renderShell(); toast(`${st.app.name} ${r.version} is available — Jobs & setup → Update.`); }
     } catch (e) { /* offline or no repo: stay quiet */ }
   }
 
