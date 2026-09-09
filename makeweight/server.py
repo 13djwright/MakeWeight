@@ -806,8 +806,16 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 1:
                 if m == "GET":
                     rows = db.q("SELECT c.*, (SELECT COUNT(*) FROM line_items li WHERE li.component_id=c.id) uses FROM components c ORDER BY category, name")
+                    # real usage: which robots carry the component and how many in total (qty summed over their lines)
+                    use = {}
+                    for u in db.q("""SELECT li.component_id cid, r.id rid, r.name robot, r.status, SUM(li.qty) qty, COUNT(*) lines
+                                     FROM line_items li JOIN sections s ON s.id=li.section_id JOIN robots r ON r.id=s.robot_id
+                                     WHERE li.component_id IS NOT NULL GROUP BY li.component_id, r.id ORDER BY r.status='active' DESC, r.name"""):
+                        use.setdefault(u["cid"], []).append({"robot_id": u["rid"], "robot": u["robot"], "status": u["status"], "qty": u["qty"], "lines": u["lines"]})
                     for row in rows:
                         row["specs"] = loads(row.pop("specs_json", None), None)
+                        row["used_in"] = use.get(row["id"], [])
+                        row["used_qty"] = sum(x["qty"] or 0 for x in row["used_in"])
                     return self._json(rows)
                 b = self._jbody()
                 cid = db.insert("components", self._component_fields(b) | {"created": now(), "updated": now()})

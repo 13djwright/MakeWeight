@@ -72,10 +72,25 @@ def zero_min_thickness(db: DB) -> int:
     return n
 
 
+def drop_used_in_notes(db: DB) -> int:
+    """One-time: components imported from the old workbooks carried "Used in <robot>" as their note; usage is computed
+    from the sheets now, so those notes only get stale."""
+    if db.setting("components_v"):
+        return 0
+    n = 0
+    for r in db.q("SELECT id, notes FROM components WHERE notes LIKE 'Used in %'"):
+        note = (r["notes"] or "")
+        rest = note.split("\n", 1)[1].strip() if "\n" in note else ""
+        db.update("components", r["id"], {"notes": rest or None}); n += 1
+    db.set_setting("components_v", 2)
+    return n
+
+
 def ensure_seed(db: DB) -> None:
     if db.setting("seeded_v1"):
         refresh_builtin_filaments(db)
         zero_min_thickness(db)
+        drop_used_in_notes(db)
         return
     with db.transaction():
         for name, nozzles, bed in PRINTERS:
@@ -86,6 +101,7 @@ def ensure_seed(db: DB) -> None:
                                                      "cost_per_kg": cost, "max_vol_speed": mvs, "correction_json": "{}", "builtin": 1})
         db.set_setting("filaments_v", 2)
         db.set_setting("profiles_v", 2)
+        db.set_setting("components_v", 2)
         prof_ids = {}
         for nozzle in (0.4, 0.6):
             params = profiles.default_params(nozzle)

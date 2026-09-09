@@ -390,3 +390,14 @@ tr:hover .dragh{opacity:1}
 tr.dragging td{opacity:.35}
 tr.dropmark td{padding:0;height:0;border:0;border-top:2px solid var(--accent);background:transparent}
 tr.sec-h .dragh{color:var(--ink3)}
+
+/* library type-ahead in the sheet's new-line row */
+td.sugcell{position:relative;overflow:visible}
+.suggest{position:absolute;left:0;top:100%;z-index:30;min-width:360px;max-width:560px;background:var(--panel);border:1px solid var(--rule);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.2);padding:4px;white-space:normal}
+.suggest .opt{padding:6px 10px;border-radius:5px;cursor:pointer;display:flex;flex-direction:column;gap:1px}
+.suggest .opt:hover,.suggest .opt.hi{background:var(--accent-soft)}
+.suggest .opt .nm{font-size:13px;color:var(--ink)}
+.suggest .opt .meta{font-size:11px;color:var(--ink3)}
+.suggest .foot{padding:4px 10px;font-size:11px}
+.pill.cfg.lib{background:var(--slate-soft);color:var(--slate);padding:1px 5px}
+table.fixed td.sugcell{overflow:visible}

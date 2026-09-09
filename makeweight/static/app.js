@@ -596,8 +596,9 @@
   }
 
   // ---------------------------------------------------------------- sheet
-  V.sheet = function (m) {
+  V.sheet = async function (m) {
     const r = S.robot; if (!r) return needRobot(m);
+    if (!S.cache.comps || S.cache.compsAt !== r.id + ':' + S.state.robots.length) { await loadComps(); S.cache.compsAt = r.id + ':' + S.state.robots.length; }
     const t = r.totals;
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Weight sheet'), h('p', null, 'Printed-part estimates come from the slicer; measured weights from your scale win when present.')),
       h('div', { class: 'tb' },
@@ -774,7 +775,8 @@
     tr.append(edCell(it.qty, v => upd({ qty: v }), { type: 'number', cls: 'num qty', fmt: v => Number(v) % 1 ? v : String(v) }));
     // description
     const descCell = edCell(it.description, v => upd({ description: v }), { render: v => h('span', null, v || h('i', { style: { color: 'var(--ink3)' } }, 'untitled'), p && p.locked && h('span', { class: 'pill lock', style: { marginLeft: '6px' } }, '🔒'),
-      !it.counted && h('button', { class: 'pill cfg warn', title: 'Excluded from the total by hand — click to include it again', onClick: e => { e.stopPropagation(); upd({ counted: true }).catch(fail); } }, 'not in total'), cfgChip(it, r), p && h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.filament ? p.filament.name : ''}` : 'printed part · no mesh attached', p.role ? ` · ${p.role}` : '')) });
+      !it.counted && h('button', { class: 'pill cfg warn', title: 'Excluded from the total by hand — click to include it again', onClick: e => { e.stopPropagation(); upd({ counted: true }).catch(fail); } }, 'not in total'), cfgChip(it, r),
+      it.component_id && h('button', { class: 'pill cfg lib', title: 'Linked to a library component — its weight follows the library (weigh-ins there update every robot). Click to open it in the library.', onClick: e => { e.stopPropagation(); S.cache.libq = it.description; S.cache.libcat = ''; go('library'); } }, '📚'), p && h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.filament ? p.filament.name : ''}` : 'printed part · no mesh attached', p.role ? ` · ${p.role}` : '')) });
     tr.append(descCell);
     if (p) tr.append(h('td', { class: 'wrap' }, h('a', { href: '#/part/' + p.id, class: 'prof' }, p.profile ? p.profile.string : '—')));
     else tr.append(edCell(it.purpose, v => upd({ purpose: v }), { cls: 'wrap', render: v => h('span', { class: 'rng' }, v || '') }));
@@ -801,28 +803,64 @@
     return tr;
   }
   // the always-present empty row at the end of a section: type a description, press Enter (or Tab) and it becomes a line
+  // library components for the sheet's type-ahead; refreshed whenever the sheet renders
+  async function loadComps() { try { S.cache.comps = await api('GET', 'components'); } catch { S.cache.comps = S.cache.comps || []; } return S.cache.comps; }
+  function compMatches(q, limit = 8) {
+    q = q.trim().toLowerCase(); if (q.length < 2) return [];
+    const words = q.split(/\s+/);
+    const score = c => { const hay = (c.name + ' ' + (c.category || '') + ' ' + (c.part_number || '') + ' ' + fastenerSpecText(c.specs)).toLowerCase(); if (!words.every(w => hay.includes(w))) return -1; return (c.name.toLowerCase().startsWith(q) ? 2 : 0) + (c.name.toLowerCase().includes(q) ? 1 : 0); };
+    return (S.cache.comps || []).map(c => [score(c), c]).filter(x => x[0] >= 0).sort((a, b) => b[0] - a[0] || a[1].name.localeCompare(b[1].name)).slice(0, limit).map(x => x[1]);
+  }
+  // the always-present empty row at the end of a section: type a description, press Enter (or Tab) and it becomes a line.
+  // Typing also searches the component library: pick a suggestion and the line is linked to it (weight, price, link come
+  // from the library and follow its weigh-ins).
   function newLineRow(s) {
     const qty = h('input', { type: 'number', value: 1, min: 0, step: 'any', class: 'num ghost-in', 'aria-label': `Quantity for a new line in ${s.name}` });
-    const desc = h('input', { type: 'text', placeholder: `Add a line to ${s.name}…`, class: 'ghost-in', 'aria-label': `New line in ${s.name}` });
+    const desc = h('input', { type: 'text', placeholder: `Add to ${s.name} — type a name or search the library…`, class: 'ghost-in', 'aria-label': `New line in ${s.name}`, autocomplete: 'off' });
     const est = h('input', { type: 'number', placeholder: 'g', step: 'any', class: 'num ghost-in', 'aria-label': 'Estimated grams' });
-    let busy = false;
+    const sug = h('div', { class: 'suggest', hidden: true, role: 'listbox' });
+    let busy = false, chosen = null, hi = -1, list = [];
+    const drawSug = () => {
+      sug.textContent = ''; list = compMatches(desc.value);
+      if (!list.length) { sug.hidden = true; hi = -1; return; }
+      hi = Math.min(hi, list.length - 1);
+      list.forEach((c, i) => sug.append(h('div', { class: 'opt' + (i === hi ? ' hi' : ''), role: 'option', onMousedown: e => { e.preventDefault(); pick(c); } },
+        h('span', { class: 'nm' }, c.name), h('span', { class: 'meta' }, [c.category, c.kind === 'fastener' ? fastenerSpecText(c.specs) : '', c.grams != null ? fmt(c.grams, 2) + ' g' : '', c.price != null ? money(c.price) : ''].filter(Boolean).join(' · ')))));
+      sug.append(h('div', { class: 'foot rng' }, hi >= 0 ? 'Enter links the highlighted library component · Esc to keep your own text' : '↓ then Enter to use a library component · Enter alone adds your text as a plain line'));
+      sug.hidden = false;
+    };
+    const pick = (c) => { chosen = c; desc.value = c.name; if (c.grams != null) est.value = ''; sug.hidden = true; hi = -1; est.placeholder = c.grams != null ? `${fmt(c.grams, 2)} g (library)` : 'g'; commit(true); };
     const commit = async (focusNext) => {
       const d = desc.value.trim(); if (!d || busy) return; busy = true;
       try {
-        await api('POST', `sections/${s.id}/items`, { description: d, qty: parseFloat(qty.value) || 1, est_grams: est.value === '' ? null : parseFloat(est.value) }, { label: `add “${d}”` });
+        const body = { description: d, qty: parseFloat(qty.value) || 1, est_grams: est.value === '' ? null : parseFloat(est.value) };
+        if (chosen && chosen.name === d) body.component_id = chosen.id;
+        await api('POST', `sections/${s.id}/items`, body, { label: `add “${d}”` });
         S.cache.focusNewLine = focusNext ? s.id : null;
         await refreshRobot();
       } catch (e) { busy = false; fail(e); }
     };
+    // Enter always adds what you typed; a suggestion is only pre-selected when the text matches its name exactly (↓ to pick another)
+    desc.addEventListener('input', () => { chosen = null; list = compMatches(desc.value); const q = desc.value.trim().toLowerCase(); hi = list.findIndex(c => c.name.toLowerCase() === q); drawSug(); });
+    desc.addEventListener('focus', () => { if (desc.value.trim().length >= 2) drawSug(); });
+    desc.addEventListener('keydown', e => {
+      if (!sug.hidden) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); hi = (hi + 1) % list.length; drawSug(); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); hi = (hi - 1 + list.length) % list.length; drawSug(); return; }
+        if (e.key === 'Enter' && hi >= 0) { e.preventDefault(); pick(list[hi]); return; }
+        if (e.key === 'Escape') { e.preventDefault(); sug.hidden = true; hi = -1; return; }
+        if (e.key === 'Tab') { sug.hidden = true; }
+      }
+    });
     for (const inp of [qty, desc, est]) {
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(true); } else if (e.key === 'Escape') { desc.value = ''; est.value = ''; qty.value = 1; inp.blur(); } });
     }
-    desc.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
+    desc.addEventListener('blur', () => setTimeout(() => { sug.hidden = true; if (!tr.contains(document.activeElement)) commit(false); }, 120));
     est.addEventListener('blur', () => setTimeout(() => { if (!tr.contains(document.activeElement)) commit(false); }, 120));
     const tr = h('tr', { class: 'new-row nosort', dataset: { key: 'n' + s.id, sid: s.id } },
-      h('td', { class: 'grip' }), h('td', { class: 'num qty' }, qty), h('td', null, desc), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
-      h('td', { colspan: 6, class: 'rng' }, 'Enter adds the line · more fields via ⋯ after adding'),
-      h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'Add with all fields…', 'aria-label': 'Add a line with all fields', onClick: () => addLineModal(s.id) }, '⋯')));
+      h('td', { class: 'grip' }), h('td', { class: 'num qty' }, qty), h('td', { class: 'sugcell' }, desc, sug), h('td', { class: 'wrap' }), h('td', { class: 'num' }, est),
+      h('td', { colspan: 6, class: 'rng' }, 'Enter adds the line · library matches appear as you type · more fields via ⋯ after adding'),
+      h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'Add from the component library…', 'aria-label': 'Add from library', onClick: () => fromLibraryModal(s.id) }, '📚'), h('button', { class: 'btn icon', title: 'Add with all fields…', 'aria-label': 'Add a line with all fields', onClick: () => addLineModal(s.id) }, '⋯')));
     if (S.cache.focusNewLine === s.id) { S.cache.focusNewLine = null; setTimeout(() => desc.focus(), 30); }
     return tr;
   }
@@ -845,7 +883,9 @@
     items.push({ label: 'Edit link / dimensions / notes…', onClick: () => editLineModal(it) });
     items.push('-');
     items.push({ label: 'Move to section ▸', onClick: () => modal('Move to section', select(r.sections.map(x => [x.id, x.name]), s.id, { id: 'mv-sec' }), [{ label: 'Cancel' }, { label: 'Move', cls: 'primary', onClick: async () => { await api('POST', `items/${it.id}/move`, { section_id: +$('#mv-sec').value }); await refreshRobot(); } }]) });
-    if (!it.part) items.push({ label: 'Save to library as component', onClick: async () => { await api('POST', 'components', { name: it.description, category: s.name, link: it.link, price: it.price, dimensions: it.dimensions, grams: it.measured_grams ?? it.est_grams, grams_source: it.measured_grams != null ? 'measured' : 'manual' }); toast('Added to library'); } });
+    if (!it.part && !it.component_id) items.push({ label: 'Save to library as component (and link)', onClick: async () => { const c = await api('POST', 'components', { name: it.description, category: s.name, link: it.link, price: it.price, dimensions: it.dimensions, grams: it.measured_grams ?? it.est_grams, grams_source: it.measured_grams != null ? 'measured' : 'manual' }); await api('PUT', `items/${it.id}`, { component_id: c.id }); S.cache.comps = null; await refreshRobot(); toast('Added to the library and linked'); } });
+    if (!it.part && !it.component_id) items.push({ label: 'Link to a library component…', onClick: () => linkComponentModal(it) });
+    if (it.component_id) items.push({ label: 'Unlink from the library (keep values)', onClick: () => upd({ component_id: null }).catch(fail) });
     items.push('-', { label: 'Delete line', cls: 'danger', onClick: async () => { try { await api('DELETE', `items/${it.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description || 'line'}”`); } catch (e) { fail(e); } } });
     menu(anchor, items);
   }
@@ -967,6 +1007,29 @@
     const r = S.robot, g = input({ type: 'number', step: '0.1', placeholder: 'whole robot on the scale, g' }), note = input({ placeholder: 'note' });
     modal('Robot weigh-in', h('div', null, h('p', null, `Sheet says ${fmt(r.totals.best_known)} g. Record what the scale says and the run log keeps the drift.`), field('Scale (g)', g), field('Note', note)),
       [{ label: 'Cancel' }, { label: 'Record', cls: 'primary', onClick: async () => { if (!g.value) return false; const run = await api('POST', `robots/${r.id}/weighin`, { grams: parseFloat(g.value), note: note.value }); toast(`Recorded. Drift vs sheet: ${signed(run ? JSON.parse(run.results_json).drift : 0)} g`); } }]);
+  }
+  async function linkComponentModal(it) {
+    const comps = await loadComps();
+    const search = input({ placeholder: 'Search the library…', class: 'search w', value: it.description || '' });
+    const pull = h('input', { type: 'checkbox', checked: true });
+    const list = h('div', { class: 'tw', style: { maxHeight: '360px', overflow: 'auto', marginTop: '10px' } });
+    let chosen = null;
+    const draw = () => {
+      const q = search.value.toLowerCase(); list.textContent = '';
+      const tb = h('tbody');
+      for (const c of comps.filter(c => !q || (c.name + ' ' + (c.category || '') + ' ' + (c.part_number || '') + ' ' + fastenerSpecText(c.specs)).toLowerCase().includes(q)).slice(0, 200)) {
+        tb.append(h('tr', { class: chosen === c ? 'sel' : '', style: { cursor: 'pointer' }, onClick: () => { chosen = c; draw(); } }, h('td', null, c.name, h('span', { class: 'sub' }, [c.category, c.kind === 'fastener' ? fastenerSpecText(c.specs) : ''].filter(Boolean).join(' · '))), h('td', { class: 'num' }, fmt(c.grams, 2)), h('td', { class: 'num' }, money(c.price))));
+      }
+      list.append(h('table', { class: 'nores' }, tb));
+    };
+    search.addEventListener('input', draw); draw();
+    modal(`Link “${it.description}” to the library`, h('div', null, search, list, field('', h('label', null, pull, ' take the component’s name, weight, price and link for this line'))),
+      [{ label: 'Cancel' }, { label: 'Link', cls: 'primary', onClick: async () => {
+        if (!chosen) { toast('Pick a component'); return false; }
+        const patch = { component_id: chosen.id };
+        if (pull.checked) { patch.description = chosen.name; if (chosen.grams != null && it.measured_grams == null) { patch.est_grams = chosen.grams; patch.est_source = 'library'; } if (chosen.price != null) patch.price = chosen.price; if (chosen.link) patch.link = chosen.link; }
+        await api('PUT', `items/${it.id}`, patch, { label: `link “${it.description}” to the library` }); await refreshRobot();
+      } }], { width: '720px' });
   }
   async function fromLibraryModal(sectionId) {
     const r = S.robot, comps = await api('GET', 'components');
@@ -1848,16 +1911,16 @@
       rows = rows.slice().sort((a, b) => (a.category || 'Other').localeCompare(b.category || 'Other') || ((a.kind === 'fastener') && (b.kind === 'fastener') ? (specSort(a)[0] - specSort(b)[0] || specSort(a)[1] - specSort(b)[1]) : 0) || a.name.localeCompare(b.name, undefined, { numeric: true }));
       tw.textContent = '';
       const anyF = rows.some(c => c.kind === 'fastener');
-      tw.append(h('table', { class: 'libtbl', dataset: { tkey: anyF ? 'lib-components-f' : 'lib-components' } }, h('thead', null, h('tr', null, h('th', null, 'Component'), h('th', null, 'Category'), anyF && h('th', null, 'Specs'), h('th', { class: 'num' }, 'Weight g'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Used'), h('th', { class: 'nosort' }))),
+      tw.append(h('table', { class: 'libtbl', dataset: { tkey: anyF ? 'lib-components-f' : 'lib-components' } }, h('thead', null, h('tr', null, h('th', null, 'Component'), h('th', null, 'Category'), anyF && h('th', null, 'Specs'), h('th', { class: 'num' }, 'Weight g'), h('th', null, 'Source'), h('th', { class: 'num' }, 'Price'), h('th', { class: 'num', title: 'Total quantity across robots that use this component (from their weight sheets)' }, 'Used'), h('th', { class: 'nosort' }))),
         h('tbody', null, ...rows.map(c => h('tr', null,
           h('td', { class: 'wrap cname' }, c.name, c.link && h('a', { href: c.link, target: '_blank', rel: 'noopener', class: 'src', style: { textTransform: 'none' } }, ' link ↗'),
-            (c.vendor || c.part_number || c.dimensions) && h('span', { class: 'sub' }, [c.vendor, c.part_number && h('span', { class: 'mono' }, c.part_number), c.dimensions].filter(Boolean).flatMap((x, i) => i ? [' · ', x] : [x])), c.notes && h('span', { class: 'sub' }, c.notes)),
+            (c.vendor || c.part_number || c.dimensions) && h('span', { class: 'sub' }, [c.vendor, c.part_number && h('span', { class: 'mono' }, c.part_number), c.dimensions].filter(Boolean).flatMap((x, i) => i ? [' · ', x] : [x])), c.notes && !/^Used in /.test(c.notes) && h('span', { class: 'sub' }, c.notes)),
           edCell(c.category, v => api('PUT', `components/${c.id}`, { category: v }).then(() => { c.category = v; if (!cats.includes(v)) { cats.push(v); cats.sort(); catDatalist(cats); } }), { list: 'cat-list' }),
           anyF && h('td', { class: 'wrap specs', dataset: { sort: String(specSort(c)[0] * 1000 + specSort(c)[1]) } }, c.kind === 'fastener' ? fastenerSpecText(c.specs) : ''),
           edCell(c.grams, v => api('PUT', `components/${c.id}`, { grams: v, grams_source: 'manual', propagate: true }).then(() => { c.grams = v; c.grams_source = 'manual'; draw(); }), { type: 'number', cls: 'num', fmt: v => fmt(v, 2) }),
           h('td', null, srcPill(c)),
           edCell(c.price, v => api('PUT', `components/${c.id}`, { price: v }).then(() => { c.price = v; }), { type: 'number', cls: 'num', fmt: v => Number(v).toFixed(2), placeholder: '' }),
-          h('td', { class: 'num' }, c.uses || 0),
+          h('td', { class: 'num' }, c.used_in && c.used_in.length ? h('button', { class: 'btn small', style: { fontVariantNumeric: 'tabular-nums' }, title: c.used_in.map(u => `${u.robot}: ${u.qty % 1 ? u.qty : Math.round(u.qty)}×${u.lines > 1 ? ` on ${u.lines} lines` : ''}${u.status !== 'active' ? ' (archived)' : ''}`).join('\n'), onClick: e => menu(e.currentTarget, c.used_in.map(u => ({ label: `${u.robot} — ${u.qty % 1 ? u.qty : Math.round(u.qty)}×${u.lines > 1 ? ` on ${u.lines} lines` : ''}${u.status !== 'active' ? ' · archived' : ''}`, onClick: async () => { await loadRobot(u.robot_id); go('sheet'); } }))) }, `${c.used_qty % 1 ? c.used_qty : Math.round(c.used_qty)} × · ${c.used_in.length} robot${c.used_in.length === 1 ? '' : 's'}`) : h('span', { class: 'rng' }, '—')),
           h('td', { class: 'acts' },
             h('button', { class: 'btn icon', title: 'Duplicate — same specs, change the length or weight and save as a new component', 'aria-label': 'Duplicate', onClick: () => compModal(c, { duplicate: true }) }, '⧉'),
             h('button', { class: 'btn icon', onClick: e => menu(e.currentTarget, [
