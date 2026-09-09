@@ -143,8 +143,9 @@ class App:
             old = Path(m["path"] or "")
             if old.exists():
                 continue
-            alt = self.mesh_dir / old.name
-            if old.name and alt.exists():
+            name = meshio.basename(m["path"] or "")
+            alt = self.mesh_dir / name
+            if name and alt.exists():
                 # with a shared data folder every computer has a different absolute path: leave the row alone (mesh_path()
                 # resolves by file name at read time) instead of rewriting it on every switch of computer
                 if not self.shared:

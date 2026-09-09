@@ -32,6 +32,11 @@ class MeshFileMissing(FileNotFoundError):
     pass
 
 
+def basename(p: str) -> str:
+    """Last path component, whichever OS wrote the path (both / and \\ count as separators)."""
+    return re.split(r"[\\/]", str(p).rstrip("\\/"))[-1]
+
+
 def mesh_path(mesh: dict) -> Path:
     """The file behind a meshes row. The database keeps the path the file had when it was uploaded; if the data
     folder has moved since (new install location, migration from an older version), the same file name in the current
@@ -40,7 +45,9 @@ def mesh_path(mesh: dict) -> Path:
     if stored and stored.exists():
         return stored
     if MESH_DIR is not None and stored is not None:
-        alt = MESH_DIR / stored.name
+        # the row may have been written on another OS (shared data folder): "G:\…\meshes\x.stl" read on a Mac is one
+        # opaque name to pathlib, so take the last component of either separator style
+        alt = MESH_DIR / basename(mesh["path"])
         if alt.exists():
             return alt
     raise MeshFileMissing(f"The mesh file for “{mesh.get('filename', '?')}” is no longer on disk"
