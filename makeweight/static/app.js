@@ -1649,6 +1649,7 @@
   // when the scale is not at hand (marked "estimated" until a weigh-in replaces it).
   const FT = {
     types: [['screw', 'Screw / bolt'], ['nut', 'Nut'], ['washer', 'Washer'], ['standoff', 'Standoff / spacer'], ['insert', 'Threaded insert'], ['other', 'Other hardware']],
+    screwTypes: ['machine screw', 'thread-forming (Plastite)', 'self-tapping', 'wood screw', 'sheet-metal screw', 'shoulder bolt'],
     heads: ['socket head', 'low-profile socket head', 'button head', 'flat head (countersunk)', 'pan head', 'hex head', 'cheese head', 'set screw', 'shoulder', 'thumb', 'wafer head'],
     drives: ['hex (Allen)', 'Torx', 'Phillips', 'slotted', 'external hex', 'none'],
     materials: ['alloy steel', '18-8 stainless steel', '316 stainless steel', 'grade 5 titanium', 'aluminum', 'brass', 'nylon', 'zinc-plated steel', 'grade 8 steel'],
@@ -1669,9 +1670,11 @@
     return null;
   }
   const lenMm = sp => sp.length == null || sp.length === '' ? null : (+sp.length) * (sp.length_unit === 'in' ? 25.4 : 1);
-  const lenTxt = sp => sp.length == null || sp.length === '' ? '' : (sp.length_unit === 'in' ? `${sp.length}"` : `${sp.length} mm`);
+  // 0.625 → 5/8", 1.25 → 1-1/4" (nearest 1/64), the way fasteners are sold
+  function fracIn(v) { v = +v; if (!isFinite(v)) return ''; const whole = Math.floor(v); let n = Math.round((v - whole) * 64), d = 64; if (n === 64) return `${whole + 1}"`; while (n && n % 2 === 0) { n /= 2; d /= 2; } const f = n ? `${n}/${d}` : ''; return `${whole && f ? whole + '-' : whole || !f ? whole : ''}${f}"`; }
+  const lenTxt = sp => sp.length == null || sp.length === '' ? '' : (sp.length_unit === 'in' ? fracIn(sp.length) : `${sp.length} mm`);
   function fastenerLabel(sp) {
-    if (!sp) return '';
+    if (!sp || !sp.thread) return '';
     const th = sp.thread || '', mat = [sp.material, sp.finish].filter(Boolean).join(' ');
     const tail = mat ? `, ${mat}` : '';
     switch (sp.type) {
@@ -1680,7 +1683,7 @@
       case 'standoff': return `${th} × ${lenTxt(sp)} ${sp.shape || 'hex'} standoff${sp.gender ? ` (${sp.gender})` : ''}${tail}`.trim();
       case 'insert': return `${th} ${sp.nut_type || 'threaded insert'}${sp.length ? ` × ${lenTxt(sp)}` : ''}${tail}`.trim();
       case 'other': return `${th}${sp.length ? ` × ${lenTxt(sp)}` : ''} ${sp.head || ''}${tail}`.trim();
-      default: { const drv = sp.drive && sp.drive !== 'none' && !/hex \(Allen\)/.test(sp.drive) ? ` ${sp.drive}` : ''; return `${th} × ${lenTxt(sp)} ${sp.head || 'screw'}${drv}${sp.thread_type === 'partial' ? ', partially threaded' : ''}${tail}`.trim(); }
+      default: { const drv = sp.drive && sp.drive !== 'none' && !/hex \(Allen\)/.test(sp.drive) ? ` ${sp.drive}` : ''; const st = sp.screw_type && sp.screw_type !== 'machine screw' ? sp.screw_type : ''; const kindTxt = sp.head ? `${sp.head}${st ? ' ' + st : ''}` : (st ? `${st} screw` : 'screw'); return `${th} × ${lenTxt(sp)} ${kindTxt}${drv}${sp.thread_type === 'partial' ? ', partially threaded' : ''}${tail}`.trim(); }
     }
   }
   function fastenerSpecText(sp) {
@@ -1689,6 +1692,7 @@
     if (sp.thread) bits.push(sp.thread + (sp.pitch ? ` × ${sp.pitch}` : ''));
     if (sp.length !== '' && sp.length != null) bits.push(lenTxt(sp));
     if (sp.type === 'nut') bits.push(sp.nut_type || 'nut'); else if (sp.type === 'washer') bits.push(sp.washer_type || 'washer'); else if (sp.type === 'standoff') bits.push('standoff'); else if (sp.type === 'insert') bits.push('insert'); else if (sp.head) bits.push(sp.head);
+    if (sp.screw_type && sp.screw_type !== 'machine screw') bits.push(sp.screw_type);
     if (sp.drive && sp.drive !== 'none' && sp.type === 'screw') bits.push(sp.drive);
     if (sp.material) bits.push(sp.material); if (sp.finish) bits.push(sp.finish); if (sp.grade) bits.push(sp.grade);
     if (sp.head_dia) bits.push(`head ⌀${sp.head_dia}`); if (sp.head_height) bits.push(`head h ${sp.head_height}`);
@@ -1740,16 +1744,19 @@
     let m = n.match(/\bM\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)/i);
     if (m) { out.thread = 'M' + m[1]; out.length = parseFloat(m[2]); out.length_unit = 'mm'; }
     else { m = n.match(/\bM\s*(\d+(?:\.\d+)?)\b/i); if (m) out.thread = 'M' + m[1]; }
-    const frac = str => { const f = str.match(/(\d+)\s*\/\s*(\d+)/); if (f) return +f[1] / +f[2]; const d = str.match(/(\d*\.\d+|\d+)/); return d ? parseFloat(d[1]) : null; };
+    const frac = str => { const f = str.match(/(?:(\d+)-)?(\d+)\s*\/\s*(\d+)/); if (f) return (+f[1] || 0) + +f[2] / +f[3]; const d = str.match(/(\d*\.\d+|\d+)/); return d ? parseFloat(d[1]) : null; };
     m = n.match(/#\s*(\d+)\s*-\s*(\d+)/); if (m) out.thread = `#${m[1]}-${m[2]}`;
     if (!out.thread) { m = n.match(/(\d+\s*\/\s*\d+)"?\s*-\s*(\d+)/); if (m) out.thread = `${m[1].replace(/\s/g, '')}"-${m[2]}`; }
     if (!out.thread) { m = n.match(/\b(\d{1,2})-(\d{2})\b/); if (m && +m[1] <= 12) out.thread = `#${m[1]}-${m[2]}`; }
     if (!out.thread) { m = n.match(/#\s*(\d{1,2})\b/); if (m) out.thread = `#${m[1]}`; }
-    m = out.length == null && (n.match(/[x×]\s*(\d+\s*\/\s*\d+|\d*\.\d+|\d+)\s*(in|"|″)/i) || n.match(/(\d+\s*\/\s*\d+|\d*\.\d+)\s*(in|"|″)/i));
+    m = n.match(/(\d+(?:-\d+)?\s*\/\s*\d+|\d*\.\d+|\d+)\s*(?:"|″|in\b)?\s*(?:long|length|lg)\b/i);
+    if (m) { const L = frac(m[1]); if (L) { out.length = L; out.length_unit = /mm/.test(m[0]) ? 'mm' : 'in'; } }
+    m = out.length == null && (n.match(/[x×]\s*(\d+\s*\/\s*\d+|\d*\.\d+|\d+)\s*(in\b|"|″)/i) || n.match(/(\d+(?:-\d+)?\s*\/\s*\d+|\d*\.\d+)\s*(in\b|"|″|-?inch)/i));
     if (m) { const L = frac(m[1]); if (L) { out.length = L; out.length_unit = 'in'; } }
     else if (out.length == null) { m = n.match(/[x×]\s*(\d+(?:\.\d+)?)\s*(mm)?\b/i); if (m && out.thread) { out.length = parseFloat(m[1]); out.length_unit = 'mm'; } }
     if (/washer/i.test(n)) out.type = 'washer'; else if (/nut\b/i.test(n)) out.type = 'nut'; else if (/standoff|spacer/i.test(n)) out.type = 'standoff'; else if (/insert/i.test(n)) out.type = 'insert';
     if (/socket/i.test(n)) out.head = 'socket head'; else if (/button/i.test(n)) out.head = 'button head'; else if (/flat head|countersunk/i.test(n)) out.head = 'flat head (countersunk)'; else if (/pan/i.test(n)) out.head = 'pan head'; else if (/hex head/i.test(n)) out.head = 'hex head';
+    if (/plastite|thread.?forming/i.test(n)) out.screw_type = 'thread-forming (Plastite)'; else if (/self.?tapping/i.test(n)) out.screw_type = 'self-tapping'; else if (/shoulder/i.test(n)) { out.screw_type = 'shoulder bolt'; out.head = out.head || 'socket head'; }
     if (/stainless/i.test(n)) out.material = '18-8 stainless steel'; else if (/titanium|\bTi\b/i.test(n)) out.material = 'grade 5 titanium'; else if (/alumin/i.test(n)) out.material = 'aluminum'; else if (/nylon/i.test(n)) out.material = 'nylon';
     return out;
   }
@@ -1762,7 +1769,7 @@
     const st = { q: S.cache.libq || '', cat: S.cache.libcat || '' };
     const search = input({ class: 'search', placeholder: 'Search name, specs, part number…', value: st.q });
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Component library'), h('p', null, 'Shared across robots. Measured weights here propagate to every robot that uses the part. Fasteners carry McMaster-style specs, get a consistent label from them, and can be duplicated to make the next length in one step.')),
-      h('div', { class: 'tb' }, search, h('button', { class: 'btn', onClick: () => compModal({ kind: 'fastener', specs: { type: 'screw', length_unit: 'mm', head: 'socket head', drive: 'hex (Allen)', material: 'alloy steel', finish: 'black oxide' }, category: 'Fasteners' }, { isNew: true }) }, '＋ Fastener…'), h('button', { class: 'btn primary', onClick: () => compModal() }, '＋ Component…'))));
+      h('div', { class: 'tb' }, search, h('button', { class: 'btn', onClick: () => compModal({ kind: 'fastener', specs: { type: 'screw', length_unit: 'mm', head: 'socket head', drive: 'hex (Allen)', material: 'alloy steel', finish: 'black oxide' }, category: 'Fasteners' }, { isNew: true }) }, '＋ Fastener…'), h('button', { class: 'btn primary', onClick: () => compModal() }, '＋ Component…'), h('button', { class: 'btn icon', title: 'More', onClick: e => menu(e.currentTarget, [{ label: 'Convert plain components to fasteners…', onClick: () => convertFastenersModal(comps) }]) }, '⋯'))));
     const tabs = h('div', { class: 'sub-tabs' });
     const tw = h('div', { class: 'tw' });
     const srcPill = c => h('span', { class: 'pill ' + (c.grams_source === 'measured' ? 'mea' : c.grams_source === 'estimated' ? 'est' : 'auto'), title: c.grams_source === 'estimated' ? 'Estimated from the specs — weigh a few to replace it' : '' }, c.grams_source || 'manual');
@@ -1799,6 +1806,32 @@
     search.addEventListener('input', () => { st.q = search.value; S.cache.libq = st.q; draw(); });
     m.append(tabs, tw); draw();
   };
+  // One-off helper for libraries built before fasteners existed: every plain component whose name parses as a fastener
+  // is listed with the specs it would get; tick the ones to convert (and whether to rename them to the standard label).
+  async function convertFastenersModal(comps) {
+    const cands = comps.filter(c => c.kind !== 'fastener').map(c => ({ c, sp: parseFastenerName(c.name) })).filter(x => x.sp.thread);
+    if (!cands.length) return toast('No plain components with a fastener-looking name (M3x12, #6-32 x 3/8"…) were found.');
+    for (const x of cands) { x.sp.type = x.sp.type || 'screw'; x.sp.length_unit = x.sp.length_unit || (/^M/.test(x.sp.thread) ? 'mm' : 'in'); x.on = true; x.rename = true; }
+    const rows = cands.map(x => {
+      const on = h('input', { type: 'checkbox', checked: true, onChange: e => { x.on = e.target.checked; } });
+      const rn = h('input', { type: 'checkbox', checked: true, onChange: e => { x.rename = e.target.checked; } });
+      const lbl = fastenerLabel(x.sp);
+      return h('tr', null, h('td', null, on), h('td', null, x.c.name, h('span', { class: 'sub' }, x.c.category || '')), h('td', { class: 'specs' }, fastenerSpecText(x.sp)), h('td', null, h('label', { class: 'tb', style: { gap: '6px' } }, rn, h('span', { class: 'prof' }, lbl || '—'))));
+    });
+    modal('Convert plain components to fasteners', h('div', null,
+      h('p', { class: 'hint', style: { marginTop: 0 } }, `${cands.length} component${cands.length === 1 ? '' : 's'} have a name that reads as a fastener. Converting keeps the weight, price, link and notes and adds the parsed specs (thread, length, head, material) — open one afterwards to fill in what the name did not say. Tick “rename” to use the standard label; untick to keep your wording.`),
+      h('div', { class: 'tw', style: { maxHeight: '55vh', overflow: 'auto' } }, h('table', { class: 'nores' }, h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Component'), h('th', null, 'Parsed specs'), h('th', null, 'Rename to'))), h('tbody', null, ...rows)))),
+      [{ label: 'Cancel' }, { label: 'Convert ticked', cls: 'primary', onClick: async () => {
+        let n = 0;
+        for (const x of cands) {
+          if (!x.on) continue;
+          const body = { kind: 'fastener', specs: x.sp, category: x.c.category || 'Fasteners' };
+          if (x.rename && fastenerLabel(x.sp)) body.name = fastenerLabel(x.sp);
+          await api('PUT', `components/${x.c.id}`, body); n++;
+        }
+        toast(`${n} component${n === 1 ? '' : 's'} converted`); render();
+      } }], { width: 'min(1100px, 96vw)' });
+  }
   function catDatalist(cats) {
     let dl = document.getElementById('cat-list');
     if (!dl) { dl = h('datalist', { id: 'cat-list' }); document.body.append(dl); }
@@ -1836,7 +1869,7 @@
       const threads = sp.thread && /^#|\/|"/.test(sp.thread) ? FT.imperial : sp.thread ? FT.metric : [...FT.metric, ...FT.imperial];
       specBox.append(field('Type', typeSel), field('Thread', h('div', { class: 'tb' }, mk('thread', { placeholder: 'M3, #6-32, 1/4"-20', style: { width: '130px' } }, [...FT.metric, ...FT.imperial]), h('span', { class: 'rng' }, 'pitch'), mk('pitch', { placeholder: 'mm or TPI', style: { width: '90px' } }))));
       if (t !== 'nut' && t !== 'washer') specBox.append(field('Length', h('div', { class: 'tb' }, mk('length', { type: 'number', step: 'any', style: { width: '90px' } }), unitSel, t === 'screw' && h('label', { class: 'rng' }, select([['full', 'fully threaded'], ['partial', 'partially threaded']], sp.thread_type || 'full', { style: { width: 'auto' }, onChange: e => { sp.thread_type = e.target.value; sync(); } })))));
-      if (t === 'screw' || t === 'other') specBox.append(field('Head', mk('head', { placeholder: 'socket head, button head…' }, FT.heads)), field('Drive', mk('drive', { placeholder: 'hex (Allen), Torx…' }, FT.drives)), field('Head size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, '⌀'), mk('head_dia', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'height'), mk('head_height', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'optional — improves the estimate'))));
+      if (t === 'screw' || t === 'other') specBox.append(field('Screw type', mk('screw_type', { placeholder: 'machine screw, thread-forming (Plastite)…' }, FT.screwTypes)), field('Head', mk('head', { placeholder: 'socket head, button head…' }, FT.heads)), field('Drive', mk('drive', { placeholder: 'hex (Allen), Torx…' }, FT.drives)), field('Head size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, '⌀'), mk('head_dia', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'height'), mk('head_height', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'optional — improves the estimate'))));
       if (t === 'nut' || t === 'insert') specBox.append(field('Nut type', mk('nut_type', { placeholder: 'hex nut, nylon-insert lock nut…' }, FT.nutTypes)), field('Size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'across flats'), mk('across_flats', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'thickness'), mk('thickness', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), t === 'insert' && h('span', { class: 'rng' }, 'OD'), t === 'insert' && mk('od', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }))));
       if (t === 'washer') specBox.append(field('Washer type', mk('washer_type', { placeholder: 'flat washer, split lock…' }, FT.washerTypes)), field('Size', h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'OD'), mk('od', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'ID'), mk('id', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), h('span', { class: 'rng' }, 'thickness'), mk('thickness', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }))));
       if (t === 'standoff') specBox.append(field('Shape', h('div', { class: 'tb' }, select([['hex', 'hex'], ['round', 'round']], sp.shape || 'hex', { style: { width: 'auto' }, onChange: e => { sp.shape = e.target.value; sync(); } }), h('span', { class: 'rng' }, 'across flats / ⌀'), mk('across_flats', { type: 'number', step: 'any', style: { width: '80px' }, placeholder: 'mm' }), select([['female-female', 'female–female'], ['male-female', 'male–female'], ['male-male', 'male–male']], sp.gender || 'female-female', { style: { width: 'auto' }, onChange: e => { sp.gender = e.target.value; sync(); } }))));
@@ -1849,7 +1882,7 @@
     const kindSeg = h('div', { class: 'seg' }, ...[['generic', 'Component'], ['fastener', 'Fastener']].map(([k, l]) => h('button', { 'aria-pressed': String(kind.v === k), onClick: e => { kind.v = k; [...e.currentTarget.parentNode.children].forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); fastBox.hidden = k !== 'fastener'; if (k === 'fastener') { if (!f.category.value) f.category.value = 'Fasteners'; if (!sp.thread && f.name.value) { Object.assign(sp, parseFastenerName(f.name.value)); drawSpecs(); auto.checked = false; } sync(); } } }, l)));
     drawSpecs(); if (kind.v === 'fastener') sync();
     const title = isEdit ? 'Edit component' : opts.duplicate ? `Duplicate “${c.name}”` : 'New component';
-    modal(title, h('div', null,
+    modal(title, h('div', { class: 'cdlg' },
       opts.duplicate && h('p', { class: 'hint', style: { marginTop: 0 } }, 'A copy with the same details. Change what differs — usually the length and the weight — and save it as a new component.'),
       field('Kind', kindSeg),
       fastBox,

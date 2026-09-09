@@ -373,3 +373,10 @@ td.specs{font-size:12px;color:var(--ink2);min-width:230px}
 table.libtbl td.cname{min-width:220px;max-width:340px}
 .specform .field{margin-bottom:6px}
 .specform{padding:8px 10px 2px;border:1px solid var(--rule);border-radius:8px;background:var(--panel2);margin-bottom:8px}
+
+/* component dialog: labels sit right next to their inputs */
+.cdlg .field{grid-template-columns:96px 1fr}
+.cdlg .specform .field{grid-template-columns:96px 1fr}
+.cdlg .grid2{gap:6px 18px}
+.cdlg .grid2 .field{grid-template-columns:88px 1fr}
+.cdlg .field label{white-space:nowrap}
