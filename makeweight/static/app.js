@@ -88,8 +88,29 @@
     const r = await fetch('/api/' + path, opts);
     if (raw && raw.blob) return r.blob();
     const j = await r.json().catch(() => ({}));
+    if (r.status === 423 && j.locked) { lockedModal(j); throw new Error(j.error || 'The shared data is in use on another computer'); }
     if (!r.ok) throw new Error(j.error || r.statusText);
     return j;
+  }
+  // ------------------------------------------------------------ shared-data lock (idle release / take over)
+  let LOCKED_OPEN = false;
+  function lockedModal(j) {
+    if (LOCKED_OPEN) return; LOCKED_OPEN = true;
+    const o = j.locked || {}, mins = Math.max(0, Math.round((Date.now() / 1000 - (o.heartbeat || 0)) / 60));
+    modal('Shared data in use elsewhere', h('div', null,
+      h('p', null, h('b', null, o.host || 'another computer'), ` has MakeWeight open with this data (active ${mins} min ago). To keep the database in one piece only one computer writes at a time.`),
+      h('p', { class: 'hint' }, 'Wait — that computer releases the data by itself after a few idle minutes — or take over now: the other computer pauses and shows a “resume” notice; nothing it already saved is lost, but anything typed there in the next moments would not be.')),
+      [{ label: 'Wait', onClick: () => { LOCKED_OPEN = false; } }, { label: `Take over from ${o.host || 'it'}`, cls: 'primary', onClick: async () => { await api('POST', 'data/takeover'); LOCKED_OPEN = false; toast('Resumed on this computer'); await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => { }); render(); } }], { onClose: () => { LOCKED_OPEN = false; } });
+  }
+  function lockBanner() {
+    const L = ((S.state || {}).data || {}).lock; if (!L || !L.dormant) return null;
+    const since = L.dormant_since ? Math.round((Date.now() / 1000 - L.dormant_since) / 60) : 0;
+    const lost = L.lost_to && L.lost_to.host;
+    return h('div', { class: 'lockbar' + (lost ? ' lost' : '') },
+      h('span', null, lost ? h('span', null, h('b', null, lost), ` took over the shared data ${since} min ago — this computer is paused so the two never write at once.`)
+        : L.other ? h('span', null, h('b', null, L.other.host), ' is using the shared data right now — this computer is paused. Wait for it to go idle, or take over.')
+          : h('span', null, h('b', null, 'Paused'), ' — idle for a while, so the shared data was released for your other computers. Anything you do here resumes it.')),
+      h('button', { class: 'btn small primary', onClick: async () => { try { await api('POST', 'data/resume'); toast('Resumed'); await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => { }); render(); } catch (e) { /* 423 → lockedModal */ } } }, L.other || lost ? 'Resume / take over…' : 'Resume here'));
   }
   function toast(msg, err) {
     const t = h('div', { class: 'toast' + (err ? ' err' : '') }, msg);
@@ -774,9 +795,10 @@
     tr.append(h('td', { class: 'grip' }, h('span', { class: 'dragh', title: 'Drag to move this line' }, '⋮⋮')));
     tr.append(edCell(it.qty, v => upd({ qty: v }), { type: 'number', cls: 'num qty', fmt: v => Number(v) % 1 ? v : String(v) }));
     // description
-    const descCell = edCell(it.description, v => upd({ description: v }), { render: v => h('span', null, v || h('i', { style: { color: 'var(--ink3)' } }, 'untitled'), p && p.locked && h('span', { class: 'pill lock', style: { marginLeft: '6px' } }, '🔒'),
+    const hasChips = !!((p && p.locked) || !it.counted || it.component_id || (it.configs !== null && (r.configs || []).length));
+    const descCell = edCell(it.description, v => upd({ description: v }), { render: v => h('span', { class: hasChips ? 'dwrap chips' : 'dwrap' }, h('span', { class: 'nm', title: v || '' }, v || h('i', { style: { color: 'var(--ink3)' } }, 'untitled')), p && p.locked && h('span', { class: 'pill lock', style: { marginLeft: '6px' } }, '🔒'),
       !it.counted && h('button', { class: 'pill cfg warn', title: 'Excluded from the total by hand — click to include it again', onClick: e => { e.stopPropagation(); upd({ counted: true }).catch(fail); } }, 'not in total'), cfgChip(it, r),
-      it.component_id && h('button', { class: 'pill cfg lib', title: 'Linked to a library component — its weight follows the library (weigh-ins there update every robot). Click to open it in the library.', onClick: e => { e.stopPropagation(); S.cache.libq = it.description; S.cache.libcat = ''; go('library'); } }, '📚'), p && h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.filament ? p.filament.name : ''}` : 'printed part · no mesh attached', p.role ? ` · ${p.role}` : '')) });
+      it.component_id && h('button', { class: 'pill cfg lib', title: 'Linked to a library component — its weight follows the library (weigh-ins there update every robot). Click for options.', onClick: e => { e.stopPropagation(); menu(e.currentTarget, [{ label: 'Change library component (different size…)', onClick: () => linkComponentModal(it) }, { label: 'Open in the library', onClick: () => { S.cache.libq = it.description; S.cache.libcat = ''; go('library'); } }, { label: 'Unlink (keep the values)', onClick: () => upd({ component_id: null }).then(() => toast('Unlinked')).catch(fail) }]); } }, '📚'), p && h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.filament ? p.filament.name : ''}` : 'printed part · no mesh attached', p.role ? ` · ${p.role}` : '')) });
     tr.append(descCell);
     if (p) tr.append(h('td', { class: 'wrap' }, h('a', { href: '#/part/' + p.id, class: 'prof' }, p.profile ? p.profile.string : '—')));
     else tr.append(edCell(it.purpose, v => upd({ purpose: v }), { cls: 'wrap', render: v => h('span', { class: 'rng' }, v || '') }));
@@ -884,8 +906,8 @@
     items.push('-');
     items.push({ label: 'Move to section ▸', onClick: () => modal('Move to section', select(r.sections.map(x => [x.id, x.name]), s.id, { id: 'mv-sec' }), [{ label: 'Cancel' }, { label: 'Move', cls: 'primary', onClick: async () => { await api('POST', `items/${it.id}/move`, { section_id: +$('#mv-sec').value }); await refreshRobot(); } }]) });
     if (!it.part && !it.component_id) items.push({ label: 'Save to library as component (and link)', onClick: async () => { const c = await api('POST', 'components', { name: it.description, category: s.name, link: it.link, price: it.price, dimensions: it.dimensions, grams: it.measured_grams ?? it.est_grams, grams_source: it.measured_grams != null ? 'measured' : 'manual' }); await api('PUT', `items/${it.id}`, { component_id: c.id }); S.cache.comps = null; await refreshRobot(); toast('Added to the library and linked'); } });
-    if (!it.part && !it.component_id) items.push({ label: 'Link to a library component…', onClick: () => linkComponentModal(it) });
-    if (it.component_id) items.push({ label: 'Unlink from the library (keep values)', onClick: () => upd({ component_id: null }).catch(fail) });
+    if (!it.part) items.push({ label: it.component_id ? 'Change library component (different size…)' : 'Link to a library component…', onClick: () => linkComponentModal(it) });
+    if (it.component_id) items.push({ label: 'Unlink from the library (keep the values)', onClick: async () => { await upd({ component_id: null }); toast('Unlinked — the line keeps its current numbers'); } });
     items.push('-', { label: 'Delete line', cls: 'danger', onClick: async () => { try { await api('DELETE', `items/${it.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description || 'line'}”`); } catch (e) { fail(e); } } });
     menu(anchor, items);
   }
@@ -1010,7 +1032,8 @@
   }
   async function linkComponentModal(it) {
     const comps = await loadComps();
-    const search = input({ placeholder: 'Search the library…', class: 'search w', value: it.description || '' });
+    // when changing, start the search from the family ("M3", "#6-32") so the other sizes show up
+    const search = input({ placeholder: 'Search the library…', class: 'search w', value: it.component_id ? (it.description || '').split(/\s[×x]\s/)[0].trim() : (it.description || '') });
     const pull = h('input', { type: 'checkbox', checked: true });
     const list = h('div', { class: 'tw', style: { maxHeight: '360px', overflow: 'auto', marginTop: '10px' } });
     let chosen = null;
@@ -1023,12 +1046,20 @@
       list.append(h('table', { class: 'nores' }, tb));
     };
     search.addEventListener('input', draw); draw();
-    modal(`Link “${it.description}” to the library`, h('div', null, search, list, field('', h('label', null, pull, ' take the component’s name, weight, price and link for this line'))),
-      [{ label: 'Cancel' }, { label: 'Link', cls: 'primary', onClick: async () => {
+    const hadWeigh = (it.weigh_ins || []).length > 0;
+    const clearW = h('input', { type: 'checkbox', checked: !!it.component_id });
+    modal(it.component_id ? `Change the library component for “${it.description}”` : `Link “${it.description}” to the library`, h('div', null,
+      it.component_id && h('p', { class: 'hint', style: { marginTop: 0 } }, 'Pick the component this line should be now — e.g. the same screw in another length. The line takes the new component’s name, weight, price and link, so the sheet total follows.'),
+      search, list,
+      field('', h('label', null, pull, ' take the component’s name, weight, price and link for this line')),
+      hadWeigh && field('', h('label', null, clearW, ` clear this line’s ${it.weigh_ins.length} weigh-in${it.weigh_ins.length === 1 ? '' : 's'} (they measured the old part — otherwise the measured weight keeps winning over the library weight)`))),
+      [{ label: 'Cancel' }, { label: it.component_id ? 'Change' : 'Link', cls: 'primary', onClick: async () => {
         if (!chosen) { toast('Pick a component'); return false; }
+        if (hadWeigh && clearW.checked) await api('DELETE', `items/${it.id}/weighins`, undefined, { label: 'clear weigh-ins' });
         const patch = { component_id: chosen.id };
-        if (pull.checked) { patch.description = chosen.name; if (chosen.grams != null && it.measured_grams == null) { patch.est_grams = chosen.grams; patch.est_source = 'library'; } if (chosen.price != null) patch.price = chosen.price; if (chosen.link) patch.link = chosen.link; }
-        await api('PUT', `items/${it.id}`, patch, { label: `link “${it.description}” to the library` }); await refreshRobot();
+        if (pull.checked) { patch.description = chosen.name; if (chosen.grams != null) { patch.est_grams = chosen.grams; patch.est_source = 'library'; } if (chosen.price != null) patch.price = chosen.price; if (chosen.link) patch.link = chosen.link; if (chosen.dimensions) patch.dimensions = chosen.dimensions; }
+        await api('PUT', `items/${it.id}`, patch, { label: `${it.component_id ? 'change' : 'link'} library component of “${it.description}”` }); await refreshRobot();
+        toast(`Now “${chosen.name}”${chosen.grams != null ? ` · ${fmt(chosen.grams, 2)} g each` : ''}`);
       } }], { width: '720px' });
   }
   async function fromLibraryModal(sectionId) {
@@ -2378,9 +2409,15 @@
     box.append(h('b', null, d.shared ? 'Shared data folder' : 'Data on this computer only'), ' ',
       h('span', { class: 'mono', style: { fontSize: '11px', wordBreak: 'break-all' } }, d.root || st.root));
     if (d.unreachable) box.append(h('p', { class: 'hint', style: { color: 'var(--bad)' } }, `⚠ The shared folder ${d.unreachable} was not reachable when the app started (cloud drive not signed in or not mounted?). You are looking at this computer's own copy until it is back — restart the app once it is.`));
-    if (d.lock_conflict) box.append(h('p', { class: 'hint', style: { color: 'var(--bad)' } }, `⚠ ${d.lock_conflict.host} also had MakeWeight open (last seen ${Math.round((Date.now() / 1000 - d.lock_conflict.heartbeat) / 60)} min ago). Two computers editing at the same time through a cloud drive can corrupt the database — close it on one of them.`));
+    const L = d.lock || {};
+    if (d.shared) {
+      const idle = input({ type: 'number', min: 1, max: 240, step: 1, value: st.settings.idle_release_min || 5, style: { width: '70px' }, onChange: async e => { await api('PUT', 'settings', { idle_release_min: Math.max(1, +e.target.value || 5) }); toast('Saved'); } });
+      box.append(h('p', { class: 'hint' }, L.dormant ? h('span', null, '⏸ ', h('b', null, 'Paused on this computer'), L.lost_to ? ` — ${L.lost_to.host} took the data over.` : ' — released after sitting idle.', ' It resumes as soon as you do anything here.') : h('span', null, '● ', h('b', null, 'In use on this computer'), L.other ? h('span', { style: { color: 'var(--bad)' } }, ` · ⚠ ${L.other.host} also holds it (active ${Math.round((Date.now() / 1000 - (L.other.heartbeat || 0)) / 60)} min ago)`) : ' · no other computer is using it right now.')),
+        h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'Release the data after'), idle, h('span', { class: 'rng' }, 'idle minutes (then any other computer can open it; this one resumes on your next action)'),
+          L.dormant ? h('button', { class: 'btn small', onClick: async () => { try { await api('POST', 'data/resume'); await loadState(); render(); } catch (e) { } } }, 'Resume now') : h('button', { class: 'btn small', title: 'Close the database and give the shared folder up right away — e.g. before walking over to the other computer', onClick: async () => { await api('POST', 'data/pause'); await loadState(); render(); } }, 'Pause now')));
+    }
     box.append(h('p', { class: 'hint' }, d.shared
-      ? 'Robots, filaments, profiles and weigh-ins are read from and written to this folder; the slicer install and caches stay on this computer. Close the app on one computer and let the cloud drive finish syncing before opening it on another.'
+      ? 'Robots, filaments, profiles and weigh-ins are read from and written to this folder; the slicer install and caches stay on this computer. Only one computer uses the data at a time: an idle copy releases it automatically, and you can take it over from another computer when you need to.'
       : 'To use the same data on more than one computer, move it into a folder your cloud drive syncs (iCloud Drive, OneDrive, Dropbox, Google Drive) and point the other computers at the same folder.'));
     box.append(h('div', { class: 'tb' },
       h('button', { class: 'btn small', onClick: () => shareDataModal(st) }, d.shared ? 'Change shared folder…' : 'Use a shared folder…'),
@@ -2473,6 +2510,7 @@
     S.partRefresh = null; S.partFullPending = false;
     m.textContent = '';
     const fn = V[S.view] || V.home;
+    const lb = lockBanner(); if (lb) m.append(lb);
     try { await fn(m); } catch (e) { m.append(h('div', { class: 'empty' }, 'Something went wrong: ' + e.message)); console.error(e); }
     requestAnimationFrame(() => { window.scrollTo(0, sy); m.scrollTop = st; fitTables(); });
   }
@@ -2536,6 +2574,7 @@
       if (d.type === 'install') { S.state.install = d; if (S.view === 'jobs') { clearTimeout(timer); timer = setTimeout(render, 150); } if (d.status === 'done') { loadState().then(render); toast(d.message); } if (d.status === 'error') toast(d.message, true); }
       if (d.type === 'update') { if (S.updateWatch) S.updateWatch(d); else if (d.status === 'done') waitForNewVersion(); }
       if (d.type === 'undo') { if (S.state) { S.state.undo = { undo: d.undo, redo: d.redo }; renderShell(); } }
+      if (d.type === 'lock') { clearTimeout(timer); timer = setTimeout(async () => { await loadState().catch(() => { }); if (!d.dormant && S.robotId) await loadRobot(S.robotId).catch(() => { }); render(); if (d.dormant && d.lost_to) toast(`${d.lost_to.host} took over the shared data — this computer is paused`, true); }, 150); }
       if (d.type === 'robot') { clearTimeout(timer); timer = setTimeout(async () => { await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => {}); render(); }, 200); }
       if (d.type === 'job' || d.type === 'line_item') {
         clearTimeout(timer);
@@ -2560,8 +2599,10 @@
       matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyAppearance(loadAppearance()));
       const saved = +localStorage.getItem('sb.robot');
       const rid = S.state.robots.find(r => r.id === saved && r.status === 'active') ? saved : (S.state.robots.find(r => r.status === 'active') || {}).id;
-      if (rid) await loadRobot(rid);
-      if (!S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
+      // paused (shared data released / in use elsewhere): just opening a tab must not grab the data — the first real action does
+      if (rid && !S.state.dormant) await loadRobot(rid).catch(() => { });
+      if (S.state.dormant) S.view = 'home';
+      if (S.state.slicer && !S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
       await render(); connectSSE(); setTimeout(autoUpdateCheck, 3000); setInterval(autoUpdateCheck, 3600e3);
     } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the ' + document.title + ' service: ' + e.message)); }
   })();

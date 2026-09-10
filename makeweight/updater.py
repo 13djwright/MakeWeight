@@ -113,7 +113,10 @@ class Updater:
     def check(self) -> dict:
         info = fetch_latest(self.repo())
         self.latest = info
-        self.db.set_setting("update_last_check", time.time())
+        try:
+            self.db.set_setting("update_last_check", time.time())
+        except Exception:  # noqa — data paused: not worth failing the check over
+            pass
         log.info("update check: current %s, latest %s (%s)", current_version(), info["version"], info["asset"])
         return {"current": current_version(), "target": target(), **info}
 

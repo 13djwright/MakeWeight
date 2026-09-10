@@ -401,3 +401,12 @@ td.sugcell{position:relative;overflow:visible}
 .suggest .foot{padding:4px 10px;font-size:11px}
 .pill.cfg.lib{background:var(--slate-soft);color:var(--slate);padding:1px 5px}
 table.fixed td.sugcell{overflow:visible}
+
+.lockbar{display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:8px;background:var(--warn-soft);color:var(--ink);border:1px solid var(--warn);font-size:13px;margin-bottom:12px}
+.lockbar.lost{background:var(--bad-soft);border-color:var(--bad)}
+.lockbar > span{flex:1}
+
+/* description cell: chips stay visible even when the name is long */
+table.sheet td .dwrap{display:block;min-width:0}
+table.sheet td .dwrap .nm{vertical-align:bottom}
+table.sheet td .dwrap.chips .nm{display:inline-block;max-width:calc(100% - 64px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

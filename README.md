@@ -39,9 +39,11 @@ Drive — the ones present on the machine are offered, and the folder picker mar
 data with a ✓). Choose **Move my data there** on the first computer and **Use the data already there** on each other one —
 point at the folder that contains `data/` (the drive has a different path on every computer, e.g.
 `~/Library/CloudStorage/GoogleDrive-…/My Drive/MakeWeight` on a Mac and `G:\My Drive\MakeWeight` on Windows). Robots, filaments, profiles and weigh-ins are then read from and written to
-that folder; the slicer install, caches and machine-specific settings stay on each computer. Close the app on one
-computer and let the drive finish syncing before opening it on another — a heartbeat file warns if two are open at
-once. **Stop sharing** copies the data back to the computer.
+that folder; the slicer install, caches and machine-specific settings stay on each computer. Only one computer uses the
+data at a time: a copy that sits idle (5 minutes by default, adjustable) releases it automatically, and another computer
+then picks it up on its next action. If the other computer is still busy you can **take over** — it pauses itself and
+shows a resume notice — so a machine left running somewhere never blocks you. **Stop sharing** copies the data back to
+the computer.
 
 ## First run
 

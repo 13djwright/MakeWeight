@@ -326,19 +326,25 @@ def migrate_legacy_data(log) -> list[str]:
 
 
 class DataLock:
-    """A heartbeat file in the shared data/ folder saying which computer has the app open. Two computers writing the
-    same SQLite file through a cloud drive at once is how databases get corrupted, so the second one to start gets a
-    warning (it is not blocked — the lock file may simply be stale after a crash)."""
+    """A heartbeat file in the shared data/ folder saying which computer is *using* the data right now. Two computers
+    writing the same SQLite file through a cloud drive at once is how databases get corrupted, so the app only holds the
+    lock while someone is actually working: after a few idle minutes it releases it (closes the database) and any other
+    computer may take it. A computer can also take the lock over by force; the previous holder notices on its next
+    heartbeat and pauses itself."""
 
-    def __init__(self, data_dir: Path, ttl: float = 150.0):
+    def __init__(self, data_dir: Path, ttl: float = 180.0, beat: float = 45.0):
         import socket
         import threading
         self.path = Path(data_dir) / "LOCK.json"
-        self.host = socket.gethostname()
+        self.host = os.environ.get(ENV_HOME.replace('_HOME', '_HOST')) or socket.gethostname()
         self.ttl = ttl
-        self.conflict: dict | None = None
+        self.beat_s = beat
+        self.conflict: dict | None = None      # another live holder seen when we acquired
+        self.held = False
+        self.on_lost = None                    # callback(other_record) when another computer took the lock from us
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._started = 0.0
 
     def read(self) -> dict | None:
         try:
@@ -347,38 +353,67 @@ class DataLock:
         except Exception:
             return None
 
-    def _write(self):
+    def peek(self) -> dict | None:
+        """The other computer's record if it holds a live lock (heartbeat younger than ttl), else None."""
+        cur = self.read()
+        if cur and cur.get("host") != self.host and time.time() - float(cur.get("heartbeat") or 0) < self.ttl:
+            return cur
+        return None
+
+    def _write(self, extra: dict | None = None):
         import json
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps({"host": self.host, "pid": os.getpid(), "started": self._started, "heartbeat": time.time()}), encoding="utf-8")
+            rec = {"host": self.host, "pid": os.getpid(), "started": self._started, "heartbeat": time.time()}
+            if extra:
+                rec.update(extra)
+            self.path.write_text(json.dumps(rec), encoding="utf-8")
         except OSError:
             pass
 
-    def acquire(self) -> dict | None:
-        """Returns the other computer's record when it looks live (heartbeat younger than ttl), else None."""
+    def acquire(self, force: bool = False) -> dict | None:
+        """Take the lock. Returns the other computer's live record when there is one (and force=False → not taken)."""
         import threading
+        other = self.peek()
+        if other and not force:
+            self.conflict = other
+            return other
         self._started = time.time()
-        cur = self.read()
-        if cur and cur.get("host") != self.host and time.time() - float(cur.get("heartbeat") or 0) < self.ttl:
-            self.conflict = cur
-        self._write()
-        self._thread = threading.Thread(target=self._beat, name="data-lock", daemon=True)
-        self._thread.start()
-        return self.conflict
+        self.conflict = None
+        self._write({"took_over_from": other.get("host")} if other else None)
+        self.held = True
+        self._stop.clear()
+        if not (self._thread and self._thread.is_alive()):
+            self._thread = threading.Thread(target=self._beat, name="data-lock", daemon=True)
+            self._thread.start()
+        return None
 
     def _beat(self):
-        while not self._stop.wait(30):
-            other = self.read()
-            if other and other.get("host") != self.host and time.time() - float(other.get("heartbeat") or 0) < self.ttl:
-                self.conflict = other          # someone else started while we run: surface it too
+        while not self._stop.wait(self.beat_s):
+            if not self.held:
+                continue
+            cur = self.read()
+            if cur and cur.get("host") != self.host and time.time() - float(cur.get("heartbeat") or 0) < self.ttl:
+                # someone took over: stop writing, tell the app to pause
+                self.held = False
+                if self.on_lost:
+                    try:
+                        self.on_lost(cur)
+                    except Exception:  # noqa
+                        pass
+                continue
             self._write()
 
     def release(self):
-        self._stop.set()
+        """Give the lock up (idle, pause, shutdown). Only removes the file when it is ours."""
+        self.held = False
         cur = self.read()
         if cur and cur.get("host") == self.host and cur.get("pid") == os.getpid():
             try:
                 self.path.unlink()
             except OSError:
                 pass
+
+    def shutdown(self):
+        self._stop.set()
+        self.release()

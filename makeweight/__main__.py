@@ -95,7 +95,7 @@ def main():
     finally:
         httpd.server_close()
         try:
-            getattr(getattr(httpd.RequestHandlerClass, "app", None), "lock", None).release()
+            getattr(getattr(httpd.RequestHandlerClass, "app", None), "lock", None).shutdown()
         except Exception:  # noqa
             pass
     # a finished self-update asked us to hand over: the port is free now, start the new version and leave

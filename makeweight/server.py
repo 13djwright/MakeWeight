@@ -51,7 +51,17 @@ class App:
         log.info("%s %s starting; data=%s%s; local=%s; %s; python %s", paths.APP_NAME, applog._app_version(), self.root, " (shared folder)" if self.shared else "", self.local, platform.platform(), sys.version.split()[0])
         paths.migrate_db_filename(self.data_dir, log)
         self.lock = paths.DataLock(self.data_dir)
-        self.lock_conflict = self.lock.acquire()          # another computer's live heartbeat → warn in the UI, keep going
+        self.lock.on_lost = self._lock_lost
+        # data-use state (shared folder): "active" holds the lock; "dormant" = database closed, lock released, so another
+        # computer may work; "lost" = another computer took the lock over while we were active
+        self.dormant = False
+        self.dormant_since: float | None = None
+        self.lost_to: dict | None = None
+        self.last_active = time.time()
+        self._state_cache: dict | None = None
+        self.lock_conflict = self.lock.acquire()          # another computer's live heartbeat → start paused instead of fighting over the file
+        if self.lock_conflict and self.shared:
+            log.warning("shared data is in use on %s — starting paused", self.lock_conflict.get("host"))
         self.db = DB(self.data_dir / paths.DB_FILE, sync_safe=self.shared)
         if self.shared:
             self.db.local_file = self.local / "settings.json"       # machine-specific settings stay on this machine
@@ -72,6 +82,78 @@ class App:
         self._rm_cache: dict = {}
         self._rm_lock = threading.Lock(); self._rm_build_lock = threading.Lock(); self._rm_building: dict = {}; self._rm_errors: dict = {}
         threading.Thread(target=self._backup_loop, daemon=True).start()
+        if self.lock_conflict and self.shared:
+            self.go_dormant("in use on another computer")
+        if self.shared:
+            threading.Thread(target=self._idle_watch, name="idle-watch", daemon=True).start()
+
+    # ---- shared-data lock: pause when idle, wake on use, take over on demand
+    IDLE_EXEMPT = ("stream", "state", "update/check", "update/status", "data/browse", "data/status", "log", "diagnostics")
+
+    def idle_seconds(self) -> float:
+        try:
+            return float(self.db.setting("idle_release_min") or 5) * 60 if not self.db.closed else 300.0
+        except Exception:  # noqa
+            return 300.0
+
+    def touch(self):
+        self.last_active = time.time()
+
+    def _idle_watch(self):
+        while True:
+            time.sleep(15)
+            try:
+                if self.dormant or self.restarting or not self.shared:
+                    continue
+                if time.time() - self.last_active < self.idle_seconds():
+                    continue
+                if (self.jobs.queue_state() or {}).get("running") or (self.jobs.queue_state() or {}).get("queued"):
+                    continue                                   # slicing for this robot: still working
+                self.go_dormant("idle")
+            except Exception:  # noqa
+                log.exception("idle watch")
+
+    def lock_status(self) -> dict:
+        other = self.lock.peek() if self.shared else None
+        return {"shared": self.shared, "host": self.lock.host, "dormant": self.dormant, "dormant_since": self.dormant_since, "reason": getattr(self, "dormant_reason", None),
+                "lost_to": self.lost_to, "other": other, "held": self.lock.held, "idle_min": (self.idle_seconds() / 60) if not self.db.closed else None}
+
+    def go_dormant(self, reason: str, other: dict | None = None):
+        """Release the shared data: stop slicing, close the database, drop the heartbeat. Cheap to undo (wake)."""
+        if self.dormant:
+            return
+        log.info("data: pausing (%s)", reason)
+        try:
+            self._state_cache = self._build_state()
+        except Exception:  # noqa
+            log.exception("state snapshot before pausing")
+            self._state_cache = self._state_cache or {}
+        self.dormant = True; self.dormant_since = time.time(); self.dormant_reason = reason
+        if other:
+            self.lost_to = other
+        self.jobs.pause()
+        self.db.close()
+        self.lock.release()
+        self.events.emit("lock", self.lock_status())
+
+    def _lock_lost(self, other: dict):
+        self.go_dormant(f"{other.get('host')} took over", other=other)
+
+    def wake(self, force: bool = False) -> dict | None:
+        """Resume using the shared data. Returns the other computer's record when it is live and force is False."""
+        if not self.dormant:
+            return None
+        other = self.lock.acquire(force=force)
+        if other:
+            return other
+        log.info("data: resuming%s", " (took over)" if force else "")
+        self.db.reopen()
+        self._repair_mesh_paths()
+        self.dormant = False; self.dormant_since = None; self.lost_to = None; self.dormant_reason = None
+        self.last_active = time.time()
+        self.jobs.start()
+        self.events.emit("lock", self.lock_status())
+        return None
 
     def region_model(self, part: dict, params: dict, wait: bool = False):
         """RegionModel for a part's current geometry (cached, a few entries).
@@ -233,6 +315,66 @@ class App:
         robot["queue"] = self.db.one("SELECT COUNT(*) n FROM slice_jobs j JOIN printed_parts p ON p.id=j.part_id WHERE p.robot_id=? AND j.status IN ('queued','running')", [rid])["n"]
         return robot
 
+    def robot_list(self):
+        rows = self.db.q("SELECT * FROM robots ORDER BY status='active' DESC, updated DESC")
+        out = []
+        for rb in rows:
+            det = self.robot_detail(rb["id"])
+            items = [it for s in det["sections"] for it in s["items"]]
+            n_parts = sum(1 for it in items if it.get("part"))
+            # one summary line per configuration (the sheet's totals follow the active one; the card shows them all)
+            per = []
+            def section_sums(cid):
+                """[{name, grams, printed}] per counted section for one configuration (None = the active one)."""
+                out_s = []
+                for s in det["sections"]:
+                    if not s["counts"]:
+                        continue
+                    g = pg = 0.0
+                    for it in s["items"]:
+                        cj = it.get("configs")
+                        ok = it.get("in_total") if cid is None else (it.get("counted", True) and (cj is None or cid in cj))
+                        if not ok:
+                            continue
+                        g += it["total_grams"]
+                        if it.get("part"):
+                            pg += it["total_grams"]
+                    out_s.append({"name": s["name"], "grams": g, "printed": pg})
+                return out_s
+            for c in det.get("configs") or []:
+                secs = section_sums(c["id"])
+                tot = sum(x["grams"] for x in secs); printed = sum(x["printed"] for x in secs)
+                per.append({"id": c["id"], "name": c["name"], "best_known": tot, "printed": printed, "over_under": tot - rb["weight_class_g"],
+                            "over_under_margin": tot + (rb["margin_g"] or 0) - rb["weight_class_g"], "active": c["id"] == det.get("active_config"), "sections": secs})
+            weigh_dates = [w["date"] for it in items for w in it.get("weigh_ins", [])]
+            last_run = self.db.one("SELECT MAX(date) d FROM runs WHERE robot_id=? AND kind='optimize'", [rb["id"]])["d"]
+            out.append({k: rb[k] for k in rb if k != "configs_json"} | {
+                "totals": det["totals"], "printed_parts": n_parts, "configs": per, "active_config": det.get("active_config"), "sections_summary": section_sums(None),
+                "lines": len(items), "parts_with_mesh": sum(1 for it in items if it.get("part") and it["part"].get("mesh")),
+                "parts_locked": sum(1 for it in items if it.get("part") and it["part"].get("locked")),
+                "measured_lines": sum(1 for it in items if it.get("measured_grams") is not None), "counted_lines": sum(1 for it in items if it.get("in_total")),
+                "price_total": sum((it.get("price") or 0) * (it.get("qty") or 0) for it in items),
+                "last_weigh_in": max(weigh_dates) if weigh_dates else None, "last_optimize": last_run,
+                "slice_errors": sum(1 for it in items if it.get("part") and (it["part"].get("slice") or {}).get("status") == "error"),
+            })
+        return out
+
+    def _build_state(self, handler=None) -> dict:
+        db = self.db
+        robots = self.robot_list()
+        return {
+            "slicer": self.jobs.queue_state(), "install": self.install_state, "engines": self.jobs.engine_status(), "undo": self.undo.state(),
+            "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id", "appearance", "update_repo", "col_widths", "idle_release_min")},
+            "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
+            "filaments": [self._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
+            "profiles": [self._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
+            "robots": robots, "update_repo": self.updater.repo(),
+            "data": {"root": str(self.root), "local": str(self.local), "shared": self.shared and self.root.resolve() != self.local.resolve(), "lock_conflict": self.lock.conflict, "host": self.lock.host,
+                     "unreachable": os.environ.get("MAKEWEIGHT_SHARED_UNREACHABLE"), "cloud_folders": paths.cloud_folders(), "lock": self.lock_status()},
+            "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(self.root), "app": paths.BRAND, "install_dir": str(paths.install_dir()), "portable": paths.is_portable(),
+            "classes": CLASSES,
+        }
+
     def _weighin_slice_landed(self, job: dict):
         """A slice queued behind a weigh-in finished: store its grams on every weigh-in of that part that named the profile."""
         part = self.db.get("printed_parts", job["part_id"])
@@ -370,7 +512,7 @@ class App:
         while True:
             try:
                 last = self.db.setting("last_backup", 0)
-                if time.time() - last > 86400:
+                if not self.db.closed and time.time() - last > 86400:
                     self.backup()
             except Exception:
                 traceback.print_exc()
@@ -481,6 +623,12 @@ class Handler(BaseHTTPRequestHandler):
             qs = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
             if path.startswith("/api/"):
                 api_path = path[5:].rstrip("/")
+                if not any(api_path == x or api_path.startswith(x + "/") for x in self.app.IDLE_EXEMPT) and not api_path.startswith("data/"):
+                    self.app.touch()
+                    if self.app.dormant:
+                        other = self.app.wake()
+                        if other:
+                            return self._json({"error": f"The shared data is in use on {other.get('host')} (active {int((time.time() - float(other.get('heartbeat') or 0)) // 60)} min ago). Wait, or take it over.", "locked": other, "lock": self.app.lock_status()}, 423)
                 if method in ("POST", "PUT", "DELETE") and not re.match(r"^(undo|redo|settings|slicer/|jobs|backup|log|diagnostics|meshes$|parts/\d+/(slice|orientation_sweep)$|robots/\d+/(optimize|slice_all|mesh_matches)$|runs/\d+/cancel$|filaments/\d+/recalc$)", api_path):
                     before = self.app.undo.snapshot()
                     try:
@@ -540,18 +688,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse()
 
         if path == "state":
-            return self._json({
-                "slicer": app.jobs.queue_state(), "install": app.install_state, "engines": app.jobs.engine_status(), "undo": app.undo.state(),
-                "settings": {k: db.setting(k) for k in ("workers", "keep_gcode", "slicer_path", "bambu_path", "slicer_engine", "default_printer_id", "default_filament_id", "default_profile_id", "appearance", "update_repo", "col_widths")},
-                "printers": [dict(p, nozzles=loads(p.pop("nozzles_json"), [0.4]), bed=loads(p.pop("bed_json"), {})) for p in db.q("SELECT * FROM printers ORDER BY id")],
-                "filaments": [app._filament_view(f) for f in db.q("SELECT * FROM filaments ORDER BY builtin DESC, name")],
-                "profiles": [app._profile_view(p) for p in db.q("SELECT * FROM profiles ORDER BY builtin DESC, name")],
-                "robots": self._robot_list(), "update_repo": app.updater.repo(),
-                "data": {"root": str(app.root), "local": str(app.local), "shared": app.shared and app.root.resolve() != app.local.resolve(), "lock_conflict": app.lock.conflict, "host": app.lock.host,
-                         "unreachable": os.environ.get("MAKEWEIGHT_SHARED_UNREACHABLE"), "cloud_folders": paths.cloud_folders()},
-                "version": __import__("json").loads((Path(__file__).parent / "version.json").read_text())["version"], "root": str(app.root), "app": paths.BRAND, "install_dir": str(paths.install_dir()), "portable": paths.is_portable(),
-                "classes": CLASSES,
-            })
+            if app.dormant:
+                st = dict(app._state_cache or {}); st["data"] = dict(st.get("data") or {}, lock=app.lock_status()); st["dormant"] = True
+                return self._json(st)
+            return self._json(app._build_state(self))
+        if path == "data/status" and m == "GET":
+            return self._json(app.lock_status())
+        if path == "data/takeover" and m == "POST":
+            other = app.wake(force=True)
+            return self._json({"ok": other is None, "lock": app.lock_status()})
+        if path == "data/resume" and m == "POST":
+            other = app.wake(force=False)
+            if other:
+                return self._json({"error": f"The shared data is in use on {other.get('host')}.", "locked": other, "lock": app.lock_status()}, 423)
+            return self._json({"ok": True, "lock": app.lock_status()})
+        if path == "data/pause" and m == "POST":
+            if app.shared:
+                app.go_dormant("paused by hand")
+            return self._json({"ok": True, "lock": app.lock_status()})
         if path == "settings" and m == "PUT":
             body = self._jbody()
             for k, v in body.items():
@@ -740,6 +894,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(self._update_item(iid, self._jbody()))
                 if m == "DELETE":
                     self._delete_item(iid); return self._json({"ok": True})
+            if parts[2] == "weighins" and m == "DELETE":
+                # the line now stands for a different part: its old measurements no longer apply
+                pp = db.one("SELECT filament_id FROM printed_parts WHERE line_item_id=?", [iid])
+                n = db.x("DELETE FROM weigh_ins WHERE line_item_id=?", [iid])
+                db.update("line_items", iid, {"needs_reweigh": 0})
+                if pp and pp.get("filament_id"):
+                    app.recalc_filament_correction(pp["filament_id"])
+                return self._json({"ok": True})
             if parts[2] == "weighins" and m == "POST":
                 b = self._jbody(); it = db.get("line_items", iid)
                 if not it:
@@ -1109,48 +1271,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ mutations
     def _robot_list(self):
-        rows = self.app.db.q("SELECT * FROM robots ORDER BY status='active' DESC, updated DESC")
-        out = []
-        for rb in rows:
-            det = self.app.robot_detail(rb["id"])
-            items = [it for s in det["sections"] for it in s["items"]]
-            n_parts = sum(1 for it in items if it.get("part"))
-            # one summary line per configuration (the sheet's totals follow the active one; the card shows them all)
-            per = []
-            def section_sums(cid):
-                """[{name, grams, printed}] per counted section for one configuration (None = the active one)."""
-                out_s = []
-                for s in det["sections"]:
-                    if not s["counts"]:
-                        continue
-                    g = pg = 0.0
-                    for it in s["items"]:
-                        cj = it.get("configs")
-                        ok = it.get("in_total") if cid is None else (it.get("counted", True) and (cj is None or cid in cj))
-                        if not ok:
-                            continue
-                        g += it["total_grams"]
-                        if it.get("part"):
-                            pg += it["total_grams"]
-                    out_s.append({"name": s["name"], "grams": g, "printed": pg})
-                return out_s
-            for c in det.get("configs") or []:
-                secs = section_sums(c["id"])
-                tot = sum(x["grams"] for x in secs); printed = sum(x["printed"] for x in secs)
-                per.append({"id": c["id"], "name": c["name"], "best_known": tot, "printed": printed, "over_under": tot - rb["weight_class_g"],
-                            "over_under_margin": tot + (rb["margin_g"] or 0) - rb["weight_class_g"], "active": c["id"] == det.get("active_config"), "sections": secs})
-            weigh_dates = [w["date"] for it in items for w in it.get("weigh_ins", [])]
-            last_run = self.app.db.one("SELECT MAX(date) d FROM runs WHERE robot_id=? AND kind='optimize'", [rb["id"]])["d"]
-            out.append({k: rb[k] for k in rb if k != "configs_json"} | {
-                "totals": det["totals"], "printed_parts": n_parts, "configs": per, "active_config": det.get("active_config"), "sections_summary": section_sums(None),
-                "lines": len(items), "parts_with_mesh": sum(1 for it in items if it.get("part") and it["part"].get("mesh")),
-                "parts_locked": sum(1 for it in items if it.get("part") and it["part"].get("locked")),
-                "measured_lines": sum(1 for it in items if it.get("measured_grams") is not None), "counted_lines": sum(1 for it in items if it.get("in_total")),
-                "price_total": sum((it.get("price") or 0) * (it.get("qty") or 0) for it in items),
-                "last_weigh_in": max(weigh_dates) if weigh_dates else None, "last_optimize": last_run,
-                "slice_errors": sum(1 for it in items if it.get("part") and (it["part"].get("slice") or {}).get("status") == "error"),
-            })
-        return out
+        return self.app.robot_list()
 
     def _create_item(self, sid: int, b: dict) -> dict:
         db = self.app.db

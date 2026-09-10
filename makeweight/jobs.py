@@ -175,6 +175,7 @@ class JobManager:
 
     # ---- lifecycle
     def start(self):
+        self._stop = False
         alive = [t for t in self._threads if t.is_alive()]
         self._threads = alive
         for i in range(len(alive), self.workers):

@@ -93,10 +93,18 @@ _lock = threading.RLock()
 class DB:
     def __init__(self, path: Path, sync_safe: bool = False):
         self.path = Path(path)
+        self.sync_safe = sync_safe
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = None
+        self._connect()
+        with _lock:
+            self._conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _connect(self):
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
-        if sync_safe:
+        if self.sync_safe:
             # On a cloud-drive folder: no -wal/-shm side files (sync clients copy them at the wrong moment and other
             # computers see a stale database); every change lands in the single .db file straight away.
             self._conn.execute("PRAGMA journal_mode=DELETE")
@@ -104,9 +112,18 @@ class DB:
         else:
             self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+
+    @property
+    def closed(self) -> bool:
+        return self._conn is None
+
+    def reopen(self):
+        """Reconnect after close() — the file may have been replaced by the cloud drive in the meantime, which is
+        exactly why we closed it."""
         with _lock:
-            self._conn.executescript(SCHEMA)
-        self._migrate()
+            if self._conn is None:
+                self._connect()
+                self._migrate()
 
     def _migrate(self):
         # additive migrations: add columns that older databases lack
@@ -129,16 +146,24 @@ class DB:
     def close(self):
         """Flush and close so the files can be copied/moved (WAL is checkpointed into the main file first)."""
         with _lock:
+            if self._conn is None:
+                return
             try:
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except Exception:
                 pass
             self._conn.close()
+            self._conn = None
 
     # ---- primitives -------------------------------------------------------
+    def _c(self):
+        if self._conn is None:
+            raise RuntimeError("The shared data is paused on this computer (idle or in use elsewhere) — resume it first.")
+        return self._conn
+
     def q(self, sql: str, args: Iterable = ()) -> list[dict]:
         with _lock:
-            return [dict(r) for r in self._conn.execute(sql, tuple(args)).fetchall()]
+            return [dict(r) for r in self._c().execute(sql, tuple(args)).fetchall()]
 
     def one(self, sql: str, args: Iterable = ()) -> dict | None:
         rows = self.q(sql, args)
@@ -146,7 +171,7 @@ class DB:
 
     def x(self, sql: str, args: Iterable = ()) -> int:
         with _lock:
-            cur = self._conn.execute(sql, tuple(args))
+            cur = self._c().execute(sql, tuple(args))
             return cur.lastrowid
 
     def insert(self, table: str, row: dict) -> int:
@@ -184,6 +209,8 @@ class DB:
             loc = self._local()
             if key in loc:
                 return loc[key]
+        if self._conn is None:
+            return default                      # paused: shared settings are unreadable, callers get their defaults
         r = self.one("SELECT value FROM settings WHERE key=?", [key])
         return json.loads(r["value"]) if r else default
 
@@ -197,7 +224,7 @@ class DB:
                [key, json.dumps(value)])
 
     def transaction(self):
-        return _Tx(self._conn)
+        return _Tx(self._c())
 
 
 class _Tx:
