@@ -116,7 +116,8 @@ class App:
     def lock_status(self) -> dict:
         other = self.lock.peek() if self.shared else None
         return {"shared": self.shared, "host": self.lock.host, "dormant": self.dormant, "dormant_since": self.dormant_since, "reason": getattr(self, "dormant_reason", None),
-                "lost_to": self.lost_to, "other": other, "held": self.lock.held, "idle_min": (self.idle_seconds() / 60) if not self.db.closed else None}
+                "lost_to": self.lost_to, "other": other, "held": self.lock.held, "idle_min": (self.idle_seconds() / 60) if not self.db.closed else None,
+                "last_wake": getattr(self, "last_wake", None), "last_active": self.last_active}
 
     def go_dormant(self, reason: str, other: dict | None = None):
         """Release the shared data: stop slicing, close the database, drop the heartbeat. Cheap to undo (wake)."""
@@ -139,14 +140,16 @@ class App:
     def _lock_lost(self, other: dict):
         self.go_dormant(f"{other.get('host')} took over", other=other)
 
-    def wake(self, force: bool = False) -> dict | None:
+    def wake(self, force: bool = False, cause: str = "") -> dict | None:
         """Resume using the shared data. Returns the other computer's record when it is live and force is False."""
         if not self.dormant:
             return None
         other = self.lock.acquire(force=force)
         if other:
+            log.info("data: still in use on %s — not resuming (%s)", other.get("host"), cause or "resume")
             return other
-        log.info("data: resuming%s", " (took over)" if force else "")
+        log.info("data: resuming%s — %s", " (took over)" if force else "", cause or "resume")
+        self.last_wake = {"at": time.time(), "cause": cause or ("take over" if force else "resume"), "forced": force}
         self.db.reopen()
         self._repair_mesh_paths()
         self.dormant = False; self.dormant_since = None; self.lost_to = None; self.dormant_reason = None
@@ -624,9 +627,16 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/"):
                 api_path = path[5:].rstrip("/")
                 if not any(api_path == x or api_path.startswith(x + "/") for x in self.app.IDLE_EXEMPT) and not api_path.startswith("data/"):
-                    self.app.touch()
+                    # only things a person did count as activity: writes, and reads the page marks as user-driven (X-Wake).
+                    # Background refreshes (event-driven re-renders, timers) neither keep the data awake nor wake it —
+                    # otherwise an idle tab re-rendering after "paused" would grab the data straight back.
+                    user_driven = method != "GET" or self.headers.get("X-Wake") == "1"
+                    if user_driven:
+                        self.app.touch()
                     if self.app.dormant:
-                        other = self.app.wake()
+                        if not user_driven:
+                            return self._json({"error": "paused", "paused": True}, 409)
+                        other = self.app.wake(cause=f"{method} {api_path}")
                         if other:
                             return self._json({"error": f"The shared data is in use on {other.get('host')} (active {int((time.time() - float(other.get('heartbeat') or 0)) // 60)} min ago). Wait, or take it over.", "locked": other, "lock": self.app.lock_status()}, 423)
                 if method in ("POST", "PUT", "DELETE") and not re.match(r"^(undo|redo|settings|slicer/|jobs|backup|log|diagnostics|meshes$|parts/\d+/(slice|orientation_sweep)$|robots/\d+/(optimize|slice_all|mesh_matches)$|runs/\d+/cancel$|filaments/\d+/recalc$)", api_path):
@@ -695,10 +705,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "data/status" and m == "GET":
             return self._json(app.lock_status())
         if path == "data/takeover" and m == "POST":
-            other = app.wake(force=True)
+            other = app.wake(force=True, cause="take over (button)")
             return self._json({"ok": other is None, "lock": app.lock_status()})
         if path == "data/resume" and m == "POST":
-            other = app.wake(force=False)
+            other = app.wake(force=False, cause="resume (button)")
             if other:
                 return self._json({"error": f"The shared data is in use on {other.get('host')}.", "locked": other, "lock": app.lock_status()}, 423)
             return self._json({"ok": True, "lock": app.lock_status()})

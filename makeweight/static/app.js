@@ -83,16 +83,23 @@
     if (body instanceof ArrayBuffer || body instanceof Blob) { opts.body = body; }
     else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
     if (raw && raw.headers) Object.assign(opts.headers, raw.headers);
+    if (!BG.depth) opts.headers['X-Wake'] = '1';           // a person did this — it may wake paused shared data; background refreshes may not
     if (raw && raw.label) opts.headers['X-Undo-Label'] = encodeURIComponent(raw.label);
     if (opts.headers['X-Undo-Label'] && /[^\x00-\xff]/.test(opts.headers['X-Undo-Label'])) opts.headers['X-Undo-Label'] = encodeURIComponent(opts.headers['X-Undo-Label']);
     const r = await fetch('/api/' + path, opts);
     if (raw && raw.blob) return r.blob();
     const j = await r.json().catch(() => ({}));
+    if (r.status === 409 && j.paused) throw new PausedError();
     if (r.status === 423 && j.locked) { lockedModal(j); throw new Error(j.error || 'The shared data is in use on another computer'); }
     if (!r.ok) throw new Error(j.error || r.statusText);
     return j;
   }
   // ------------------------------------------------------------ shared-data lock (idle release / take over)
+  // Background work (event-driven re-renders, timers) runs inside bg(): its requests carry no X-Wake header, so a paused
+  // server answers 409 "paused" instead of grabbing the shared data back — and the calls are swallowed quietly.
+  const BG = { depth: 0 };
+  class PausedError extends Error { constructor() { super('paused'); this.paused = true; } }
+  async function bg(fn) { BG.depth++; try { return await fn(); } catch (e) { if (!(e && e.paused)) console.warn('background refresh failed:', e); } finally { BG.depth--; } }
   let LOCKED_OPEN = false;
   function lockedModal(j) {
     if (LOCKED_OPEN) return; LOCKED_OPEN = true;
@@ -101,6 +108,11 @@
       h('p', null, h('b', null, o.host || 'another computer'), ` has MakeWeight open with this data (active ${mins} min ago). To keep the database in one piece only one computer writes at a time.`),
       h('p', { class: 'hint' }, 'Wait — that computer releases the data by itself after a few idle minutes — or take over now: the other computer pauses and shows a “resume” notice; nothing it already saved is lost, but anything typed there in the next moments would not be.')),
       [{ label: 'Wait', onClick: () => { LOCKED_OPEN = false; } }, { label: `Take over from ${o.host || 'it'}`, cls: 'primary', onClick: async () => { await api('POST', 'data/takeover'); LOCKED_OPEN = false; toast('Resumed on this computer'); await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => { }); render(); } }], { onClose: () => { LOCKED_OPEN = false; } });
+  }
+  function placeLockBanner() {
+    const m = $('#main'); if (!m) return;
+    const old = m.querySelector(':scope > .lockbar'); if (old) old.remove();
+    const lb = lockBanner(); if (lb) m.prepend(lb);
   }
   function lockBanner() {
     const L = ((S.state || {}).data || {}).lock; if (!L || !L.dormant) return null;
@@ -293,7 +305,7 @@
   const COLW = { data: null, timer: 0, MIN: 36 };
   const colData = () => COLW.data || (COLW.data = Object.assign({}, (S.state && S.state.settings && S.state.settings.col_widths) || {}));
   const colKey = tbl => tbl.dataset.tkey || tableKey(tbl);
-  function saveColW() { clearTimeout(COLW.timer); COLW.timer = setTimeout(() => api('PUT', 'settings', { col_widths: colData() }).catch(() => { }), 500); }
+  function saveColW() { clearTimeout(COLW.timer); COLW.timer = setTimeout(() => api('PUT', 'settings', { col_widths: colData() }).catch(() => { }), 500); }   // a write: counts as user activity, fine
   function colgroupOf(tbl, n) {
     let cg = tbl.querySelector(':scope > colgroup');
     if (!cg) { cg = h('colgroup'); tbl.prepend(cg); }
@@ -2366,7 +2378,7 @@
     left.append(diag);
     drawLog();
     if (S.logTimer) clearInterval(S.logTimer);
-    S.logTimer = setInterval(() => { if (S.view === 'jobs' && document.body.contains(logPre)) drawLog(); else { clearInterval(S.logTimer); S.logTimer = null; } }, 4000);
+    S.logTimer = setInterval(() => { if (S.view === 'jobs' && document.body.contains(logPre)) bg(drawLog); else { clearInterval(S.logTimer); S.logTimer = null; } }, 4000);
   };
   function updatePanel(st) {
     const box = h('div', { class: 'upd' });
@@ -2412,7 +2424,7 @@
     const L = d.lock || {};
     if (d.shared) {
       const idle = input({ type: 'number', min: 1, max: 240, step: 1, value: st.settings.idle_release_min || 5, style: { width: '70px' }, onChange: async e => { await api('PUT', 'settings', { idle_release_min: Math.max(1, +e.target.value || 5) }); toast('Saved'); } });
-      box.append(h('p', { class: 'hint' }, L.dormant ? h('span', null, '⏸ ', h('b', null, 'Paused on this computer'), L.lost_to ? ` — ${L.lost_to.host} took the data over.` : ' — released after sitting idle.', ' It resumes as soon as you do anything here.') : h('span', null, '● ', h('b', null, 'In use on this computer'), L.other ? h('span', { style: { color: 'var(--bad)' } }, ` · ⚠ ${L.other.host} also holds it (active ${Math.round((Date.now() / 1000 - (L.other.heartbeat || 0)) / 60)} min ago)`) : ' · no other computer is using it right now.')),
+      box.append(h('p', { class: 'hint' }, L.dormant ? h('span', null, '⏸ ', h('b', null, 'Paused on this computer'), L.lost_to ? ` — ${L.lost_to.host} took the data over.` : ' — released after sitting idle.', ' It resumes as soon as you do anything here.') : h('span', null, '● ', h('b', null, 'In use on this computer'), L.other ? h('span', { style: { color: 'var(--bad)' } }, ` · ⚠ ${L.other.host} also holds it (active ${Math.round((Date.now() / 1000 - (L.other.heartbeat || 0)) / 60)} min ago)`) : ' · no other computer is using it right now.', L.last_wake ? h('span', { class: 'rng' }, ` · resumed ${new Date(L.last_wake.at * 1000).toLocaleTimeString()} by ${L.last_wake.cause}`) : null, L.last_active ? h('span', { class: 'rng' }, ` · last activity ${Math.round((Date.now() / 1000 - L.last_active) / 60)} min ago`) : null)),
         h('div', { class: 'tb' }, h('span', { class: 'rng' }, 'Release the data after'), idle, h('span', { class: 'rng' }, 'idle minutes (then any other computer can open it; this one resumes on your next action)'),
           L.dormant ? h('button', { class: 'btn small', onClick: async () => { try { await api('POST', 'data/resume'); await loadState(); render(); } catch (e) { } } }, 'Resume now') : h('button', { class: 'btn small', title: 'Close the database and give the shared folder up right away — e.g. before walking over to the other computer', onClick: async () => { await api('POST', 'data/pause'); await loadState(); render(); } }, 'Pause now')));
     }
@@ -2571,18 +2583,24 @@
     es.onmessage = ev => {
       let d; try { d = JSON.parse(ev.data); } catch { return; }
       if (d.type === 'queue') { S.state.slicer = Object.assign(S.state.slicer, d); renderShell(); }
-      if (d.type === 'install') { S.state.install = d; if (S.view === 'jobs') { clearTimeout(timer); timer = setTimeout(render, 150); } if (d.status === 'done') { loadState().then(render); toast(d.message); } if (d.status === 'error') toast(d.message, true); }
+      if (d.type === 'install') { S.state.install = d; if (S.view === 'jobs') { clearTimeout(timer); timer = setTimeout(() => bg(render), 150); } if (d.status === 'done') { bg(async () => { await loadState(); await render(); }); toast(d.message); } if (d.status === 'error') toast(d.message, true); }
       if (d.type === 'update') { if (S.updateWatch) S.updateWatch(d); else if (d.status === 'done') waitForNewVersion(); }
       if (d.type === 'undo') { if (S.state) { S.state.undo = { undo: d.undo, redo: d.redo }; renderShell(); } }
-      if (d.type === 'lock') { clearTimeout(timer); timer = setTimeout(async () => { await loadState().catch(() => { }); if (!d.dormant && S.robotId) await loadRobot(S.robotId).catch(() => { }); render(); if (d.dormant && d.lost_to) toast(`${d.lost_to.host} took over the shared data — this computer is paused`, true); }, 150); }
-      if (d.type === 'robot') { clearTimeout(timer); timer = setTimeout(async () => { await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => {}); render(); }, 200); }
+      if (d.type === 'lock') {
+        // paused: just show the banner — no data fetches, they would wake the server and take the data straight back.
+        // resumed: refresh what is on screen (as background work).
+        if (S.state) { S.state.data = Object.assign({}, S.state.data, { lock: d }); S.state.dormant = !!d.dormant; }
+        if (d.dormant) { placeLockBanner(); if (d.lost_to) toast(`${d.lost_to.host} took over the shared data — this computer is paused`, true); }
+        else { clearTimeout(timer); timer = setTimeout(() => bg(async () => { await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => { }); await render(); }), 150); }
+      }
+      if (d.type === 'robot') { clearTimeout(timer); timer = setTimeout(() => bg(async () => { await loadState(); if (S.robotId) await loadRobot(S.robotId).catch(() => {}); await render(); }), 200); }
       if (d.type === 'job' || d.type === 'line_item') {
         clearTimeout(timer);
-        timer = setTimeout(async () => {
+        timer = setTimeout(() => bg(async () => {
           if (S.robotId) await loadRobot(S.robotId);
           renderShell();
-          if (['sheet', 'parts', 'part', 'jobs'].includes(S.view) || (S.view === 'optimizer' && S.pollRun)) softRender();
-        }, 400);
+          if (['sheet', 'parts', 'part', 'jobs'].includes(S.view) || (S.view === 'optimizer' && S.pollRun)) await softRender();
+        }), 400);
       }
     };
     es.onerror = () => { es.close(); setTimeout(connectSSE, 3000); };
@@ -2603,7 +2621,7 @@
       if (rid && !S.state.dormant) await loadRobot(rid).catch(() => { });
       if (S.state.dormant) S.view = 'home';
       if (S.state.slicer && !S.state.slicer.slicer && S.view === 'home') { toast('No slicer installed yet — open Jobs & setup and install Bambu Studio.', true); }
-      await render(); connectSSE(); setTimeout(autoUpdateCheck, 3000); setInterval(autoUpdateCheck, 3600e3);
+      await render(); connectSSE(); setTimeout(() => bg(autoUpdateCheck), 3000); setInterval(() => bg(autoUpdateCheck), 3600e3);
     } catch (e) { document.body.append(h('div', { class: 'empty' }, 'Could not reach the ' + document.title + ' service: ' + e.message)); }
   })();
   window.SB = { S, api, render, go };
