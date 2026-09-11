@@ -67,14 +67,27 @@ def _exists(url) -> bool:
         return False
 
 
-def download(url, dest: Path):
+def download(url, dest: Path, attempts: int = 5):
+    """Download to dest (cached). GitHub's asset CDN resets connections now and then on a 40 MB runtime — a lost
+    connection is retried with backoff instead of failing the whole release."""
     if dest.exists() and dest.stat().st_size > 0:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": f"{APP}-build"})
-    with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
-        shutil.copyfileobj(r, f, 1 << 20)
-    return dest
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": f"{APP}-build"})
+            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+                shutil.copyfileobj(r, f, 1 << 20)
+            tmp.replace(dest)
+            return dest
+        except Exception as e:  # noqa — connection reset, timeout, 5xx …
+            tmp.unlink(missing_ok=True)
+            if i == attempts - 1:
+                raise
+            wait = 5 * (i + 1)
+            log(f"  download failed ({e}); retrying in {wait}s ({i + 2}/{attempts})")
+            time.sleep(wait)
 
 
 def find_runtime_assets():
