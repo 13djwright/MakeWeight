@@ -303,6 +303,53 @@ def _object_overrides(params: dict) -> dict:
     return out
 
 
+TOWER_W, TOWER_BRIM, TOWER_MARGIN = 35.0, 3.0, 12.0     # Bambu defaults: 35 mm wide tower, 3 mm brim; margin from the plate edge
+
+
+def _tower_rect(bed_w: float, bed_d: float) -> tuple[float, float, float, float]:
+    """Prime tower (x, y, w, h) in plate-local mm — back-right corner, footprint including the brim."""
+    x = bed_w - TOWER_MARGIN - TOWER_W
+    y = bed_d - TOWER_MARGIN - TOWER_W
+    return (x - TOWER_BRIM, y - TOWER_BRIM, TOWER_W + 2 * TOWER_BRIM, TOWER_W + 2 * TOWER_BRIM)
+
+
+def _arrange_group(qty: int, size, gap: float, bed_w: float, bed_d: float, tower=None) -> tuple[int, float, float]:
+    """Lay qty copies of a size-(w, d) footprint in a grid: returns (per_row, x0, y0) with the group's lower-left corner
+    in plate-local mm. Centred on the plate; when a prime tower is reserved and the group would touch it, the group
+    moves to the largest clear area (in front of the tower, or beside it)."""
+    edge = 10.0
+
+    def fit(area_w, area_h):
+        per_row = max(1, int((area_w - 2 * edge + gap) // (size[0] + gap)))
+        per_row = min(per_row, qty)
+        rows_n = math.ceil(qty / per_row)
+        gw = per_row * (size[0] + gap) - gap; gh = rows_n * (size[1] + gap) - gap
+        return per_row, gw, gh
+
+    def overlaps(x0, y0, gw, gh, rect):
+        rx, ry, rw, rh = rect
+        return not (x0 + gw + gap <= rx or rx + rw + gap <= x0 or y0 + gh + gap <= ry or ry + rh + gap <= y0)
+
+    per_row, gw, gh = fit(bed_w, bed_d)
+    x0, y0 = bed_w / 2 - gw / 2, bed_d / 2 - gh / 2
+    if not tower or not overlaps(x0, y0, gw, gh, tower):
+        return per_row, x0, y0
+    tx, ty, tw, th = tower
+    options = []
+    # in front of the tower: full width, depth up to the tower's front edge
+    pr, w2, h2 = fit(bed_w, ty - gap)
+    options.append((w2 <= bed_w - 2 * edge and h2 <= ty - gap - edge, (ty - gap) * bed_w, pr, bed_w / 2 - w2 / 2, (ty - gap) / 2 - h2 / 2))
+    # beside the tower: full depth, width up to the tower's left edge
+    pr, w3, h3 = fit(tx - gap, bed_d)
+    options.append((w3 <= tx - gap - 2 * edge and h3 <= bed_d - 2 * edge, (tx - gap) * bed_d, pr, (tx - gap) / 2 - w3 / 2, bed_d / 2 - h3 / 2))
+    fits = [o for o in options if o[0]]
+    if fits:
+        _, _, pr, gx, gy = max(fits, key=lambda o: o[1])
+        return pr, max(edge, gx), max(edge, gy)
+    # nothing clears the tower: keep the group as far front-left as the plate allows (Bambu will flag what is left)
+    return per_row, max(edge, min(x0, tx - gap - gw)), max(edge, min(y0, ty - gap - gh))
+
+
 def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = None) -> bytes:
     """A Bambu Studio project: one plate per printed line (all copies of that line on its plate), every object carrying
     its own walls / shells / infill / layer settings, modifier regions as modifier parts, the robot's filaments as the
@@ -317,8 +364,7 @@ def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = N
         presets = bambu_engine.Presets(res) if res else None
     robot = db.get("robots", det["id"]) or {}
     printer = db.get("printers", robot["printer_id"]) if robot.get("printer_id") else db.one("SELECT * FROM printers ORDER BY builtin DESC, id LIMIT 1")
-    # the plate grid only lines up in Bambu Studio when the project is laid out for the printer it is opened with — the
-    # export dialog lets the user pick; default is the robot's printer
+    # plates are laid out for the robot's printer (?machine= overrides — Bambu's plate grid depends on the plate size)
     machine = machine if machine in ("P1S", "H2D") else profiles.machine_key(printer["name"] if printer else None)
     nozzle = f"{float(nozzle or robot.get('nozzle') or 0.4):g}"
     # bed size → plate grid
@@ -372,6 +418,7 @@ def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = N
     cfg.write('<?xml version="1.0" encoding="UTF-8"?>\n<config>\n')
     plates: list[list[tuple[int, int]]] = []      # per plate: [(object_id, identify_id)]
     build_items: list[tuple[int, float, float]] = []
+    plates_multi: list[int] = []                   # plates that print two filaments → prime tower
     nid = 1
 
     def write_mesh(oid: int, name: str, tri):
@@ -391,24 +438,29 @@ def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = N
         lo, hi = meshio.bbox(t); size = hi - lo
         # copies side by side, the group centred on the plate; the part frame is x/y-centred, z from the bed
         tc = t - np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
-        gap = 8.0
-        per_row = max(1, int((bed_w - 20) // (size[0] + gap))) if size[0] + gap < bed_w - 20 else 1
-        rows_n = math.ceil(qty / per_row)
-        gw = min(qty, per_row) * (size[0] + gap) - gap; gh = rows_n * (size[1] + gap) - gap
         mods = pt.get("modifiers") or []
         overrides = _object_overrides(params)
         sp = (pt.get("print") or {}).get("supports") or {}
+        srow = None
         if sp.get("enabled"):
             srow = bambu_engine.support_filament_row(sp)
             overrides.update(bambu_engine.support_keys(sp, fil_index.get(srow["id"]) if srow else None))
+        # spacing: supports need elbow room — tree supports lean outside the part's footprint, normal ones grow a brim-like foot
+        gap = 8.0 if not sp.get("enabled") else (20.0 if (sp.get("type") or "normal") == "tree" else 12.0)
+        # a second filament on the plate (dedicated support interface) means a prime tower: keep its corner clear
+        multi = srow is not None and fil_index.get(srow["id"]) != fil_index.get((fil or {}).get("id"), 1)
+        tower = _tower_rect(bed_w, bed_d) if multi else None
+        if tower:
+            plates_multi.append(plate_i)
+        per_row, gx0, gy0 = _arrange_group(qty, size, gap, bed_w, bed_d, tower)
         plate_objs = []
         pair_axis = str((pt.get("print") or {}).get("pair_mirror") or "").lower()
         pair_axis = pair_axis if pair_axis in ("x", "y") else None
         tcm = meshio.mirror_placed(tc, pair_axis) if pair_axis and qty > 1 else None
         for k in range(qty):
             r_, c_ = divmod(k, per_row)
-            cx = ox + bed_w / 2 - gw / 2 + c_ * (size[0] + gap) + size[0] / 2
-            cy = oy + bed_d / 2 - gh / 2 + r_ * (size[1] + gap) + size[1] / 2
+            cx = ox + gx0 + c_ * (size[0] + gap) + size[0] / 2
+            cy = oy + gy0 + r_ * (size[1] + gap) + size[1] / 2
             mirrored = tcm is not None and k % 2 == 1          # a left/right pair on one line: every other copy is the mirror image
             name = f"{it['description']}{' #' + str(k + 1) if qty > 1 else ''}{' (mirrored)' if mirrored else ''}"
             parts = [(nid, "normal_part", m.get("filename") or name, tcm if mirrored else tc, {})]
@@ -488,6 +540,17 @@ def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = N
             project["filament_self_index"] = [str(i + 1) for i in range(len(fil_rows))]
             project["filament_extruder_variant"] = [str(variant)] * len(fil_rows)
             project["filament_colour"] = [str(f.get("color") or "#8FBC8F") for f in fil_rows]
+            # prime tower: on whenever a plate prints two filaments (part + dedicated support interface). Bambu prints it
+            # only on plates that actually change filament; its corner is kept clear when arranging those plates.
+            if plates_multi:
+                project["enable_prime_tower"] = "1"
+                project["prime_tower_width"] = f"{TOWER_W:g}"
+                project["prime_tower_brim_width"] = f"{TOWER_BRIM:g}"
+                tx, ty = bed_w - TOWER_MARGIN - TOWER_W, bed_d - TOWER_MARGIN - TOWER_W      # tower origin, plate-local
+                project["wipe_tower_x"] = [f"{tx:g}"] * len(plates)
+                project["wipe_tower_y"] = [f"{ty:g}"] * len(plates)
+            else:
+                project["enable_prime_tower"] = "0"
             project["print_settings_id"] = f"{_APP} {profiles.profile_string(dparams)}" if dparams else f"{_APP} default"
             project["printer_settings_id"] = mach.get("name") or ""
             project["version"] = bs_version

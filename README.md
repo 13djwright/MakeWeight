@@ -51,7 +51,10 @@ Part detail → **Printing**: turn on supports for a part (normal or tree, overh
 interface material such as Bambu Support For PLA) and the exported Bambu Studio project carries them per object, with the
 interface material added to the project's filament list. Choosing a dedicated interface material also applies the settings
 Bambu Studio recommends for it (independent support layer height off, rectilinear-interlaced interface, 0 mm top interface
-spacing and 0 mm top Z distance), both in the exported project and in the app's own support slice. The app also slices the part once more with supports to show how
+spacing and 0 mm top Z distance), both in the exported project and in the app's own support slice. A plate that prints two
+filaments this way gets a prime tower in the exported project (Bambu's 35 mm tower, back-right corner); the copies on that
+plate are arranged clear of it, and supported parts are spaced further apart (12 mm, 20 mm for tree supports) so supports
+cannot run into a neighbour. The app also slices the part once more with supports to show how
 much filament and time they cost — the sheet still counts the part alone, since supports come off. **Mirrored** reflects
 the part about X, Y or Z before slicing and exporting, so the 3MF needs no manual mirroring. **Mirrored pair** keeps a
 left/right pair on one sheet line (quantity 2): every other copy in the exported project is the mirror image about the bed's
