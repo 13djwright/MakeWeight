@@ -442,6 +442,15 @@ def transform(tri: np.ndarray, R: np.ndarray | None = None, scale: float = 1.0, 
     return out
 
 
+def mirror_placed(tri: np.ndarray, axis: str = "x") -> np.ndarray:
+    """Mirror image of bed-placed geometry about a bed axis (x flips left/right, y front/back), keeping the same face on
+    the bed and outward winding — what "Mirror" does to a placed object in Bambu Studio."""
+    f = np.ones(3); f["xyz".index(axis if axis in ("x", "y") else "x")] = -1.0
+    out = (tri.reshape(-1, 3) * f).reshape(-1, 3, 3)[:, ::-1, :]
+    lo, hi = bbox(out)
+    return out + np.array([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, 0.0]) + np.array([(bbox(tri)[0][0] + bbox(tri)[1][0]) / 2, (bbox(tri)[0][1] + bbox(tri)[1][1]) / 2, 0.0])
+
+
 def place_on_bed(tri: np.ndarray, center_xy=(0.0, 0.0)) -> np.ndarray:
     lo, hi = bbox(tri)
     shift = np.array([center_xy[0] - (lo[0] + hi[0]) / 2, center_xy[1] - (lo[1] + hi[1]) / 2, -lo[2]])

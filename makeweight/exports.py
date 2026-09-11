@@ -161,7 +161,7 @@ def print_sheet_html(app, det: dict) -> str:
                 diffs.append(f"<i>Modifier “{escape(md.get('name') or 'box')}”</i> x {md['min'][0]}…{md['max'][0]}, y {md['min'][1]}…{md['max'][1]}, z {md['min'][2]}…{md['max'][2]} mm: {escape(ov)}")
             rows.append(f"""<tr><td><b>{escape(it['description'])}</b><br><small>{escape((p.get('mesh') or {}).get('filename') or 'no mesh')}</small></td>
               <td>{it['qty']:g}</td><td>{escape((p.get('filament') or {}).get('name') or '')}</td>
-              <td>{escape(p['orient'].get('label') or p['orient'].get('mode') or 'auto')}{' · scale ' + str(p['scale']) if p.get('scale') not in (None, 1, 1.0) else ''}{' · mirrored ' + str(p.get('mirror_axis') or 'x').upper() if p.get('mirror') else ''}{' · supports' if ((p.get('print') or {}).get('supports') or {}).get('enabled') else ''}</td>
+              <td>{escape(p['orient'].get('label') or p['orient'].get('mode') or 'auto')}{' · scale ' + str(p['scale']) if p.get('scale') not in (None, 1, 1.0) else ''}{' · mirrored ' + str(p.get('mirror_axis') or 'x').upper() if p.get('mirror') else ''}{' · supports' if ((p.get('print') or {}).get('supports') or {}).get('enabled') else ''}{' · mirrored pair (' + str((p.get('print') or {}).get('pair_mirror')).upper() + ')' if (p.get('print') or {}).get('pair_mirror') else ''}</td>
               <td><code>{escape((p.get('profile') or {}).get('string') or '')}</code><br>{'<br>'.join(diffs) if diffs else '<small>Bambu default</small>'}</td>
               <td class=n>{'' if sl.get('grams') is None else f"{sl['grams']:.1f}"}</td><td class=n>{'' if p.get('corrected_grams') is None else f"{p['corrected_grams']:.1f}"}</td><td class=n>{'' if it.get('measured_grams') is None else f"{it['measured_grams']:.1f}"}</td>
               <td class=n>{'' if not sl.get('print_time_s') else f"{int(sl['print_time_s'] // 3600)}h {int(sl['print_time_s'] % 3600 // 60):02d}m"}</td>
@@ -398,17 +398,24 @@ def bambu_3mf(app, det: dict) -> bytes:
             srow = bambu_engine.support_filament_row(sp)
             overrides.update(bambu_engine.support_keys(sp, fil_index.get(srow["id"]) if srow else None))
         plate_objs = []
+        pair_axis = str((pt.get("print") or {}).get("pair_mirror") or "").lower()
+        pair_axis = pair_axis if pair_axis in ("x", "y") else None
+        tcm = meshio.mirror_placed(tc, pair_axis) if pair_axis and qty > 1 else None
         for k in range(qty):
             r_, c_ = divmod(k, per_row)
             cx = ox + bed_w / 2 - gw / 2 + c_ * (size[0] + gap) + size[0] / 2
             cy = oy + bed_d / 2 - gh / 2 + r_ * (size[1] + gap) + size[1] / 2
-            name = f"{it['description']}{' #' + str(k + 1) if qty > 1 else ''}"
-            parts = [(nid, "normal_part", m.get("filename") or name, tc, {})]
+            mirrored = tcm is not None and k % 2 == 1          # a left/right pair on one line: every other copy is the mirror image
+            name = f"{it['description']}{' #' + str(k + 1) if qty > 1 else ''}{' (mirrored)' if mirrored else ''}"
+            parts = [(nid, "normal_part", m.get("filename") or name, tcm if mirrored else tc, {})]
             nid += 1
             for md in mods:
                 if md.get("min") and md.get("max"):
                     from .jobs import modifier_settings
-                    parts.append((nid, "modifier_part", md.get("name") or "modifier", meshio.box_mesh(md["min"], md["max"]), modifier_settings(md, "bambu")))
+                    mn, mx = list(md["min"]), list(md["max"])
+                    if mirrored:
+                        i_ = "xy".index(pair_axis); mn[i_], mx[i_] = -md["max"][i_], -md["min"][i_]
+                    parts.append((nid, "modifier_part", md.get("name") or "modifier", meshio.box_mesh(mn, mx), modifier_settings(md, "bambu")))
                     nid += 1
             for (pid, subtype, pname, ptri, settings) in parts:
                 write_mesh(pid, pname, ptri)
