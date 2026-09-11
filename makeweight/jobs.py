@@ -65,6 +65,8 @@ def supports_suffix(supports: dict | None) -> str:
     if not supports or not supports.get("enabled"):
         return ""
     core = {k: supports.get(k) for k in ("type", "plate_only", "angle")}
+    from . import bambu_engine
+    core["dedicated"] = bool(bambu_engine.SUPPORT_INTERFACES.get(supports.get("interface") or "same"))
     return "|sup" + hashlib.sha1(json.dumps(core, sort_keys=True).encode()).hexdigest()[:10]
 
 

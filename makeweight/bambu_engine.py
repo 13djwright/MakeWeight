@@ -478,7 +478,21 @@ def support_keys(sp: dict, interface_filament_index: int | None = None) -> dict:
         "support_filament": "0",
         "support_interface_filament": str(interface_filament_index) if interface_filament_index else "0",
     }
+    if interface_filament_index or SUPPORT_INTERFACES.get(sp.get("interface") or "same"):
+        # Dedicated interface material: the settings Bambu Studio itself suggests when a support
+        # filament is chosen for the interface (it can sit flush on the part). Applied to the weight
+        # slice too (even though that runs single-filament) so the support geometry — and its grams —
+        # match what the exported project prints.
+        out.update(SUPPORT_MATERIAL_KEYS)
     return out
+
+
+SUPPORT_MATERIAL_KEYS = {
+    "independent_support_layer_height": "0",           # Independent support layer height: Off
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0",                  # Top interface spacing: 0 mm
+    "support_top_z_distance": "0",                     # Top Z distance: 0 mm
+}
 
 
 def support_filament_row(sp: dict) -> dict | None:
