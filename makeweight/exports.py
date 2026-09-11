@@ -303,7 +303,7 @@ def _object_overrides(params: dict) -> dict:
     return out
 
 
-def bambu_3mf(app, det: dict) -> bytes:
+def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = None) -> bytes:
     """A Bambu Studio project: one plate per printed line (all copies of that line on its plate), every object carrying
     its own walls / shells / infill / layer settings, modifier regions as modifier parts, the robot's filaments as the
     project's filament list, and a full project_settings.config (printer, default process, filaments) built from the
@@ -317,8 +317,10 @@ def bambu_3mf(app, det: dict) -> bytes:
         presets = bambu_engine.Presets(res) if res else None
     robot = db.get("robots", det["id"]) or {}
     printer = db.get("printers", robot["printer_id"]) if robot.get("printer_id") else db.one("SELECT * FROM printers ORDER BY builtin DESC, id LIMIT 1")
-    machine = profiles.machine_key(printer["name"] if printer else None)
-    nozzle = f"{float(robot.get('nozzle') or 0.4):g}"
+    # the plate grid only lines up in Bambu Studio when the project is laid out for the printer it is opened with — the
+    # export dialog lets the user pick; default is the robot's printer
+    machine = machine if machine in ("P1S", "H2D") else profiles.machine_key(printer["name"] if printer else None)
+    nozzle = f"{float(nozzle or robot.get('nozzle') or 0.4):g}"
     # bed size → plate grid
     bed_w, bed_d = 256.0, 256.0
     if presets:

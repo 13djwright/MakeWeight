@@ -1861,7 +1861,8 @@ class Handler(BaseHTTPRequestHandler):
         if kind == "archive":
             return self._bytes(exports.robot_archive(app, rid), "application/zip", f"{safe}.{paths.APP_SLUG}.zip")
         if kind == "bambu3mf":
-            return self._bytes(exports.bambu_3mf(app, det), "application/vnd.ms-package.3dmanufacturing-3dmodel+xml", f"{safe}.3mf")
+            mk = (qs.get("machine") or "").upper() or None
+            return self._bytes(exports.bambu_3mf(app, det, machine=mk, nozzle=qs.get("nozzle")), "application/vnd.ms-package.3dmanufacturing-3dmodel+xml", f"{safe}{'-' + mk if mk else ''}.3mf")
         if kind == "presets":
             return self._bytes(exports.bambu_presets_zip(app, det), "application/zip", f"{safe}-bambu-presets.zip")
         raise KeyError(kind)
