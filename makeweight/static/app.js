@@ -547,18 +547,6 @@
     } catch (e) { /* offline or no repo: stay quiet */ }
   }
 
-  function bambuExportModal(rid) {
-    const st = S.state, r = S.robot;
-    const robotPrinter = st.printers.find(p => p.id === r.printer_id);
-    const key = n => /H2D/i.test(n || '') ? 'H2D' : 'P1S';
-    const machine = select([['H2D', 'Bambu Lab H2D (350 × 320 mm plates)'], ['P1S', 'Bambu Lab P1S / X1C (256 × 256 mm plates)']], key(robotPrinter && robotPrinter.name));
-    const nozzle = select([['0.4', '0.4 mm'], ['0.6', '0.6 mm'], ['0.2', '0.2 mm'], ['0.8', '0.8 mm']], String(r.nozzle || 0.4));
-    modal('Export Bambu Studio project', h('div', null,
-      h('p', { class: 'hint', style: { marginTop: 0 } }, 'One plate per printed line with all its copies arranged on it, walls / infill / supports on each object, the robot’s filaments as the project filament list. Plates are laid out for the printer chosen here — open the file with that printer selected in Bambu Studio (say yes if it offers to switch), otherwise the plate grid is a different size and parts land off their plates.'),
-      field('Printer', machine), field('Nozzle', nozzle),
-      robotPrinter && key(robotPrinter.name) !== machine.value ? null : null),
-      [{ label: 'Cancel' }, { label: 'Export .3mf', cls: 'primary', onClick: () => { window.open(`/api/robots/${rid}/export/bambu3mf?machine=${machine.value}&nozzle=${nozzle.value}`, '_blank'); } }]);
-  }
   function exportMenu(anchor) {
     const rid = S.robotId, dl = (k) => () => { window.open(`/api/robots/${rid}/export/${k}`, '_blank'); };
     menu(anchor, [
@@ -568,7 +556,7 @@
       '-',
       { label: 'Print sheet (HTML, printable)', onClick: dl('printsheet') },
       { label: 'Bambu Studio process presets (zip of JSON)', onClick: dl('presets') },
-      { label: 'Bambu Studio project (.3mf — one plate per part, settings on each object)…', onClick: () => bambuExportModal(rid) },
+      { label: 'Bambu Studio project (.3mf — one plate per part, settings on each object)', onClick: dl('bambu3mf') },
       '-',
       { label: 'Robot archive (.makeweight.zip)', onClick: dl('archive') },
     ]);

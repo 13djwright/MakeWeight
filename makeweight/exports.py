@@ -356,8 +356,10 @@ def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = N
             fil_rows.append(f0)
     fil_index = {f["id"]: i + 1 for i, f in enumerate(fil_rows)}
     n_plates = max(1, len(lines))
+    # Bambu Studio's plate grid (PartPlate.cpp): cols = ceil(sqrt(n)), plate i at (col * width * 1.2, -row * depth * 1.2)
+    # — LOGICAL_PART_PLATE_GAP is 1/5 of the plate. Anything else lands parts off their plates.
     cols = max(1, math.ceil(math.sqrt(n_plates)))
-    stride_x, stride_y = bed_w * 1.1, bed_d * 1.1          # Bambu Studio's logical plate gap is 1/10 of the plate
+    stride_x, stride_y = bed_w * 1.2, bed_d * 1.2
 
     bs_version = str(bambu_engine.version_of(jobs.slicer_cmd) or "") if jobs.engine == "bambu" and jobs.slicer_cmd else ""
     bs_version = bs_version or "02.08.02.61"
