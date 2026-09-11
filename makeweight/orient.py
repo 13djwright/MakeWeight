@@ -95,8 +95,26 @@ def quat_for_preset(name: str) -> list:
     return meshio.mat_to_quat(rotation_face_down(AXIS_PRESETS[name]))
 
 
-def apply_orientation(tri: np.ndarray, orient: dict, scale: float = 1.0, mirror: bool = False) -> np.ndarray:
+def mirror_of(part: dict | None):
+    """The axis a part is mirrored about ("x" / "y" / "z") or None. Works on a database row (mirror + print_json) and on
+    the API view (mirror + print). The old boolean-only rows mean "x"."""
+    if not part or not part.get("mirror"):
+        return None
+    pj = part.get("print")
+    if not isinstance(pj, dict):
+        try:
+            import json
+            pj = json.loads(part.get("print_json") or "{}") or {}
+        except Exception:  # noqa
+            pj = {}
+    ax = str(pj.get("mirror_axis") or "x").lower()
+    return ax if ax in ("x", "y", "z") else "x"
+
+
+def apply_orientation(tri: np.ndarray, orient: dict, scale: float = 1.0, mirror=False) -> np.ndarray:
+    """mirror: False/None, True (= x) or an axis letter."""
     q = orient.get("quat", [0, 0, 0, 1])
     R = meshio.quat_to_mat(q)
-    t = meshio.transform(tri, R, scale=scale, mirror_x=mirror)
+    axis = mirror if isinstance(mirror, str) else ("x" if mirror else None)
+    t = meshio.transform(tri, R, scale=scale, mirror_axis=axis)
     return meshio.place_on_bed(t)

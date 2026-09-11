@@ -1132,7 +1132,8 @@
         h('td', null, h('div', { class: 'partcell' }, p.mesh ? h('img', { class: 'thumb sm', src: `/api/meshes/${p.mesh.id}/thumb.png`, alt: '', loading: 'lazy' }) : null, h('div', null, h('a', { href: '#/part/' + p.id, style: { color: 'inherit', fontWeight: 600, textDecoration: 'none' } }, it.description), h('span', { class: 'sub' }, p.mesh ? `${p.mesh.filename} · ${p.mesh.bbox ? p.mesh.bbox.size.map(v => v.toFixed(0)).join('×') + ' mm' : ''} · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³` : h('span', { style: { color: 'var(--warn)' } }, 'no mesh attached'))))),
         h('td', { class: 'num' }, it.qty),
         p.locked ? h('td', null, filChip(p.filament)) : h('td', { class: 'ed' }, select(st.filaments.map(f => [f.id, f.name]), p.filament_id, { onChange: e => upd({ filament_id: +e.target.value }) })),
-        h('td', null, h('span', { class: 'pill auto' }, (p.orient.mode || 'auto') + (p.orient.label ? ' · ' + p.orient.label : ''), p.locked ? ' 🔒' : '')),
+        h('td', null, h('span', { class: 'pill auto' }, (p.orient.mode || 'auto') + (p.orient.label ? ' · ' + p.orient.label : ''), p.locked ? ' 🔒' : ''), p.mirror ? h('span', { class: 'pill auto', style: { marginLeft: '4px' }, title: `Mirrored about ${(p.mirror_axis || 'x').toUpperCase()}` }, `⇋ ${(p.mirror_axis || 'x').toUpperCase()}`) : null,
+          p.print && p.print.supports && p.print.supports.enabled ? h('span', { class: 'pill auto', style: { marginLeft: '4px' }, title: p.support_slice && p.support_slice.grams != null ? `Supports: about ${fmt(p.support_slice.grams, 1)} g extra filament, removed after printing` : 'Supports enabled' }, p.support_slice && p.support_slice.grams != null ? `supports +${fmt(p.support_slice.grams, 1)} g` : 'supports') : null),
         p.locked ? h('td', null, h('span', { class: 'prof' }, p.profile ? p.profile.string : '—'), ' ', h('span', { class: 'pill lock' }, '🔒')) : h('td', { class: 'ed' }, select(st.profiles.filter(x => !x.nozzle || Math.abs(x.nozzle - (r.nozzle || 0.4)) < 0.01 || x.id === p.profile_id).map(x => [x.id, `${x.name} — ${x.string}`]), p.profile_id, { onChange: e => upd({ profile_id: +e.target.value }) })),
         h('td', { class: 'ed' }, select(ROLES, p.role, { onChange: e => upd({ role: e.target.value }) })),
         h('td', { class: 'num' }, g != null ? fmt(g) : '—'),
@@ -1333,7 +1334,7 @@
     const p = await api('GET', `parts/${pid}`); const st = S.state;
     const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(async () => { await refreshRobot(); await renderMain(); }).catch(fail);
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, it.description, h('button', { class: 'btn icon', title: 'Rename part', 'aria-label': 'Rename part', style: { marginLeft: '6px', verticalAlign: 'middle' }, onClick: () => renameModal(it) }, '✎'), p.locked && h('span', { class: 'pill lock', style: { marginLeft: '8px' } }, '🔒 locked')),
-      h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ' · mirrored' : ''}` : 'No mesh attached yet')),
+      h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ` · mirrored (${(p.mirror_axis || 'x').toUpperCase()})` : ''}` : 'No mesh attached yet')),
       h('div', { class: 'tb' },
         h('select', { onChange: e => go('part', e.target.value) }, ...all.map(x => h('option', { value: x.part.id, selected: x.part.id === pid }, x.description))),
         h('button', { class: 'btn', onClick: () => attachMeshModal(it) }, p.mesh ? 'Replace mesh…' : 'Attach mesh…'),
@@ -1482,6 +1483,25 @@
       cur && cur.status === 'done' && h('p', { class: 'hint' }, `Current slice: ${fmt(cur.grams, 2)} g${p.filament && p.filament.correction.factor ? ` → ${fmt(p.corrected_grams, 2)} g after ${p.filament.name} correction` : ''}${cur.print_time_s ? ` · print time ${hms(cur.print_time_s)}` : ''}${p.filament && p.filament.cost_per_kg ? ` · cost ≈ $${(cur.grams / 1000 * p.filament.cost_per_kg).toFixed(2)}` : ''}`)));
     const c = p.constraints || {};
     const rng = (key, lo, hi, step) => { const a = input({ type: 'number', value: c[key]?.[0] ?? lo, step, style: { width: '70px' } }), b = input({ type: 'number', value: c[key]?.[1] ?? hi, step, style: { width: '70px' } }); const save = () => { const nc = Object.assign({}, p.constraints, { [key]: [parseFloat(a.value), parseFloat(b.value)] }); upd({ constraints: nc }); }; a.addEventListener('change', save); b.addEventListener('change', save); return h('div', { class: 'tb' }, a, '–', b); };
+    // printing options: supports (generated in the exported 3MF and sliced separately for the cost) and mirroring
+    {
+      const pr = p.print || {}, sp = Object.assign({ enabled: false, type: 'normal', interface: 'same', plate_only: false, angle: 30 }, pr.supports || {});
+      const setSp = (patch) => upd({ print: { supports: Object.assign({}, sp, patch) } });
+      const ss = p.support_slice;
+      const supInfo = !sp.enabled ? null : ss && ss.grams != null ? h('p', { class: 'hint', style: { margin: '4px 0 0' } }, `Supports add about ${fmt(ss.grams, 1)} g of filament (${fmt(ss.total_grams, 1)} g printed in all) and ${ss.print_time_s && p.slice && p.slice.print_time_s ? Math.round((ss.print_time_s - p.slice.print_time_s) / 60) + ' min' : '—'} of print time. They are removed after printing, so the sheet counts the part alone.`)
+        : ss && ss.status === 'error' ? h('p', { class: 'hint', style: { color: 'var(--bad)' } }, 'Slicing with supports failed: ' + (ss.error || '')) : h('p', { class: 'hint', style: { margin: '4px 0 0' } }, 'Slicing with supports to measure their cost…');
+      right.append(h('div', { class: 'card' }, h('h3', null, 'Printing'),
+        field('Supports', h('div', null, h('label', { class: 'tb' }, h('input', { type: 'checkbox', checked: sp.enabled, onChange: e => setSp({ enabled: e.target.checked }) }), h('span', null, 'Generate supports (written into the exported 3MF)')),
+          sp.enabled && h('div', { class: 'tb', style: { marginTop: '6px', flexWrap: 'wrap' } },
+            select([['normal', 'Normal'], ['tree', 'Tree']], sp.type, { style: { width: 'auto' }, onChange: e => setSp({ type: e.target.value }) }),
+            h('span', { class: 'rng' }, 'interface'), select([['same', 'same filament'], ['support_pla', 'Bambu Support For PLA'], ['support_pla_petg', 'Bambu Support For PLA-PETG'], ['support_w', 'Bambu Support W'], ['support_g', 'Bambu Support G']], sp.interface, { style: { width: 'auto' }, title: 'Dedicated interface material — added to the 3MF’s filament list and set as the support interface filament (needs an AMS or second nozzle)', onChange: e => setSp({ interface: e.target.value }) }),
+            h('span', { class: 'rng' }, 'overhang ≥'), input({ type: 'number', value: sp.angle, min: 0, max: 90, step: 5, style: { width: '64px' }, onChange: e => setSp({ angle: +e.target.value || 30 }) }), h('span', { class: 'rng' }, '°'),
+            h('label', { class: 'tb', style: { gap: '4px' } }, h('input', { type: 'checkbox', checked: sp.plate_only, onChange: e => setSp({ plate_only: e.target.checked }) }), h('span', { class: 'rng' }, 'build plate only'))),
+          supInfo)),
+        field('Mirrored', h('div', null, h('div', { class: 'seg' }, ...[['', 'No'], ['x', 'X'], ['y', 'Y'], ['z', 'Z']].map(([v, l]) => h('button', { 'aria-pressed': String((p.mirror_axis || '') === v), title: v ? `Reflect the part about the ${v.toUpperCase()} axis (in the part’s own frame, before orientation)` : 'As modelled', onClick: () => upd({ mirror_axis: v || null }) }, l))),
+          h('p', { class: 'hint', style: { margin: '4px 0 0' } }, 'A mirrored part is sliced and exported already flipped, so the 3MF needs no manual mirroring in Bambu Studio. “Mirror copy” above makes the opposite-hand twin as a new part.'))),
+        h('p', { class: 'hint' }, 'These settings travel with the part into Export → Bambu Studio project (per-object supports, interface filament, mirrored geometry).')));
+    }
     right.append(h('div', { class: 'card' }, h('h3', null, 'Optimizer rules'),
       field('Lock', h('div', { class: 'seg' }, h('button', { 'aria-pressed': String(!p.locked), onClick: () => upd({ locked: false }) }, 'Free'), h('button', { 'aria-pressed': String(p.locked), onClick: () => upd({ locked: true }) }, 'Locked'))),
       field('Walls', rng('walls', 2, 5, '1')), field('Top layers', rng('top', 3, 5, '1')), field('Bottom layers', rng('bottom', 3, 5, '1')), field('Infill %', rng('infill', 8, 40, '1')),

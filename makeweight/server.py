@@ -166,7 +166,7 @@ class App:
         from . import estimator
         from .jobs import orient_key
         mesh = self.db.get("meshes", part["mesh_id"])
-        key = (mesh["sha256"], orient_key(loads(part["orient_json"], {}), part.get("scale") or 1.0, bool(part.get("mirror"))), params["layer_height"], json.dumps(params["line_widths"], sort_keys=True))
+        key = (mesh["sha256"], orient_key(loads(part["orient_json"], {}), part.get("scale") or 1.0, orient.mirror_of(part)), params["layer_height"], json.dumps(params["line_widths"], sort_keys=True))
         with self._rm_lock:
             if key in self._rm_cache:
                 return self._rm_cache[key]
@@ -175,7 +175,7 @@ class App:
             ev = self._rm_building.get(key)
             if ev is None:
                 ev = self._rm_building[key] = threading.Event()
-                orient_json, scale, mirror = part["orient_json"], float(part.get("scale") or 1.0), bool(part.get("mirror"))
+                orient_json, scale, mirror = part["orient_json"], float(part.get("scale") or 1.0), orient.mirror_of(part)
 
                 def build():
                     try:
@@ -428,7 +428,9 @@ class App:
         p["orient"] = loads(p.pop("orient_json", None), {"mode": "auto", "quat": [0, 0, 0, 1]})
         p["constraints"] = loads(p.pop("constraints_json", None), {})
         p["modifiers"] = loads(p.pop("modifiers_json", None), []) or []
+        p["print"] = loads(p.pop("print_json", None), {}) or {}          # supports, mirror axis … (print-prep options)
         p["locked"] = bool(p["locked"]); p["mirror"] = bool(p.get("mirror"))
+        p["mirror_axis"] = orient.mirror_of(p) if p["mirror"] else None
         mesh = self.db.get("meshes", p["mesh_id"]) if p.get("mesh_id") else None
         if mesh:
             mesh = dict(mesh); mesh["bbox"] = loads(mesh.pop("bbox_json", None), None); mesh.pop("path", None)
@@ -451,6 +453,18 @@ class App:
         p["slice"] = job
         if job and job.get("grams") is not None and fil:
             p["corrected_grams"] = job["grams"] * (loads(fil.get("correction_json"), {}).get("factor") or 1.0)
+        # supports: a second slice with them generated; the difference is the support material (removed, not weighed)
+        sp = (p["print"] or {}).get("supports") or {}
+        p["support_slice"] = None
+        if sp.get("enabled") and mesh and prof and fil:
+            pj = p | {"orient_json": json.dumps(p["orient"]), "modifiers_json": json.dumps(p["modifiers"]), "print_json": json.dumps(p["print"])}
+            sj = self.jobs.cached_result(pj, loads(prof["params_json"], {}), fil, supports=sp)
+            if sj and sj.get("grams") is not None and job and job.get("grams") is not None:
+                p["support_slice"] = {"id": sj["id"], "grams": max(0.0, sj["grams"] - job["grams"]), "total_grams": sj["grams"], "print_time_s": sj.get("print_time_s")}
+            else:
+                from .jobs import part_okey
+                pend = self.db.one("SELECT status, error FROM slice_jobs WHERE part_id=? AND orient_key=? AND extra_json IS NOT NULL AND status IN ('queued','running','error') ORDER BY id DESC LIMIT 1", [p["id"], part_okey(pj)])
+                p["support_slice"] = {"status": pend["status"], "error": pend.get("error")} if pend else None
         return p
 
     def _profile_view(self, prof: dict) -> dict:
@@ -474,6 +488,10 @@ class App:
         prof = self.db.get("profiles", p["profile_id"]); fil = self.db.get("filaments", p["filament_id"])
         try:
             job = self.jobs.ensure_slice(p, loads(prof["params_json"], {}), fil, purpose="current", priority=priority)
+            from .jobs import part_supports
+            sp = part_supports(p)
+            if sp:
+                self.jobs.ensure_slice(p, loads(prof["params_json"], {}), fil, purpose="supports", priority=priority + 1, supports=sp)
         except Exception as e:
             return {"error": str(e)}
         if job["status"] == "done":
@@ -1507,12 +1525,12 @@ class Handler(BaseHTTPRequestHandler):
         pid = db.insert("printed_parts", {"robot_id": rid, "line_item_id": item_id, "mesh_id": b.get("mesh_id"), "orient_json": orient_json,
                                           "scale": float(b.get("scale") or 1.0), "filament_id": filament_id, "profile_id": profile_id,
                                           "role": b.get("role") or "structure", "locked": 0, "constraints_json": json.dumps(b.get("constraints") or {}),
-                                          "mirror": 1 if b.get("mirror") else 0})
+                                          "mirror": 1 if b.get("mirror") else 0, "print_json": json.dumps(b.get("print") or {})})
         if b.get("mesh_id") and (b.get("orient") is None or b.get("auto_orient", True)):
             try:
                 mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if b.get("mirror"):
-                    tri = meshio.transform(tri, None, 1.0, True)
+                    tri = meshio.transform(tri, None, 1.0, mirror_axis=((b.get("print") or {}).get("mirror_axis") or "x"))
                 cands = orient.auto_orient(tri)
                 if cands:
                     db.update("printed_parts", pid, {"orient_json": json.dumps({"mode": "auto", "quat": cands[0]["quat"], "label": cands[0]["label"]})})
@@ -1756,12 +1774,26 @@ class Handler(BaseHTTPRequestHandler):
         db = self.app.db
         p = db.get("printed_parts", pid)
         upd = {}
-        geometry_changed = False
+        geometry_changed = False; supports_changed = False
         if "orient" in b:
             upd["orient_json"] = json.dumps(b["orient"]); geometry_changed = True
         for k in ("scale", "mirror", "mesh_id"):
             if k in b:
                 upd[k] = (1 if b[k] else 0) if k == "mirror" else b[k]; geometry_changed = True
+        if "print" in b or "mirror_axis" in b:
+            pj = loads(p.get("print_json"), {}) or {}
+            if isinstance(b.get("print"), dict):
+                pj.update(b["print"])
+            if "mirror_axis" in b:
+                ax = str(b["mirror_axis"] or "").lower()
+                pj["mirror_axis"] = ax if ax in ("x", "y", "z") else None
+                upd["mirror"] = 1 if pj["mirror_axis"] else 0
+                if not pj["mirror_axis"]:
+                    pj.pop("mirror_axis", None)
+            upd["print_json"] = json.dumps(pj)
+            geometry_changed = geometry_changed or "mirror_axis" in b or pj.get("mirror_axis") != (loads(p.get("print_json"), {}) or {}).get("mirror_axis")
+            if "print" in b and "supports" in (b["print"] or {}):
+                supports_changed = True
         for k in ("filament_id", "profile_id", "role", "notes"):
             if k in b:
                 upd[k] = b[k]
@@ -1778,7 +1810,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
                 if upd.get("mirror", p.get("mirror")):
-                    tri = meshio.transform(tri, None, 1.0, True)
+                    tri = meshio.transform(tri, None, 1.0, mirror_axis=orient.mirror_of(dict(p, **upd)))
                 cands = orient.auto_orient(tri)
                 if cands:
                     db.update("printed_parts", pid, {"orient_json": json.dumps({"mode": "auto", "quat": cands[0]["quat"], "label": cands[0]["label"]})})
@@ -1787,6 +1819,8 @@ class Handler(BaseHTTPRequestHandler):
         if geometry_changed or "profile_id" in b or "filament_id" in b:
             self._flag_reweigh_for_part(pid)
             self.app.current_slice_for_part(pid)
+        elif supports_changed:
+            self.app.current_slice_for_part(pid)          # queue the slice-with-supports; the part's own weight is unchanged
         if "profile_id" in b and p.get("line_item_id"):
             pass
         db.update("robots", p["robot_id"], {"updated": now()})
@@ -1796,10 +1830,11 @@ class Handler(BaseHTTPRequestHandler):
         db = self.app.db
         p = db.get("printed_parts", pid)
         li = db.get("line_items", p["line_item_id"]) if p.get("line_item_id") else None
+        pj = loads(p.get("print_json"), {}) or {}
         b = {"name": name or ((li["description"] if li else "Part") + " (mirror)"), "mesh_id": p["mesh_id"], "mirror": not p.get("mirror"),
              "filament_id": p["filament_id"], "profile_id": p["profile_id"], "role": p["role"], "scale": p["scale"],
              "orient": loads(p["orient_json"], {}), "auto_orient": False, "section_id": li["section_id"] if li else None,
-             "constraints": loads(p["constraints_json"], {})}
+             "constraints": loads(p["constraints_json"], {}), "print": dict(pj, mirror_axis="x") if not p.get("mirror") else {k: v for k, v in pj.items() if k != "mirror_axis"}}
         # mirroring about X flips the orientation quaternion's x-axis components
         q = b["orient"].get("quat", [0, 0, 0, 1])
         b["orient"] = dict(b["orient"], quat=[q[0], -q[1], -q[2], q[3]])

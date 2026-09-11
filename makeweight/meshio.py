@@ -426,14 +426,18 @@ def axis_angle(axis, ang) -> np.ndarray:
                      [z * x * C - y * s, z * y * C + x * s, c + z * z * C]])
 
 
-def transform(tri: np.ndarray, R: np.ndarray | None = None, scale: float = 1.0, mirror_x: bool = False) -> np.ndarray:
+def transform(tri: np.ndarray, R: np.ndarray | None = None, scale: float = 1.0, mirror_x=False, mirror_axis: str | None = None) -> np.ndarray:
+    """Scale, optional reflection about one axis (x/y/z — in the part's own frame, before the rotation), then rotate.
+    `mirror_x` is the old boolean form (= axis "x"); `mirror_axis` wins when given."""
+    axis = (mirror_axis or ("x" if mirror_x else None) or "").lower()
     pts = tri.reshape(-1, 3) * scale
-    if mirror_x:
-        pts = pts * np.array([-1.0, 1.0, 1.0])
+    if axis in ("x", "y", "z"):
+        f = np.ones(3); f["xyz".index(axis)] = -1.0
+        pts = pts * f
     if R is not None:
         pts = (R @ pts.T).T
     out = pts.reshape(-1, 3, 3)
-    if mirror_x:
+    if axis in ("x", "y", "z"):
         out = out[:, ::-1, :]  # keep outward winding after reflection
     return out
 

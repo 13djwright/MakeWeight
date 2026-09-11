@@ -399,7 +399,7 @@ class Presets:
                     break
         return d
 
-    def process_for(self, params: dict, machine: str) -> dict:
+    def process_for(self, params: dict, machine: str, supports: dict | None = None) -> dict:
         from . import profiles
         p = profiles.normalize(params)
         nozzle = f"{p['nozzle']:g}"
@@ -425,6 +425,8 @@ class Presets:
             "timelapse_type": "0", "spiral_mode": "0", "print_sequence": "by layer",
         }
         d.update(over)
+        if supports and supports.get("enabled"):
+            d.update(support_keys(supports))
         mach_name = _MACHINE.get(machine, _MACHINE["P1S"]).format(n=nozzle)
         cp = list(d.get("compatible_printers") or [])
         if mach_name not in cp:
@@ -434,13 +436,13 @@ class Presets:
         d["print_settings_id"] = "MakeWeight"
         return d
 
-    def write(self, work: Path, params: dict, filament: dict, machine: str) -> tuple[Path, Path, Path]:
+    def write(self, work: Path, params: dict, filament: dict, machine: str, supports: dict | None = None) -> tuple[Path, Path, Path]:
         from . import profiles
         nozzle = f"{profiles.normalize(params)['nozzle']:g}"
         work.mkdir(parents=True, exist_ok=True)
         m, pr, f = work / "machine.json", work / "process.json", work / "filament.json"
         m.write_text(json.dumps(self.machine_for(machine, nozzle)), encoding="utf-8")
-        pr.write_text(json.dumps(self.process_for(params, machine)), encoding="utf-8")
+        pr.write_text(json.dumps(self.process_for(params, machine, supports)), encoding="utf-8")
         f.write_text(json.dumps(self.filament_for(filament, machine, nozzle)), encoding="utf-8")
         return m, pr, f
 
@@ -451,6 +453,40 @@ class Presets:
             return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
         except Exception:
             return (128.0, 128.0)
+
+
+# ------------------------------------------------------------------ supports
+SUPPORT_INTERFACES = {            # what the part's "interface" choice means in Bambu's world
+    "same": None,                                   # the part's own filament
+    "support_pla": "Bambu Support For PLA",         # dedicated interface material (AMS / second nozzle)
+    "support_pla_petg": "Bambu Support For PLA-PETG",
+    "support_w": "Bambu Support W",
+    "support_g": "Bambu Support G",
+}
+
+
+def support_keys(sp: dict, interface_filament_index: int | None = None) -> dict:
+    """Bambu process / per-object keys for a part's support settings ({enabled, type, plate_only, angle, interface})."""
+    if not sp or not sp.get("enabled"):
+        return {"enable_support": "0"}
+    out = {
+        "enable_support": "1",
+        "support_type": "tree(auto)" if (sp.get("type") or "normal") == "tree" else "normal(auto)",
+        "support_style": "default",
+        "support_on_build_plate_only": "1" if sp.get("plate_only") else "0",
+        "support_threshold_angle": f"{float(sp.get('angle') or 30):g}",
+        "support_filament": "0",
+        "support_interface_filament": str(interface_filament_index) if interface_filament_index else "0",
+    }
+    return out
+
+
+def support_filament_row(sp: dict) -> dict | None:
+    """A filament row for the dedicated interface material a part asks for (None = same filament as the part)."""
+    name = SUPPORT_INTERFACES.get((sp or {}).get("interface") or "same")
+    if not name:
+        return None
+    return {"id": f"support:{name}", "name": name, "material": "PLA", "density": 1.30, "flow": 1.0, "color": "#F2F2F2", "max_vol_speed": 12}
 
 
 # ------------------------------------------------------------------ slicing

@@ -50,16 +50,33 @@ class Events:
                 pass
 
 
-def orient_key(orient_json: dict, scale: float, mirror: bool, modifiers=None) -> str:
+def orient_key(orient_json: dict, scale: float, mirror, modifiers=None) -> str:
+    """mirror: falsy, True/"x" (both encode as m1 so older cache keys stay valid), "y" → my, "z" → mz."""
     q = orient_json.get("quat", [0, 0, 0, 1])
-    key = "q" + ",".join(f"{float(x):.4f}" for x in q) + f"|s{float(scale):.4f}|m{1 if mirror else 0}"
+    mcode = "0" if not mirror else ("1" if mirror is True or mirror == "x" else str(mirror))
+    key = "q" + ",".join(f"{float(x):.4f}" for x in q) + f"|s{float(scale):.4f}|m{mcode}"
     if modifiers:
         key += "|mods" + hashlib.sha1(json.dumps(modifiers, sort_keys=True).encode()).hexdigest()[:10]
     return key
 
 
+def supports_suffix(supports: dict | None) -> str:
+    """Cache-key suffix for a slice with supports generated (the plain slice has none)."""
+    if not supports or not supports.get("enabled"):
+        return ""
+    core = {k: supports.get(k) for k in ("type", "plate_only", "angle")}
+    return "|sup" + hashlib.sha1(json.dumps(core, sort_keys=True).encode()).hexdigest()[:10]
+
+
+def part_supports(part: dict) -> dict | None:
+    """The part's support settings from print_json, or None when supports are off."""
+    pj = loads(part.get("print_json"), {}) if "print_json" in part else (part.get("print") or {})
+    sp = (pj or {}).get("supports") or {}
+    return sp if sp.get("enabled") else None
+
+
 def part_okey(part: dict) -> str:
-    return orient_key(loads(part.get("orient_json"), {}), part.get("scale") or 1.0, bool(part.get("mirror")), loads(part.get("modifiers_json"), []))
+    return orient_key(loads(part.get("orient_json"), {}), part.get("scale") or 1.0, orient.mirror_of(part), loads(part.get("modifiers_json"), []))
 
 
 MOD_KEYS = {"walls": "perimeters", "infill": "fill_density", "pattern": "fill_pattern", "top": "top_solid_layers", "bottom": "bottom_solid_layers"}
@@ -205,15 +222,16 @@ class JobManager:
             return "P1S"
 
     def ensure_slice(self, part: dict, params: dict, filament: dict, purpose: str = "current",
-                     priority: int = 5, run_id: int | None = None) -> dict:
-        """Return an existing done/queued job for this exact configuration or queue a new one."""
+                     priority: int = 5, run_id: int | None = None, supports: dict | None = None) -> dict:
+        """Return an existing done/queued job for this exact configuration or queue a new one. `supports` slices the
+        same part with supports generated (its grams minus the plain slice = the support material)."""
         if not self.slicer_version:
             self.refresh_slicer()
         mesh = self.db.get("meshes", part["mesh_id"]) if part.get("mesh_id") else None
         if not mesh:
             raise ValueError("part has no mesh")
         okey = part_okey(part)
-        phash = profiles.profile_hash(params, filament)
+        phash = profiles.profile_hash(params, filament) + supports_suffix(supports)
         ver = self.slicer_version or "none"
         machine = self.machine_for_part(part)
         ck = cache_key(mesh["sha256"], okey, phash, ver, machine)
@@ -226,7 +244,7 @@ class JobManager:
                 # same geometry+profile sliced for another part (mirror twin, duplicate): copy the result
                 jid = self.db.insert("slice_jobs", {
                     "part_id": part["id"], "cache_key": ck, "mesh_sha": mesh["sha256"], "orient_key": okey,
-                    "profile_hash": phash, "profile_json": json.dumps(profiles.normalize(params)),
+                    "profile_hash": phash, "profile_json": json.dumps(profiles.normalize(params)), "extra_json": json.dumps({"supports": supports}) if supports else None,
                     "filament_key": fkey, "slicer_version": ver,
                     "status": "done", "purpose": purpose, "run_id": run_id, "created": now(), "started": existing["started"],
                     "finished": existing["finished"], "grams": existing["grams"], "cm3": existing["cm3"],
@@ -235,7 +253,7 @@ class JobManager:
             return existing
         jid = self.db.insert("slice_jobs", {
             "part_id": part["id"], "cache_key": ck, "mesh_sha": mesh["sha256"], "orient_key": okey,
-            "profile_hash": phash, "profile_json": json.dumps(profiles.normalize(params)),
+            "profile_hash": phash, "profile_json": json.dumps(profiles.normalize(params)), "extra_json": json.dumps({"supports": supports}) if supports else None,
             "filament_key": fkey, "slicer_version": ver,
             "status": "queued", "purpose": purpose, "run_id": run_id, "created": now(), "priority": priority})
         job = self.db.get("slice_jobs", jid)
@@ -243,12 +261,12 @@ class JobManager:
         self.start()
         return job
 
-    def cached_result(self, part: dict, params: dict, filament: dict) -> dict | None:
+    def cached_result(self, part: dict, params: dict, filament: dict, supports: dict | None = None) -> dict | None:
         mesh = self.db.get("meshes", part["mesh_id"]) if part.get("mesh_id") else None
         if not mesh or not self.slicer_version:
             return None
         okey = part_okey(part)
-        ck = cache_key(mesh["sha256"], okey, profiles.profile_hash(params, filament), self.slicer_version, self.machine_for_part(part))
+        ck = cache_key(mesh["sha256"], okey, profiles.profile_hash(params, filament) + supports_suffix(supports), self.slicer_version, self.machine_for_part(part))
         return self.db.one("SELECT * FROM slice_jobs WHERE cache_key=? AND status='done' ORDER BY id DESC LIMIT 1", [ck])
 
     def queue_state(self) -> dict:
@@ -318,7 +336,7 @@ class JobManager:
         if not out.exists():
             out.parent.mkdir(parents=True, exist_ok=True)
             tri = meshio.load_mesh(meshio.mesh_path(mesh))
-            t = orient.apply_orientation(tri, loads(part.get("orient_json"), {}), float(part.get("scale") or 1.0), bool(part.get("mirror")))
+            t = orient.apply_orientation(tri, loads(part.get("orient_json"), {}), float(part.get("scale") or 1.0), orient.mirror_of(part))
             if mods and engine == "bambu":
                 boxes = [{"name": m.get("name") or "modifier", "min": [float(v) for v in m["min"]], "max": [float(v) for v in m["max"]],
                           "settings": modifier_settings(m, "bambu")} for m in mods if m.get("min") and m.get("max")]
@@ -357,7 +375,8 @@ class JobManager:
             nozzle = f"{profiles.normalize(params)['nozzle']:g}"
             center = self.presets.bed_center(machine, nozzle)
             model = self.oriented_stl(part, mesh, center=center)
-            presets = self.presets.write(jobdir / "presets", params, fil, machine)
+            supports = (loads(job.get("extra_json"), {}) or {}).get("supports")
+            presets = self.presets.write(jobdir / "presets", params, fil, machine, supports=supports)
             res = bambu_engine.run_slice(self.slicer_cmd, model, presets, jobdir, self.work_dir / "bambu_data", keep_gcode=keep)
         else:
             ini = profiles.to_prusa_ini(params, fil, self.slicer_version, machine=machine)
@@ -382,6 +401,10 @@ class JobManager:
         # here, which left the sheet's estimate at the previous profile's grams while the Estimated column showed the new one
         part = self.db.get("printed_parts", job["part_id"])
         if not part or not part.get("line_item_id"):
+            return
+        if job.get("extra_json"):
+            # a slice with supports: not the sheet's weight (supports are removed), but the part view shows it — refresh
+            self.events.emit("line_item", {"id": part["line_item_id"], "robot_id": part["robot_id"]})
             return
         # only if this job still matches the part's current configuration
         prof = self.db.get("profiles", part["profile_id"]) if part.get("profile_id") else None

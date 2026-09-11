@@ -45,6 +45,14 @@ then picks it up on its next action. If the other computer is still busy you can
 shows a resume notice — so a machine left running somewhere never blocks you. **Stop sharing** copies the data back to
 the computer.
 
+## Supports and mirrored parts
+
+Part detail → **Printing**: turn on supports for a part (normal or tree, overhang angle, build-plate-only, and a dedicated
+interface material such as Bambu Support For PLA) and the exported Bambu Studio project carries them per object, with the
+interface material added to the project's filament list. The app also slices the part once more with supports to show how
+much filament and time they cost — the sheet still counts the part alone, since supports come off. **Mirrored** reflects
+the part about X, Y or Z before slicing and exporting, so the 3MF needs no manual mirroring.
+
 ## First run
 
 Open **Jobs & setup** and click **Install Bambu Studio** (or PrusaSlicer). MakeWeight downloads it into its data

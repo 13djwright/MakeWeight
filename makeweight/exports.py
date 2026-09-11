@@ -161,7 +161,7 @@ def print_sheet_html(app, det: dict) -> str:
                 diffs.append(f"<i>Modifier “{escape(md.get('name') or 'box')}”</i> x {md['min'][0]}…{md['max'][0]}, y {md['min'][1]}…{md['max'][1]}, z {md['min'][2]}…{md['max'][2]} mm: {escape(ov)}")
             rows.append(f"""<tr><td><b>{escape(it['description'])}</b><br><small>{escape((p.get('mesh') or {}).get('filename') or 'no mesh')}</small></td>
               <td>{it['qty']:g}</td><td>{escape((p.get('filament') or {}).get('name') or '')}</td>
-              <td>{escape(p['orient'].get('label') or p['orient'].get('mode') or 'auto')}{' · scale ' + str(p['scale']) if p.get('scale') not in (None, 1, 1.0) else ''}{' · mirrored' if p.get('mirror') else ''}</td>
+              <td>{escape(p['orient'].get('label') or p['orient'].get('mode') or 'auto')}{' · scale ' + str(p['scale']) if p.get('scale') not in (None, 1, 1.0) else ''}{' · mirrored ' + str(p.get('mirror_axis') or 'x').upper() if p.get('mirror') else ''}{' · supports' if ((p.get('print') or {}).get('supports') or {}).get('enabled') else ''}</td>
               <td><code>{escape((p.get('profile') or {}).get('string') or '')}</code><br>{'<br>'.join(diffs) if diffs else '<small>Bambu default</small>'}</td>
               <td class=n>{'' if sl.get('grams') is None else f"{sl['grams']:.1f}"}</td><td class=n>{'' if p.get('corrected_grams') is None else f"{p['corrected_grams']:.1f}"}</td><td class=n>{'' if it.get('measured_grams') is None else f"{it['measured_grams']:.1f}"}</td>
               <td class=n>{'' if not sl.get('print_time_s') else f"{int(sl['print_time_s'] // 3600)}h {int(sl['print_time_s'] % 3600 // 60):02d}m"}</td>
@@ -210,7 +210,7 @@ def robot_archive(app, rid: int) -> bytes:
             item["weigh_ins"] = [{k: w.get(k) for k in ("grams", "date", "note", "profile_string")} for w in it.get("weigh_ins", [])]
             p = it.get("part")
             if p:
-                part = {k: p.get(k) for k in ("orient", "scale", "role", "locked", "constraints", "mirror", "notes", "modifiers")}
+                part = {k: p.get(k) for k in ("orient", "scale", "role", "locked", "constraints", "mirror", "notes", "modifiers", "print")}
                 if p.get("profile"):
                     part["profile"] = p["profile"]["name"]; data["profiles"][p["profile"]["name"]] = p["profile"]["params"]
                 if p.get("filament"):
@@ -272,7 +272,7 @@ def import_archive(handler, data: bytes) -> dict:
             if p:
                 db.insert("printed_parts", {"robot_id": rid, "line_item_id": iid, "mesh_id": mesh_ids.get(p.get("mesh")), "orient_json": json.dumps(p.get("orient") or {"mode": "auto", "quat": [0, 0, 0, 1]}),
                                             "scale": p.get("scale") or 1.0, "filament_id": fil_ids.get(p.get("filament")) or db.setting("default_filament_id"), "profile_id": prof_ids.get(p.get("profile")) or db.setting("default_profile_id"),
-                                            "role": p.get("role") or "structure", "locked": 1 if p.get("locked") else 0, "constraints_json": json.dumps(p.get("constraints") or {}), "mirror": 1 if p.get("mirror") else 0, "notes": p.get("notes"), "modifiers_json": json.dumps(p.get("modifiers") or [])})
+                                            "role": p.get("role") or "structure", "locked": 1 if p.get("locked") else 0, "constraints_json": json.dumps(p.get("constraints") or {}), "mirror": 1 if p.get("mirror") else 0, "notes": p.get("notes"), "modifiers_json": json.dumps(p.get("modifiers") or []), "print_json": json.dumps(p.get("print") or {})})
     for e in meta.get("events", []):
         db.insert("events", {"robot_id": rid, **{k: e.get(k) for k in ("date", "title", "placing", "notes", "total_snapshot_g")}})
     for p in db.q("SELECT id FROM printed_parts WHERE robot_id=?", [rid]):
@@ -338,10 +338,15 @@ def bambu_3mf(app, det: dict) -> bytes:
                 continue
             m = db.get("meshes", pt["mesh"]["id"])
             tri = meshio.load_mesh(meshio.mesh_path(m))
-            t = orient.apply_orientation(tri, pt["orient"], float(pt.get("scale") or 1.0), bool(pt.get("mirror")))
+            t = orient.apply_orientation(tri, pt["orient"], float(pt.get("scale") or 1.0), orient.mirror_of(pt))
             fil = db.get("filaments", pt["filament_id"]) if pt.get("filament_id") else None
             if fil and all(f["id"] != fil["id"] for f in fil_rows):
                 fil_rows.append(fil)
+            # a dedicated support-interface material (Bambu Support For PLA …) joins the project's filament list
+            sp = (pt.get("print") or {}).get("supports") or {}
+            srow = bambu_engine.support_filament_row(sp) if sp.get("enabled") else None
+            if srow and all(f["id"] != srow["id"] for f in fil_rows):
+                fil_rows.append(srow)
             lines.append((it, pt, t, (pt.get("profile") or {}).get("params") or {}, fil, m))
     if not fil_rows:
         f0 = db.one("SELECT * FROM filaments ORDER BY builtin DESC, id LIMIT 1")
@@ -388,6 +393,10 @@ def bambu_3mf(app, det: dict) -> bytes:
         gw = min(qty, per_row) * (size[0] + gap) - gap; gh = rows_n * (size[1] + gap) - gap
         mods = pt.get("modifiers") or []
         overrides = _object_overrides(params)
+        sp = (pt.get("print") or {}).get("supports") or {}
+        if sp.get("enabled"):
+            srow = bambu_engine.support_filament_row(sp)
+            overrides.update(bambu_engine.support_keys(sp, fil_index.get(srow["id"]) if srow else None))
         plate_objs = []
         for k in range(qty):
             r_, c_ = divmod(k, per_row)
