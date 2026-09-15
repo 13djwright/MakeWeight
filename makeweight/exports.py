@@ -551,6 +551,8 @@ def bambu_3mf(app, det: dict, machine: str | None = None, nozzle: str | None = N
                 project["wipe_tower_y"] = [f"{ty:g}"] * len(plates)
             else:
                 project["enable_prime_tower"] = "0"
+            # a plate every filament in the project may print on (Bambu's Cool Plate default refuses PETG/ABS/ASA presets)
+            project["curr_bed_type"] = bambu_engine.bed_type_for(fils[0]) if fils else "Textured PEI Plate"
             project["print_settings_id"] = f"{_APP} {profiles.profile_string(dparams)}" if dparams else f"{_APP} default"
             project["printer_settings_id"] = mach.get("name") or ""
             project["version"] = bs_version

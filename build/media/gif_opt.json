@@ -1,0 +1,19 @@
+[
+ {"wait":1200},
+ {"hover":".seg button:has-text('Per role')","after":700},
+ {"hover":"button:has-text('Anchored')","after":700},
+ {"scroll":"h3:has-text('Results')","after":1200},
+ {"hover":".plans .plan:has-text('A ·')","after":900},
+ {"click":".plans .plan:has-text('B ·')","after":1600},
+ {"scroll":"table:has(th:has-text('Configurations'))","after":1200},
+ {"hold":800},
+ {"scroll":"h3:has-text('Results')","after":900},
+ {"click":"button:has-text('Pareto chart')","after":1800},
+ {"hold":1000},
+ {"click":"button:has-text('Plans')","after":1200},
+ {"click":".plans .plan:has-text('B ·') button:has-text('Apply to parts')","after":2200},
+ {"hold":1200},
+ {"click":"#nav button:has-text('Weight sheet')","after":1800},
+ {"hover":"#budget","after":1200},
+ {"hold":1400}
+]

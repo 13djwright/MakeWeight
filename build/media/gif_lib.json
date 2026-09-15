@@ -1,0 +1,13 @@
+[
+ {"wait":1200},
+ {"scroll":"table.sheet input[placeholder^='Add to Weapon']","after":800},
+ {"type":["table.sheet input[placeholder^='Add to Weapon']","m3 12 sock"],"after":900},
+ {"hold":700},
+ {"hover":".suggest:not([hidden]) .opt >> nth=0","after":800},
+ {"click":".suggest:not([hidden]) .opt >> nth=0","after":1500},
+ {"hold":1200},
+ {"hover":"table.sheet tbody tr:has-text('M3 × 12 mm socket head screw') >> nth=0","after":800},
+ {"click":"table.sheet tbody tr:has-text('M3 × 12 mm socket head screw') .pill.cfg.lib >> nth=0","after":1600},
+ {"hold":1600},
+ {"key":"Escape","after":600}
+]

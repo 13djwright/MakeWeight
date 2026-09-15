@@ -441,9 +441,12 @@ class Presets:
         nozzle = f"{profiles.normalize(params)['nozzle']:g}"
         work.mkdir(parents=True, exist_ok=True)
         m, pr, f = work / "machine.json", work / "process.json", work / "filament.json"
+        fil = self.filament_for(filament, machine, nozzle)
+        proc = self.process_for(params, machine, supports)
+        proc["curr_bed_type"] = bed_type_for(fil)
         m.write_text(json.dumps(self.machine_for(machine, nozzle)), encoding="utf-8")
-        pr.write_text(json.dumps(self.process_for(params, machine, supports)), encoding="utf-8")
-        f.write_text(json.dumps(self.filament_for(filament, machine, nozzle)), encoding="utf-8")
+        pr.write_text(json.dumps(proc), encoding="utf-8")
+        f.write_text(json.dumps(fil), encoding="utf-8")
         return m, pr, f
 
     def bed_center(self, machine: str, nozzle: str = "0.4") -> tuple[float, float]:
@@ -453,6 +456,22 @@ class Presets:
             return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
         except Exception:
             return (128.0, 128.0)
+
+
+def bed_type_for(fil: dict) -> str:
+    """A plate the filament may print on. Bambu's default is the Cool Plate, which PETG / ABS / ASA / PC presets refuse
+    ('Filaments are not compatible with the plate type'); the textured PEI plate takes everything, so prefer it."""
+    def temp(key):
+        v = fil.get(key)
+        try:
+            return float((v[0] if isinstance(v, list) else v) or 0)
+        except Exception:  # noqa
+            return 0.0
+    for key, name in (("textured_plate_temp", "Textured PEI Plate"), ("hot_plate_temp", "High Temp Plate"),
+                      ("eng_plate_temp", "Engineering Plate"), ("cool_plate_temp", "Cool Plate")):
+        if temp(key) > 0:
+            return name
+    return "Textured PEI Plate"
 
 
 # ------------------------------------------------------------------ supports

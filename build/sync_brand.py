@@ -48,7 +48,7 @@ edit("install.ps1", [
     (r"\b(?!DEFAULT_)[A-Z0-9]+_(REPO|DIR)\b", ENV + r"_\1"),
 ])
 edit("README.md", [
-    (r"^# .* — .*$", f"# {APP} — {TAG}"),
+    (r'alt="[^"]* — [^"]*">', f'alt="{APP} — {TAG}">'),            # banner alt text (the title is the banner image)
 ])
 if "--check" in sys.argv:
     import subprocess

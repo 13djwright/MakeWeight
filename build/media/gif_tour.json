@@ -1,0 +1,16 @@
+[
+ {"wait":1200},
+ {"hover":".rcard:nth-child(2)","after":600},
+ {"click":".rcard:nth-child(2) button:has-text('Weight sheet')","after":1400},
+ {"hold":1200},
+ {"click":".cfgbar button:has-text('vs horizontal spinner')","after":1500},
+ {"click":".cfgbar button:has-text('Standard')","after":1000},
+ {"click":"#nav button:has-text('Printed parts')","after":1500},
+ {"hover":"table tbody tr:has-text('Outer Fork.stl')","after":900},
+ {"click":"table tbody tr:has-text('Chassis.stl') a","after":2500},
+ {"drag":["canvas.viewer",200,40],"steps":26,"after":600},
+ {"sliderSweep":["input.slider",60,10,14],"dt":70,"after":900},
+ {"scroll":".card.sweep","after":1200},
+ {"hover":".card.sweep tbody tr:nth-child(2)","after":1000},
+ {"hold":600}
+]
