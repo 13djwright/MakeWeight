@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS printed_parts (
   filament_id INTEGER, profile_id INTEGER, role TEXT DEFAULT 'structure', locked INTEGER DEFAULT 0,
   constraints_json TEXT DEFAULT '{}', mirror INTEGER DEFAULT 0, notes TEXT);
 
+CREATE TABLE IF NOT EXISTS part_mesh_history (
+  id INTEGER PRIMARY KEY, part_id INTEGER NOT NULL, mesh_id INTEGER NOT NULL, set_at REAL NOT NULL,
+  source TEXT, note TEXT);
+CREATE INDEX IF NOT EXISTS ix_pmh_part ON part_mesh_history(part_id, id);
+
 CREATE TABLE IF NOT EXISTS slice_jobs (
   id INTEGER PRIMARY KEY, part_id INTEGER, cache_key TEXT, mesh_sha TEXT, orient_key TEXT,
   profile_hash TEXT, profile_json TEXT, filament_key TEXT, slicer_version TEXT,
@@ -142,6 +147,11 @@ class DB:
             for c, typ in cols.items():
                 if c not in have:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {c} {typ}")
+        # mesh history: parts that predate it get one entry for their current mesh, dated when that mesh was stored
+        self._conn.execute("""INSERT INTO part_mesh_history (part_id, mesh_id, set_at, source)
+            SELECT p.id, p.mesh_id, COALESCE(m.created, strftime('%s','now')), 'existing' FROM printed_parts p
+            JOIN meshes m ON m.id = p.mesh_id
+            WHERE p.mesh_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM part_mesh_history h WHERE h.part_id = p.id)""")
 
     def close(self):
         """Flush and close so the files can be copied/moved (WAL is checkpointed into the main file first)."""

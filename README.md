@@ -60,6 +60,20 @@ the part about X, Y or Z before slicing and exporting, so the 3MF needs no manua
 left/right pair on one sheet line (quantity 2): every other copy in the exported project is the mirror image about the bed's
 X or Y axis — same face down, same weight, no second part.
 
+## Timestamps and mesh history
+
+Every slice result carries the time the slicer finished it: Part detail → **Slice results** has a “Sliced at” column, with
+**✓ current mesh** when the result is for the mesh the part has now and **older mesh** when it was sliced before the mesh
+was replaced. The part header shows when the current weight was sliced, and **Printed parts** has a “Mesh updated” column
+with when each part last got a new mesh.
+
+Replacing a part's mesh keeps the old one: Part detail → **Mesh history** lists every version with its date, size,
+volume, triangle count and what the slicer said for it, with the change from the previous version. **View** opens any
+version in the 3D viewer, **Compare** overlays two versions (older in orange, newer in blue, with a blend slider —
+where orange shows through material was removed, where blue stands alone it was added) or shows them side by side with
+linked cameras, alongside a table of the differences. **Restore** brings an earlier mesh back as the current one, and
+**⬇ STL** downloads any version oriented as the part is.
+
 ## First run
 
 Open **Jobs & setup** and click **Install Bambu Studio** (or PrusaSlicer). MakeWeight downloads it into its data

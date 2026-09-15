@@ -3,11 +3,11 @@
   const VS = `attribute vec3 p; attribute vec3 n; attribute float h;
     uniform mat4 mvp; uniform mat4 mv; varying vec3 vn; varying float vh;
     void main(){ gl_Position = mvp * vec4(p,1.0); vn = mat3(mv) * n; vh = h; }`;
-  const FS = `precision mediump float; varying vec3 vn; varying float vh; uniform vec3 base; uniform vec3 hl; uniform vec3 bed;
+  const FS = `precision mediump float; varying vec3 vn; varying float vh; uniform vec3 base; uniform vec3 hl; uniform vec3 bed; uniform float alpha;
     void main(){ vec3 nn = normalize(vn); float d = max(dot(nn, normalize(vec3(0.3,0.5,1.0))),0.0);
       float d2 = max(dot(nn, normalize(vec3(-0.6,-0.2,0.4))),0.0)*0.35;
       vec3 c = vh > 1.5 ? bed : (vh > 0.5 ? hl : base);
-      gl_FragColor = vec4(c * (0.35 + 0.6*d + d2), 1.0); }`;
+      gl_FragColor = vec4(c * (0.35 + 0.6*d + d2), alpha); }`;
   const LVS = `attribute vec3 p; attribute vec3 c; uniform mat4 mvp; varying vec3 vc; void main(){ gl_Position = mvp*vec4(p,1.0); vc=c; }`;
   const LFS = `precision mediump float; varying vec3 vc; void main(){ gl_FragColor = vec4(vc,1.0); }`;
 
@@ -66,7 +66,21 @@
     this.pickMode = false; this.selection = null;
     this._events();
     this._lines = null;
+    this.baseColor = [0.62, 0.68, 0.75]; this.ghost = null; this.mainAlpha = 1;
     const ro = new ResizeObserver(() => this.render()); ro.observe(canvas);
+  }
+  // build position/normal/highlight arrays for a triangle soup
+  function meshArrays(pos) {
+    const n = pos.length / 3, nrm = new Float32Array(pos.length), fn = new Float32Array(n);
+    for (let i = 0; i < n; i += 3) {
+      const a = [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], b = [pos[i * 3 + 3], pos[i * 3 + 4], pos[i * 3 + 5]], c = [pos[i * 3 + 6], pos[i * 3 + 7], pos[i * 3 + 8]];
+      const nn = norm(cross(sub(b, a), sub(c, a)));
+      for (let k = 0; k < 3; k++) { nrm[(i + k) * 3] = nn[0]; nrm[(i + k) * 3 + 1] = nn[1]; nrm[(i + k) * 3 + 2] = nn[2]; }
+      fn[i] = nn[0]; fn[i + 1] = nn[1]; fn[i + 2] = nn[2];
+    }
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < pos.length; i += 3) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], pos[i + k]); hi[k] = Math.max(hi[k], pos[i + k]); }
+    return { n, nrm, fn, bbox: { lo, hi } };
   }
   Viewer.prototype._prog = function (vs, fs) {
     const gl = this.gl, p = gl.createProgram();
@@ -74,23 +88,34 @@
     gl.linkProgram(p); return p;
   };
   Viewer.prototype.load = function (buf) {
-    const pos = parseSTL(buf); this.n = pos.length / 3; this.pos = pos;
-    const nrm = new Float32Array(pos.length), fn = new Float32Array(this.n);
-    for (let i = 0; i < this.n; i += 3) {
-      const a = [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]], b = [pos[i * 3 + 3], pos[i * 3 + 4], pos[i * 3 + 5]], c = [pos[i * 3 + 6], pos[i * 3 + 7], pos[i * 3 + 8]];
-      const nn = norm(cross(sub(b, a), sub(c, a)));
-      for (let k = 0; k < 3; k++) { nrm[(i + k) * 3] = nn[0]; nrm[(i + k) * 3 + 1] = nn[1]; nrm[(i + k) * 3 + 2] = nn[2]; }
-      fn[i] = nn[0]; fn[i + 1] = nn[1]; fn[i + 2] = nn[2];
-    }
-    this.nrm = nrm; this.faceN = fn; this.hl = new Float32Array(this.n);
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < pos.length; i += 3) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], pos[i + k]); hi[k] = Math.max(hi[k], pos[i + k]); }
-    this.bbox = { lo, hi };
+    const pos = parseSTL(buf); this.pos = pos; this._adj = null;
+    const a = meshArrays(pos);
+    this.n = a.n; this.nrm = a.nrm; this.faceN = a.fn; this.hl = new Float32Array(this.n); this.bbox = a.bbox;
     this.markBedFace();
+    this._upload(); this.resetView();
+  };
+  // a second mesh drawn translucent over the first (mesh-history comparison); null removes it
+  Viewer.prototype.setGhost = function (buf, color) {
+    const gl = this.gl;
+    if (!buf) { this.ghost = null; this.render(); return; }
+    const pos = parseSTL(buf), a = meshArrays(pos);
+    const mk = (data) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); return b; };
+    this.ghost = { n: a.n, bPos: mk(pos), bNrm: mk(a.nrm), bHl: mk(new Float32Array(a.n)), bbox: a.bbox, color: color || [0.93, 0.55, 0.2], alpha: 0.45, visible: true };
+    this.render();
+  };
+  Viewer.prototype.setBlend = function (mainAlpha, ghostAlpha) { this.mainAlpha = mainAlpha; if (this.ghost) this.ghost.alpha = ghostAlpha; this.render(); };
+  Viewer.prototype.fitAll = function () {
+    if (!this.bbox) return;
+    let { lo, hi } = this.bbox;
+    if (this.ghost) { lo = lo.map((v, i) => Math.min(v, this.ghost.bbox.lo[i])); hi = hi.map((v, i) => Math.max(v, this.ghost.bbox.hi[i])); }
     this.target = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
     this.dist = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 2.2 + 10;
-    this._upload(); this.render();
+    this.render();
   };
+  // camera sync between viewers (side-by-side comparison)
+  Viewer.prototype.getCamera = function () { return { theta: this.theta, phi: this.phi, dist: this.dist, target: this.target.slice() }; };
+  Viewer.prototype.setCamera = function (c) { this.theta = c.theta; this.phi = c.phi; this.dist = c.dist; this.target = c.target.slice(); this.render(); };
+  Viewer.prototype._moved = function () { this.render(); if (this.opts.onCamera) this.opts.onCamera(this.getCamera()); };
   Viewer.prototype.markBedFace = function () {
     // triangles lying on the bed (z ≈ min, normal down) are tinted
     const lo = this.bbox.lo, pos = this.pos, hl = this.hl;
@@ -141,11 +166,30 @@
     gl.useProgram(this.prog);
     gl.uniformMatrix4fv(gl.getUniformLocation(this.prog, 'mvp'), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(this.prog, 'mv'), false, mv);
-    gl.uniform3fv(gl.getUniformLocation(this.prog, 'base'), [0.62, 0.68, 0.75]);
+    gl.uniform3fv(gl.getUniformLocation(this.prog, 'base'), this.baseColor);
     gl.uniform3fv(gl.getUniformLocation(this.prog, 'hl'), [0.93, 0.5, 0.2]);
-    gl.uniform3fv(gl.getUniformLocation(this.prog, 'bed'), [0.35, 0.65, 0.42]);
-    this._attr(this.prog, 'p', this.bPos, 3); this._attr(this.prog, 'n', this.bNrm, 3); this._attr(this.prog, 'h', this.bHl, 1);
-    gl.drawArrays(gl.TRIANGLES, 0, this.n);
+    gl.uniform3fv(gl.getUniformLocation(this.prog, 'bed'), this.ghost ? this.baseColor : [0.35, 0.65, 0.42]);
+    const uA = gl.getUniformLocation(this.prog, 'alpha');
+    const translucent = (this.mainAlpha < 1) || !!this.ghost;
+    if (translucent) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); }
+    if (this.mainAlpha > 0.02) {
+      gl.uniform1f(uA, this.mainAlpha);
+      if (this.mainAlpha < 1) gl.depthMask(false);
+      this._attr(this.prog, 'p', this.bPos, 3); this._attr(this.prog, 'n', this.bNrm, 3); this._attr(this.prog, 'h', this.bHl, 1);
+      gl.drawArrays(gl.TRIANGLES, 0, this.n);
+      gl.depthMask(true);
+    }
+    if (this.ghost && this.ghost.visible && this.ghost.alpha > 0.02) {
+      // the other version: translucent, no depth writes, so where it sticks out past the solid mesh it tints it
+      gl.uniform3fv(gl.getUniformLocation(this.prog, 'base'), this.ghost.color);
+      gl.uniform3fv(gl.getUniformLocation(this.prog, 'bed'), this.ghost.color);
+      gl.uniform1f(uA, this.ghost.alpha);
+      if (this.ghost.alpha < 1) gl.depthMask(false);
+      this._attr(this.prog, 'p', this.ghost.bPos, 3); this._attr(this.prog, 'n', this.ghost.bNrm, 3); this._attr(this.prog, 'h', this.ghost.bHl, 1);
+      gl.drawArrays(gl.TRIANGLES, 0, this.ghost.n);
+      gl.depthMask(true);
+    }
+    if (translucent) gl.disable(gl.BLEND);
     if (this.bBox && this.nBoxLines) {
       gl.useProgram(this.lprog);
       gl.uniformMatrix4fv(gl.getUniformLocation(this.lprog, 'mvp'), false, mvp);
@@ -180,14 +224,14 @@
         const right = [mv[0], mv[4], mv[8]], up = [mv[1], mv[5], mv[9]];
         this.target = add(this.target, add(scale(right, -dx * s), scale(up, dy * s)));
       } else { this.theta -= dx * 0.01; this.phi = Math.max(-1.5, Math.min(1.5, this.phi + dy * 0.01)); }
-      this.render();
+      this._moved();
     });
     c.addEventListener('pointerup', e => {
       if (drag && drag.moved < 4 && drag.b === 0 && this.pickMode) this.pick(e);
       drag = null;
     });
     c.addEventListener('contextmenu', e => e.preventDefault());
-    c.addEventListener('wheel', e => { e.preventDefault(); this.dist *= Math.exp(e.deltaY * 0.001); this.render(); }, { passive: false });
+    c.addEventListener('wheel', e => { e.preventDefault(); this.dist *= Math.exp(e.deltaY * 0.001); this._moved(); }, { passive: false });
   };
   Viewer.prototype.pick = function (e) {
     if (!this.pos) return;
@@ -242,7 +286,7 @@
     const gl = this.gl; gl.bindBuffer(gl.ARRAY_BUFFER, this.bHl); gl.bufferData(gl.ARRAY_BUFFER, this.hl, gl.STATIC_DRAW); this.selection = null; this.render();
   };
   Viewer.prototype.setPickMode = function (on) { this.pickMode = on; this.canvas.classList.toggle('pick', on); };
-  Viewer.prototype.resetView = function () { if (!this.bbox) return; const { lo, hi } = this.bbox; this.theta = -0.7; this.phi = 1.0; this.target = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]; this.dist = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 2.2 + 10; this.render(); };
+  Viewer.prototype.resetView = function () { if (!this.bbox) return; this.theta = -0.7; this.phi = 1.0; this.fitAll(); if (this.opts.onCamera) this.opts.onCamera(this.getCamera()); };
 
   function hexToRgb(h) { h = h.replace('#', ''); if (h.length === 3) h = h.split('').map(c => c + c).join(''); const n = parseInt(h, 16); if (isNaN(n)) return [0.8, 0.8, 0.8]; return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]; }
   window.STLViewer = Viewer;

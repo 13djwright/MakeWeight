@@ -29,6 +29,15 @@
   const signed = (v, d = 1) => (v > 0 ? '+' : '') + fmt(v, d);
   const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
   const dateStr = (t) => t ? new Date(t * 1000).toLocaleString([], { dateStr: 'short' }).replace(',', '') : '';
+  const ago = (t) => {                       // "3 min ago", "yesterday", "12 Mar" — hover shows the exact time
+    if (!t) return '';
+    const d = (Date.now() / 1000 - t), day = 86400;
+    if (d < 45) return 'just now'; if (d < 3600) return `${Math.round(d / 60)} min ago`; if (d < day) return `${Math.round(d / 3600)} h ago`;
+    if (d < 2 * day) return 'yesterday'; if (d < 14 * day) return `${Math.round(d / day)} days ago`;
+    const dt = new Date(t * 1000); return dt.toLocaleDateString([], { day: 'numeric', month: 'short', year: dt.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+  };
+  const exact = (t) => t ? new Date(t * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  const when = (t, attrs) => t ? h('time', Object.assign({ title: exact(t), dateTime: new Date(t * 1000).toISOString() }, attrs || {}), ago(t)) : h('span', { class: 'rng' }, '—');
   const dayStr = (t) => !t ? '' : typeof t === 'string' ? t : new Date(t * 1000).toLocaleDateString();   // weigh-ins store YYYY-MM-DD; runs store epoch seconds
 
   // ------------------------------------------------------------ weight distribution bar + tooltip
@@ -1119,7 +1128,7 @@
         h('button', { class: 'btn primary', onClick: () => go('optimizer') }, 'Optimize →'))));
     const drop = h('div', { class: 'drop' }, 'Drop STL, OBJ, PLY or 3MF files here — one part per file, or your whole robot exported as one file. A dialog lets you say, body by body, what becomes a new part, what replaces an existing part’s mesh, and what to skip. Objects from a Bambu Studio or PrusaSlicer .3mf bring their own walls/infill settings.');
     m.append(drop); setupDrop(m, drop);
-    const tbl = h('table', { dataset: { tkey: 'parts' } }, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Cost'), h('th', null, 'Status'), h('th'))));
+    const tbl = h('table', { dataset: { tkey: 'parts' } }, h('thead', null, h('tr', null, h('th', null, 'Part'), h('th', { class: 'num' }, 'Qty'), h('th', null, 'Filament'), h('th', null, 'Orientation'), h('th', null, 'Profile'), h('th', null, 'Role'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'Measured'), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Cost'), h('th', null, 'Status'), h('th', { title: 'When this part last got a new mesh (attached, replaced or restored)' }, 'Mesh updated'), h('th'))));
     const tb = h('tbody'); tbl.append(tb);
     let tot = 0, totC = 0, totBest = 0, totTime = 0, totCost = 0;
     for (const { it, p } of parts) {
@@ -1144,10 +1153,11 @@
         h('td', { class: 'num' }, ptime ? hms(ptime) : ''),
         h('td', { class: 'num' }, cost ? '$' + cost.toFixed(2) : ''),
         h('td', null, jobPill(j, p)),
+        h('td', null, p.mesh ? h('a', { href: '#/part/' + p.id, style: { color: 'inherit', textDecoration: 'none' }, title: `${exact(p.mesh_set_at)} · ${p.mesh.filename}${p.mesh_versions > 1 ? ` · version ${p.mesh_versions} — open the part to see the history` : ''}` }, ago(p.mesh_set_at), p.mesh_versions > 1 ? h('span', { class: 'pill auto', style: { marginLeft: '6px' } }, `v${p.mesh_versions}`) : null) : ''),
         h('td', { class: 'acts' }, h('button', { class: 'btn icon', title: 'More actions', 'aria-label': 'Part menu', onClick: e => partMenu(e.currentTarget, it, p) }, '⋯'),
           h('button', { class: 'btn icon del', title: 'Delete part and its sheet line (undo with Ctrl/⌘+Z)', 'aria-label': 'Delete part', onClick: async () => { try { await api('DELETE', `parts/${p.id}`); await refreshRobot(); toastUndo(`Deleted “${it.description}”`); } catch (e) { fail(e); } } }, '✕'))));
     }
-    tb.append(h('tr', { class: 'sum', dataset: { key: 'sum' } }, h('td', null, 'Printed total'), h('td', { class: 'num' }, parts.reduce((a, x) => a + x.it.qty, 0)), h('td', { colspan: 4 }), h('td', { class: 'num' }, fmt(tot)), h('td', { class: 'num' }, fmt(totC)), h('td'), h('td', { class: 'num' }, fmt(totBest)), h('td', { class: 'num' }, totTime ? hms(totTime) : ''), h('td', { class: 'num' }, totCost ? '$' + totCost.toFixed(2) : ''), h('td', { colspan: 2 })));
+    tb.append(h('tr', { class: 'sum', dataset: { key: 'sum' } }, h('td', null, 'Printed total'), h('td', { class: 'num' }, parts.reduce((a, x) => a + x.it.qty, 0)), h('td', { colspan: 4 }), h('td', { class: 'num' }, fmt(tot)), h('td', { class: 'num' }, fmt(totC)), h('td'), h('td', { class: 'num' }, fmt(totBest)), h('td', { class: 'num' }, totTime ? hms(totTime) : ''), h('td', { class: 'num' }, totCost ? '$' + totCost.toFixed(2) : ''), h('td', { colspan: 3 })));
     m.append(h('div', { class: 'tw' }, tbl));
     if (!parts.length) m.append(h('p', { class: 'empty' }, 'No printed parts yet. Drop STL files above.'));
     m.append(h('p', { class: 'hint' }, '“× corr.” is the slicer figure times this filament’s scale-derived correction. “Total” uses your measured weight where you have one, otherwise the corrected slicer estimate.'));
@@ -1156,7 +1166,7 @@
   function jobPill(j, p) {
     if (!p.mesh) return h('button', { class: 'btn small', onClick: () => attachMeshModal({ id: p.line_item_id, part: p }) }, 'Attach mesh…');
     if (!j) return h('span', { class: 'pill auto' }, 'not sliced');
-    if (j.status === 'done') return h('span', { class: 'pill ver', title: `sliced with ${(j.slicer_version || '').startsWith('bambu-') ? 'Bambu Studio ' + j.slicer_version.slice(6) : 'PrusaSlicer ' + (j.slicer_version || '')}` }, j.time_s ? `sliced ${secs(j.time_s)}` : 'cached');
+    if (j.status === 'done') return h('span', { class: 'pill ver', title: `Sliced ${exact(j.finished)} with ${(j.slicer_version || '').startsWith('bambu-') ? 'Bambu Studio ' + j.slicer_version.slice(6) : 'PrusaSlicer ' + (j.slicer_version || '')}${j.time_s ? ` in ${secs(j.time_s)}` : ''} — for the mesh this part has now` }, 'sliced ', ago(j.finished));
     if (j.status === 'running') return h('span', { class: 'pill warn' }, 'slicing…');
     if (j.status === 'queued') return h('span', { class: 'pill warn' }, 'queued');
     if (j.status === 'error') return h('span', { class: 'pill bad', title: j.error }, 'error');
@@ -1319,6 +1329,115 @@
     setTimeout(() => { const first = document.querySelector('.modal .thumb.clickable'); if (first) first.click(); }, 50);
   }
 
+  // ---------------------------------------------------------------- mesh history (every mesh a part has had)
+  const stlUrl = (mid, pid) => `/api/meshes/${mid}/stl?part=${pid}&lod=1`;
+  const SRC_LABEL = { existing: 'first mesh', attached: 'attached', replaced: 'replaced', imported: 'imported', restored: 'restored' };
+  function meshHistoryCard(p, it) {
+    const H = p.mesh_history || [];
+    const card = h('div', { class: 'card', style: { marginTop: '12px' } });
+    const curV = H.find(v => v.current);
+    card.append(h('h3', null, 'Mesh history', h('div', { class: 'tb' },
+      H.length > 1 ? h('button', { class: 'btn small primary', onClick: () => compareMeshModal(p, it, H[H.length - 2], curV || H[H.length - 1]) }, 'Compare versions…') : null)));
+    if (!H.length) { card.append(h('p', { class: 'hint' }, 'No mesh yet. Every mesh you attach or replace is kept here, so you can look back at how the part changed.')); return card; }
+    const list = h('div', { class: 'vlist' });
+    const pct = (a, b) => (a == null || !b) ? null : (a - b) / b * 100;
+    for (let i = H.length - 1; i >= 0; i--) {
+      const v = H[i], prev = H[i - 1];
+      const dv = prev ? pct(v.volume_mm3, prev.volume_mm3) : null;
+      const dg = prev && v.sliced && prev.sliced ? v.sliced.grams - prev.sliced.grams : null;
+      const chip = (val, unit, title, digits = 1) => val == null || Math.abs(val) < (unit === '%' ? 0.05 : 0.005) ? null : h('span', { class: 'pill ' + (val > 0 ? 'bad' : 'good'), title }, `${val > 0 ? '+' : '−'}${Math.abs(val).toFixed(digits)}${unit}`);
+      list.append(h('div', { class: 'mver' + (v.current ? ' cur' : '') },
+        h('div', { class: 'vmark' }, h('span', { class: 'vnum' }, `v${v.version}`), i > 0 ? h('i', { class: 'vline' }) : null),
+        h('img', { class: 'thumb clickable', src: `/api/meshes/${v.id}/thumb.png`, alt: '', loading: 'lazy', title: 'View this version', onClick: () => viewMeshModal(p, it, v) }),
+        h('div', { class: 'vbody' },
+          h('div', { class: 'vhead' }, h('b', null, v.filename), v.current ? h('span', { class: 'pill good' }, 'current') : null, h('span', { class: 'pill auto', title: 'How this mesh got here' }, SRC_LABEL[v.source] || v.source || 'set'), h('span', { class: 'rng' }, exact(v.set_at), ' · ', ago(v.set_at))),
+          h('div', { class: 'vstats' }, `${(v.volume_mm3 / 1000).toFixed(2)} cm³`, ' · ', `${(v.bbox ? v.bbox.size : [0, 0, 0]).map(x => x.toFixed(1)).join(' × ')} mm`, ' · ', `${(v.triangles || 0).toLocaleString()} tri`, v.sliced ? h('span', null, ' · ', h('b', null, `${fmt(v.sliced.grams, 2)} g`), h('span', { class: 'rng', title: `Sliced ${exact(v.sliced.finished)} — the part's own slice of this mesh with its profile` }, ` sliced ${ago(v.sliced.finished)}`)) : h('span', { class: 'rng' }, ' · not sliced'),
+            prev ? h('span', { class: 'vdelta' }, chip(dv, '%', `Volume vs v${prev.version}: ${(prev.volume_mm3 / 1000).toFixed(2)} → ${(v.volume_mm3 / 1000).toFixed(2)} cm³`), chip(dg, ' g', `Sliced weight vs v${prev.version}`, 2)) : null)),
+        h('div', { class: 'vacts' },
+          h('button', { class: 'btn small', onClick: () => viewMeshModal(p, it, v) }, 'View'),
+          !v.current && curV ? h('button', { class: 'btn small', title: `Overlay v${v.version} on the current mesh`, onClick: () => compareMeshModal(p, it, v, curV) }, 'Compare') : null,
+          prev ? h('button', { class: 'btn small', title: `What changed from v${prev.version} to v${v.version}`, onClick: () => compareMeshModal(p, it, prev, v) }, `vs v${prev.version}`) : null,
+          !v.current ? h('button', { class: 'btn small', title: 'Make this mesh the part’s current mesh again (kept as a new history entry; the part re-slices)', onClick: () => confirmModal(`Restore v${v.version} (${v.filename}) as the current mesh of “${it.description}”? The part re-slices; nothing is deleted.`, async () => { await api('POST', `parts/${p.id}/restore_mesh`, { mesh_id: v.id }); await refreshRobot(); await renderMain(); toast(`v${v.version} restored — re-slicing`); }, 'Restore') }, 'Restore') : null,
+          h('a', { class: 'btn small', href: `/api/meshes/${v.id}/stl?part=${p.id}&download=1`, title: 'Download this version as an STL, oriented as the part is', download: '' }, '⬇ STL'))));
+    }
+    card.append(list, h('p', { class: 'hint' }, 'Every mesh this part has had, newest first — replacing a mesh keeps the old one. Deltas are against the previous version. “Sliced” is the slicer’s figure for that mesh with the part’s profile, and when it was produced.'));
+    return card;
+  }
+  async function loadStl(mid, pid) { return (await fetch(stlUrl(mid, pid) + `&t=${mid}`)).arrayBuffer(); }
+  function viewMeshModal(p, it, v) {
+    const canvas = h('canvas', { class: 'viewer', style: { height: '460px' } });
+    modal(`${it.description} · v${v.version}${v.current ? ' (current)' : ''}`, h('div', null,
+      h('p', { class: 'hint', style: { marginTop: 0 } }, `${v.filename} · ${(v.volume_mm3 / 1000).toFixed(2)} cm³ · ${(v.bbox ? v.bbox.size : []).map(x => x.toFixed(1)).join(' × ')} mm · ${(v.triangles || 0).toLocaleString()} triangles · set ${exact(v.set_at)}${v.sliced ? ` · sliced ${fmt(v.sliced.grams, 2)} g` : ''}. Shown in the part’s current orientation. Drag to orbit, wheel to zoom, right-drag to pan.`),
+      canvas), [{ label: 'Close' }], { width: 'min(900px, 96vw)' });
+    setTimeout(async () => { const vw = new STLViewer(canvas, {}); vw.load(await loadStl(v.id, p.id)); }, 0);
+  }
+  function compareMeshModal(p, it, a0, b0) {
+    const H = p.mesh_history || [];
+    let A = a0, B = b0, mode = 'overlay', blend = 0.5;
+    const OLD = [0.93, 0.55, 0.2], NEW = [0.33, 0.55, 0.85];
+    const pick = (cur, on) => select(H.map(v => [v.id, `v${v.version} · ${v.filename}${v.current ? ' (current)' : ''} · ${ago(v.set_at)}`]), cur.id, { onChange: e => on(H.find(v => v.id === +e.target.value)) });
+    const body = h('div', { class: 'cmp' });
+    const stats = h('div');
+    const stage = h('div', { class: 'stage' });
+    const legend = h('div', { class: 'legend' });
+    const seg = h('div', { class: 'seg' }, ...[['overlay', 'Overlay'], ['side', 'Side by side']].map(([k, l]) => h('button', { 'aria-pressed': String(mode === k), onClick: () => { mode = k; draw(); } }, l)));
+    const slider = h('input', { type: 'range', min: 0, max: 100, value: 50, class: 'slider', style: { width: '180px' }, title: 'Blend: left shows only the older version, right only the newer' });
+    const bufs = new Map();
+    const buf = async (v) => { if (!bufs.has(v.id)) bufs.set(v.id, await loadStl(v.id, p.id)); return bufs.get(v.id); };
+    let viewers = [];
+    const row = (label, fa, fb, unit = '', digits = 2, neutral = false) => {
+      const va = fa(A), vb = fb(B); const d = va != null && vb != null ? vb - va : null;
+      const same = d != null && Math.abs(d) < Math.pow(10, -digits) / 2;
+      const good = d == null || same || neutral ? '' : (d < 0 ? 'good' : 'bad');        // less material / weight = good
+      return h('tr', null, h('td', null, label), h('td', { class: 'num' }, va == null ? '—' : va.toFixed(digits) + unit), h('td', { class: 'num' }, vb == null ? '—' : vb.toFixed(digits) + unit),
+        h('td', { class: 'num', style: { color: good ? `var(--${good})` : (same ? 'var(--ink3)' : ''), fontWeight: same ? 400 : 600 } }, d == null ? '—' : (same ? 'same' : `${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(digits)}${unit}${va ? ` (${d > 0 ? '+' : '−'}${Math.abs(d / va * 100).toFixed(1)} %)` : ''}`)));
+    };
+    const drawStats = () => {
+      stats.textContent = '';
+      const sz = (v, i) => v.bbox ? v.bbox.size[i] : null;
+      stats.append(h('table', { class: 'nores cmpstats' }, h('thead', null, h('tr', null, h('th'), h('th', { class: 'num' }, h('i', { class: 'sw', style: { background: '#e08a33' } }), `v${A.version}`), h('th', { class: 'num' }, h('i', { class: 'sw', style: { background: '#548cd9' } }), `v${B.version}`), h('th', { class: 'num' }, 'Change'))),
+        h('tbody', null,
+          row('Volume', v => v.volume_mm3 / 1000, v => v.volume_mm3 / 1000, ' cm³'),
+          row('Sliced weight', v => v.sliced ? v.sliced.grams : null, v => v.sliced ? v.sliced.grams : null, ' g'),
+          row('Size X', v => sz(v, 0), v => sz(v, 0), ' mm', 1, true), row('Size Y', v => sz(v, 1), v => sz(v, 1), ' mm', 1, true), row('Size Z', v => sz(v, 2), v => sz(v, 2), ' mm', 1, true),
+          row('Triangles', v => v.triangles, v => v.triangles, '', 0, true))),
+        h('p', { class: 'hint' }, `v${A.version}: ${A.filename}, set ${exact(A.set_at)}. v${B.version}: ${B.filename}, set ${exact(B.set_at)}. Both are shown in the part’s current orientation; bounding boxes are of the oriented meshes.`));
+    };
+    const draw = async () => {
+      seg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(['overlay', 'side'][i] === mode)));
+      stage.textContent = ''; viewers = [];
+      legend.textContent = '';
+      legend.append(h('span', null, h('i', { style: { background: '#e08a33' } }), `v${A.version} (older${A.current ? ', current' : ''})`), h('span', null, h('i', { style: { background: '#548cd9' } }), `v${B.version}${B.current ? ' (current)' : ''}`));
+      if (mode === 'overlay') {
+        legend.append(h('span', { class: 'rng' }, 'Where orange shows through, material was removed; where blue stands alone, it was added.'), h('span', { style: { marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '6px' } }, h('span', { class: 'rng' }, `v${A.version}`), slider, h('span', { class: 'rng' }, `v${B.version}`)));
+        const c = h('canvas', { class: 'viewer', style: { height: '480px' } }); stage.append(c);
+        const vw = new STLViewer(c, {}); viewers = [vw];
+        vw.baseColor = NEW; vw.load(await buf(B)); vw.setGhost(await buf(A), OLD); vw.fitAll(); applyBlend();
+      } else {
+        const ca = h('canvas', { class: 'viewer', style: { height: '440px' } }), cb = h('canvas', { class: 'viewer', style: { height: '440px' } });
+        stage.append(h('div', { class: 'pane' }, h('div', { class: 'plabel' }, `v${A.version} · ${A.filename}`), ca), h('div', { class: 'pane' }, h('div', { class: 'plabel' }, `v${B.version} · ${B.filename}`), cb));
+        let syncing = false;
+        const va = new STLViewer(ca, { onCamera: cam => { if (syncing) return; syncing = true; vb.setCamera(cam); syncing = false; } });
+        const vb = new STLViewer(cb, { onCamera: cam => { if (syncing) return; syncing = true; va.setCamera(cam); syncing = false; } });
+        viewers = [va, vb]; va.baseColor = OLD; vb.baseColor = NEW;
+        va.load(await buf(A)); vb.load(await buf(B));
+        // same framing for both, so differences are not hidden by different zoom
+        const lo = A.bbox && B.bbox ? [0, 1, 2].map(i => Math.min(va.bbox.lo[i], vb.bbox.lo[i])) : va.bbox.lo, hi = A.bbox && B.bbox ? [0, 1, 2].map(i => Math.max(va.bbox.hi[i], vb.bbox.hi[i])) : va.bbox.hi;
+        const cam = { theta: -0.7, phi: 1.0, target: [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2], dist: Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 2.2 + 10 };
+        va.setCamera(cam); vb.setCamera(cam);
+      }
+      drawStats();
+    };
+    const applyBlend = () => { const vw = viewers[0]; if (!vw || mode !== 'overlay') return; const t = blend; vw.setBlend(t < 0.5 ? Math.max(0.15, t * 2) : 1, t > 0.5 ? Math.max(0.15, (1 - t) * 2 * 0.9) : 0.9); };
+    slider.addEventListener('input', () => { blend = +slider.value / 100; applyBlend(); });
+    body.append(
+      h('div', { class: 'cmpbar' }, h('label', { class: 'flt' }, h('span', null, 'Older'), pick(A, v => { A = v; draw(); })), h('span', { class: 'arrow' }, '→'), h('label', { class: 'flt' }, h('span', null, 'Newer'), pick(B, v => { B = v; draw(); })),
+        h('button', { class: 'btn small', title: 'Swap the two versions', onClick: () => { [A, B] = [B, A]; draw(); } }, '⇄'), h('span', { style: { flex: 1 } }), seg, h('button', { class: 'btn small', onClick: () => viewers.forEach(v => v.resetView()) }, 'Reset view')),
+      stage, legend, stats);
+    modal(`${it.description} · compare mesh versions`, body, [{ label: 'Close' }], { width: 'min(1180px, 96vw)' });
+    draw();
+  }
+
   // ---------------------------------------------------------------- part detail
   let viewer = null;
   V.part = async function (m) {
@@ -1335,7 +1454,8 @@
     const p = await api('GET', `parts/${pid}`); const st = S.state;
     const upd = (patch) => api('PUT', `parts/${p.id}`, patch).then(async () => { await refreshRobot(); await renderMain(); }).catch(fail);
     m.append(h('div', { class: 'head' }, h('div', null, h('h1', null, it.description, h('button', { class: 'btn icon', title: 'Rename part', 'aria-label': 'Rename part', style: { marginLeft: '6px', verticalAlign: 'middle' }, onClick: () => renameModal(it) }, '✎'), p.locked && h('span', { class: 'pill lock', style: { marginLeft: '8px' } }, '🔒 locked')),
-      h('p', null, p.mesh ? `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ` · mirrored (${(p.mirror_axis || 'x').toUpperCase()})` : ''}` : 'No mesh attached yet')),
+      h('p', null, p.mesh ? h('span', null, `${p.mesh.filename} · ${p.mesh.triangles.toLocaleString()} triangles · ${(p.mesh.volume_mm3 / 1000).toFixed(2)} cm³ · ${p.mesh.bbox.size.map(v => v.toFixed(0)).join(' × ')} mm${p.scale !== 1 ? ` · scale ${p.scale}` : ''}${p.mirror ? ` · mirrored (${(p.mirror_axis || 'x').toUpperCase()})` : ''} · mesh updated `, when(p.mesh_set_at), p.mesh_versions > 1 ? ` (version ${p.mesh_versions})` : '',
+        p.slice && p.slice.status === 'done' ? h('span', null, ' · sliced ', when(p.slice.finished), h('span', { class: 'pill good', style: { marginLeft: '6px' }, title: `The current weight (${fmt(p.slice.grams, 2)} g) was sliced ${exact(p.slice.finished)} from the mesh the part has now` }, '✓ valid')) : null) : 'No mesh attached yet')),
       h('div', { class: 'tb' },
         h('select', { onChange: e => go('part', e.target.value) }, ...all.map(x => h('option', { value: x.part.id, selected: x.part.id === pid }, x.description))),
         h('button', { class: 'btn', onClick: () => attachMeshModal(it) }, p.mesh ? 'Replace mesh…' : 'Attach mesh…'),
@@ -1429,6 +1549,9 @@
           h('td', { class: 'num', style: { color: cur && cur.grams != null && j.grams != null ? (j.grams > cur.grams ? 'var(--bad)' : 'var(--good)') : '' } }, cur && cur.grams != null && j.grams != null && !isCur ? signed(j.grams - cur.grams, 2) : ''),
           h('td', { class: 'num' }, j.print_time_s ? hms(j.print_time_s) : ''),
           h('td', { class: 'num' }, j.time_s ? secs(j.time_s) : (j.status === 'done' ? 'cached' : '')),
+          h('td', { class: 'when' }, j.status === 'done' ? h('span', null, when(j.finished), p.mesh && j.mesh_sha === p.mesh.sha256
+            ? h('span', { class: 'pill good', style: { marginLeft: '6px' }, title: `Valid: this result is for the mesh the part has now (${p.mesh.filename}), sliced ${exact(j.finished)}` }, '✓ current mesh')
+            : h('span', { class: 'pill warn', style: { marginLeft: '6px' }, title: 'Sliced from an earlier mesh of this part — the number does not describe the current geometry' }, 'older mesh')) : when(j.created)),
           h('td', { class: 'acts' }, !isCur && !p.locked && h('button', { class: 'btn small', title: 'Make this the part’s profile (creates or reuses a matching profile)', onClick: () => applyParamsAsProfile(p, pr) }, 'Apply'),
             deletable(r) && h('button', { class: 'btn icon del', title: 'Remove this result', 'aria-label': 'Remove result', onClick: () => delRows([j.id]) }, '✕'))));
       }
@@ -1440,15 +1563,16 @@
         h('button', { class: 'btn small', onClick: () => exactSweepModal(p) }, 'Exact sweep…'),
         h('button', { class: 'btn small', onClick: async () => { try { await api('POST', `parts/${p.id}/orientation_sweep`, {}); toast('Orientation sweep queued (6 candidates)'); } catch (e) { fail(e); } } }, 'Orientation sweep'))),
         all.length > 1 ? filterBar : null,
-        h('div', { class: 'tw' }, h('table', { dataset: { tkey: 'sweep' } }, h('thead', null, h('tr', null, h('th', { class: 'nosort' }, master), h('th', null, 'Profile'), h('th', null, 'Settings'), h('th', null, 'Filament'), h('th', null, 'Engine'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th', { class: 'nosort' }))), sweepRows)),
+        h('div', { class: 'tw' }, h('table', { dataset: { tkey: 'sweep' } }, h('thead', null, h('tr', null, h('th', { class: 'nosort' }, master), h('th', null, 'Profile'), h('th', null, 'Settings'), h('th', null, 'Filament'), h('th', null, 'Engine'), h('th', { class: 'num' }, 'Slicer g'), h('th', { class: 'num' }, '× corr.'), h('th', { class: 'num' }, 'vs current'), h('th', { class: 'num' }, 'Print time'), h('th', { class: 'num' }, 'Slice'), h('th', { title: 'When the slicer finished, and whether the result is for the mesh the part has now' }, 'Sliced at'), h('th', { class: 'nosort' }))), sweepRows)),
         !rows.length && h('p', { class: 'hint' }, all.length ? 'No results match these filters.' : 'No slices yet for this orientation.'),
-        h('p', { class: 'hint' }, 'Every row is a real slice. “Settings” is walls · top/bottom layers · infill · layer height. Grey rows came from a different slicer engine. Remove rows you no longer need; the current result cannot be removed.'),
+        h('p', { class: 'hint' }, 'Every row is a real slice. “Settings” is walls · top/bottom layers · infill · layer height. “Sliced at” is when the slicer finished — ✓ means the result is for the mesh the part has now; “older mesh” rows were sliced before the mesh was replaced. Grey rows came from a different slicer engine. Remove rows you no longer need; the current result cannot be removed.'),
         orientJobs.length ? h('div', null, h('h3', { style: { marginTop: '14px' } }, 'Orientation sweep · current profile'), h('div', { class: 'tw' }, h('table', null, h('tbody', null, ...orientJobs.filter((j, i, a) => a.findIndex(x => x.orient_key === j.orient_key) === i).sort((a, b) => (a.grams ?? 1e9) - (b.grams ?? 1e9)).map(j => h('tr', null, h('td', { class: 'mono' }, j.orient_key.split('|')[0].replace('q', 'quat ')), h('td', { class: 'num' }, j.status === 'done' ? fmt(j.grams, 2) + ' g' : j.status), h('td', null, j.status === 'done' && !p.locked && h('button', { class: 'btn small', onClick: () => upd({ orient: { mode: 'manual', quat: j.orient_key.split('|')[0].slice(1).split(',').map(Number), label: 'from sweep' } }) }, 'Use')))))))) : null);
     };
     const redrawSweep = () => { const nc = buildSweep(lastP); sweepCard.replaceWith(nc); sweepCard = nc; };
     let lastP = p;
     let sweepCard = buildSweep(p);
     left.append(sweepCard);
+    left.append(meshHistoryCard(p, it));
     const cur = p.slice;
     // background refresh while slices land: swap only the sweep card and the header status, never the viewer
     S.partRefresh = async (force = false) => {

@@ -410,3 +410,35 @@ table.fixed td.sugcell{overflow:visible}
 table.sheet td .dwrap{display:block;min-width:0}
 table.sheet td .dwrap .nm{vertical-align:bottom}
 table.sheet td .dwrap.chips .nm{display:inline-block;max-width:calc(100% - 64px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---- mesh history (part detail) ---- */
+.vlist{display:flex;flex-direction:column;margin-top:6px}
+.mver{display:grid;grid-template-columns:44px 96px 1fr auto;gap:12px;align-items:center;padding:10px 8px;border-radius:8px;position:relative}
+.mver + .mver{border-top:1px solid var(--rule)}
+.mver.cur{background:var(--good-soft)}
+.mver .thumb{width:96px;height:72px}
+.vmark{position:relative;align-self:stretch;display:flex;justify-content:center}
+.vnum{display:inline-flex;align-items:center;justify-content:center;width:34px;height:24px;border-radius:999px;font-size:12px;font-weight:700;background:var(--panel2);color:var(--ink2);border:1px solid var(--rule);margin-top:24px;z-index:1}
+.mver.cur .vnum{background:var(--good);color:#fff;border-color:transparent}
+.vline{position:absolute;left:50%;top:48px;bottom:-11px;width:2px;background:var(--rule);transform:translateX(-50%)}
+.vbody{min-width:0}
+.vhead{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;font-size:13px}
+.vhead b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}
+.vstats{font-size:12px;color:var(--ink2);margin-top:4px;display:flex;flex-wrap:wrap;gap:0 4px;align-items:center}
+.vdelta{display:inline-flex;gap:4px;margin-left:8px}
+.vacts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.vacts a.btn{text-decoration:none}
+time{cursor:help;border-bottom:1px dotted var(--rule)}
+td.when{white-space:nowrap}
+/* compare dialog */
+.cmp .cmpbar{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin-bottom:10px}
+.cmp .cmpbar .flt{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2)}
+.cmp .cmpbar .arrow{color:var(--ink3);font-size:16px}
+.cmp .stage{display:flex;gap:12px}
+.cmp .stage .pane{flex:1;min-width:0}
+.cmp .stage .plabel{font-size:12px;color:var(--ink2);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmp .stage canvas.viewer{width:100%}
+.cmp .legend{margin-top:10px;align-items:center}
+.cmpstats{margin-top:12px;width:auto;min-width:420px}
+.cmpstats th .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+@media (max-width:820px){.ver{grid-template-columns:44px 1fr}.mver .thumb{display:none}.vacts{grid-column:2;justify-content:flex-start}.cmp .stage{flex-direction:column}}

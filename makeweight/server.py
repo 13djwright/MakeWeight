@@ -435,6 +435,9 @@ class App:
         if mesh:
             mesh = dict(mesh); mesh["bbox"] = loads(mesh.pop("bbox_json", None), None); mesh.pop("path", None)
         p["mesh"] = mesh
+        hist = self.db.one("SELECT COUNT(*) n, MAX(set_at) t FROM part_mesh_history WHERE part_id=?", [p["id"]]) if mesh else None
+        p["mesh_set_at"] = (hist or {}).get("t") or (mesh or {}).get("created")      # when this part last got a (new) mesh
+        p["mesh_versions"] = int((hist or {}).get("n") or (1 if mesh else 0))
         prof = self.db.get("profiles", p["profile_id"]) if p.get("profile_id") else None
         fil = self.db.get("filaments", p["filament_id"]) if p.get("filament_id") else None
         p["profile"] = self._profile_view(prof) if prof else None
@@ -466,6 +469,34 @@ class App:
                 pend = self.db.one("SELECT status, error FROM slice_jobs WHERE part_id=? AND orient_key=? AND extra_json IS NOT NULL AND status IN ('queued','running','error') ORDER BY id DESC LIMIT 1", [p["id"], part_okey(pj)])
                 p["support_slice"] = {"status": pend["status"], "error": pend.get("error")} if pend else None
         return p
+
+    def record_mesh(self, part_id: int, mesh_id: int, source: str = "replaced"):
+        """Append a mesh-history entry for the part (skipped when the newest entry already is this mesh)."""
+        last = self.db.one("SELECT mesh_id FROM part_mesh_history WHERE part_id=? ORDER BY id DESC LIMIT 1", [part_id])
+        if last and last["mesh_id"] == mesh_id:
+            return
+        self.db.insert("part_mesh_history", {"part_id": part_id, "mesh_id": mesh_id, "set_at": now(), "source": source})
+
+    def mesh_history(self, p: dict) -> list[dict]:
+        """Every mesh this part has had, oldest first, with what the slicer said for it at the time."""
+        rows = self.db.q("""SELECT h.id hid, h.set_at, h.source, h.note, m.* FROM part_mesh_history h JOIN meshes m ON m.id=h.mesh_id
+                             WHERE h.part_id=? ORDER BY h.id""", [p["id"]])
+        prof = self.db.get("profiles", p["profile_id"]) if p.get("profile_id") else None
+        fil = self.db.get("filaments", p["filament_id"]) if p.get("filament_id") else None
+        phash = profiles.profile_hash(loads(prof["params_json"], {}), fil) if prof and fil else None
+        out = []
+        for i, r in enumerate(rows):
+            m = dict(r); m["bbox"] = loads(m.pop("bbox_json", None), None); m.pop("path", None)
+            m["version"] = i + 1; m["current"] = (m["id"] == p.get("mesh_id"))
+            # the part's own slice of that mesh (current profile first, else whatever was sliced), newest done
+            j = None
+            if phash:
+                j = self.db.one("SELECT grams, finished, slicer_version FROM slice_jobs WHERE part_id=? AND mesh_sha=? AND profile_hash=? AND status='done' AND extra_json IS NULL AND purpose!='orient' ORDER BY id DESC LIMIT 1", [p["id"], m["sha256"], phash])
+            if not j:
+                j = self.db.one("SELECT grams, finished, slicer_version FROM slice_jobs WHERE part_id=? AND mesh_sha=? AND status='done' AND extra_json IS NULL AND purpose!='orient' ORDER BY id DESC LIMIT 1", [p["id"], m["sha256"]])
+            m["sliced"] = j
+            out.append(m)
+        return out
 
     def _profile_view(self, prof: dict) -> dict:
         prof = dict(prof)
@@ -1125,8 +1156,12 @@ class Handler(BaseHTTPRequestHandler):
                 tri = app.preview_mesh(mesh) if qs.get("lod") else meshio.load_mesh(meshio.mesh_path(mesh))
                 if qs.get("part"):
                     p = db.get("printed_parts", int(qs["part"]))
-                    tri = orient.apply_orientation(tri, loads(p["orient_json"], {}), float(p.get("scale") or 1.0), bool(p.get("mirror")))
-                return self._bytes(meshio.to_binary_stl_bytes(tri), "model/stl")
+                    tri = orient.apply_orientation(tri, loads(p["orient_json"], {}), float(p.get("scale") or 1.0), orient.mirror_of(p))
+                fname = None
+                if qs.get("download"):
+                    base = re.sub(r"\.(stl|obj|ply|3mf)$", "", mesh.get("filename") or "mesh", flags=re.I)
+                    fname = f"{base}.stl"
+                return self._bytes(meshio.to_binary_stl_bytes(tri), "model/stl", fname)
 
         # ---- parts
         if parts[0] == "parts":
@@ -1149,6 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
                         j["filament_name"] = fk[4] if len(fk) > 4 else (f"{fk[0]} g/cm³" if fk and fk[0] else "")
                         j["engine"] = "Bambu Studio" if (j.get("slicer_version") or "").startswith("bambu-") else "PrusaSlicer"
                     v["jobs"] = jobs
+                    v["mesh_history"] = app.mesh_history(p)
                     return self._json(v)
                 if m == "PUT":
                     return self._json(self._update_part(pid, self._jbody()))
@@ -1226,6 +1262,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(info)
             if sub == "mirror_copy" and m == "POST":
                 return self._json(self._mirror_copy(pid, self._jbody().get("name")))
+            if sub == "restore_mesh" and m == "POST":
+                # bring an earlier mesh back as the current one (a new history entry — nothing is rewritten)
+                mid = int(self._jbody().get("mesh_id") or 0)
+                if not db.one("SELECT 1 FROM part_mesh_history WHERE part_id=? AND mesh_id=?", [pid, mid]):
+                    raise KeyError("mesh")
+                return self._json(self._update_part(pid, {"mesh_id": mid, "force": True, "mesh_source": "restored"}))
 
         # ---- jobs
         if path == "jobs" and m == "GET":
@@ -1526,6 +1568,8 @@ class Handler(BaseHTTPRequestHandler):
                                           "scale": float(b.get("scale") or 1.0), "filament_id": filament_id, "profile_id": profile_id,
                                           "role": b.get("role") or "structure", "locked": 0, "constraints_json": json.dumps(b.get("constraints") or {}),
                                           "mirror": 1 if b.get("mirror") else 0, "print_json": json.dumps(b.get("print") or {})})
+        if b.get("mesh_id"):
+            self.app.record_mesh(pid, int(b["mesh_id"]), b.get("mesh_source") or ("imported" if b.get("params") else "attached"))
         if b.get("mesh_id") and (b.get("orient") is None or b.get("auto_orient", True)):
             try:
                 mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
@@ -1806,6 +1850,8 @@ class Handler(BaseHTTPRequestHandler):
         if p["locked"] and not b.get("force") and any(k in upd for k in ("orient_json", "filament_id", "profile_id", "scale", "mirror")) and not ("locked" in b and not b["locked"]):
             raise ValueError("Part is locked: unlock it to change profile, orientation or filament")
         db.update("printed_parts", pid, upd)
+        if b.get("mesh_id") and int(b["mesh_id"]) != (p.get("mesh_id") or 0):
+            self.app.record_mesh(pid, int(b["mesh_id"]), b.get("mesh_source") or ("replaced" if p.get("mesh_id") else "attached"))
         if "mesh_id" in b and b.get("mesh_id") and "orient" not in b and loads(p["orient_json"], {}).get("mode", "auto") == "auto":
             try:
                 mesh = db.get("meshes", b["mesh_id"]); tri = meshio.load_mesh(meshio.mesh_path(mesh))
