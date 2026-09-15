@@ -1,21 +1,98 @@
 [
- {"wait":1000},
- {"drop":[".drop",["/tmp/show/build/Chassis v2.stl"]],"after":1200},
- {"wait":2500},
- {"hold":1800},
- {"hover":".modal select >> nth=0","after":900},
- {"click":".modal footer button:has-text('Apply')","after":1500},
- {"wait":1500},
- {"hold":1200},
- {"click":"table tbody tr:has-text('Chassis') a","after":2500},
- {"scroll":".card:has(h3:has-text('Mesh history'))","after":1400},
- {"hover":".mver.cur","after":900},
- {"click":".mver.cur .vacts button:has-text('vs v1')","after":2500},
- {"hold":1000},
- {"sliderSweep":[".cmp input.slider",50,0,10],"dt":90,"after":600},
- {"sliderSweep":[".cmp input.slider",0,100,16],"dt":90,"after":900},
- {"drag":[".cmp canvas.viewer",160,30],"steps":20,"after":600},
- {"click":".cmp .seg button:has-text('Side by side')","after":2200},
- {"drag":[".cmp .pane:first-child canvas.viewer",140,20],"steps":20,"after":800},
- {"hold":1400}
+{
+"wait": 1000
+},
+{
+"drop": [
+".drop",
+[
+"/tmp/show/build/Chassis v2.stl"
+]
+],
+"after": 660
+},
+{
+"wait": 2500
+},
+{
+"hold": 990
+},
+{
+"hover": ".modal select >> nth=0",
+"after": 495
+},
+{
+"click": ".modal footer button:has-text('Apply')",
+"after": 825
+},
+{
+"wait": 1500
+},
+{
+"hold": 660
+},
+{
+"click": "table tbody tr:has-text('Chassis') a",
+"after": 1375
+},
+{
+"scroll": ".card:has(h3:has-text('Mesh history'))",
+"after": 770
+},
+{
+"hover": ".mver.cur",
+"after": 495
+},
+{
+"click": ".mver.cur .vacts button:has-text('vs v1')",
+"after": 1375
+},
+{
+"hold": 550
+},
+{
+"sliderSweep": [
+".cmp input.slider",
+50,
+0,
+10
+],
+"dt": 90,
+"after": 330
+},
+{
+"sliderSweep": [
+".cmp input.slider",
+0,
+100,
+16
+],
+"dt": 90,
+"after": 495
+},
+{
+"drag": [
+".cmp canvas.viewer",
+160,
+30
+],
+"steps": 20,
+"after": 330
+},
+{
+"click": ".cmp .seg button:has-text('Side by side')",
+"after": 1210
+},
+{
+"drag": [
+".cmp .pane:first-child canvas.viewer",
+140,
+20
+],
+"steps": 20,
+"after": 440
+},
+{
+"hold": 770
+}
 ]

@@ -39,15 +39,28 @@ def main(src, dst, spec_path):
     f = ImageFont.truetype(FONT, int(13.5 * s)); fb = ImageFont.truetype(FONT_B, int(13.5 * s)); fn = ImageFont.truetype(FONT_B, int(12 * s))
     d = ImageDraw.Draw(im)
     P = lambda v: v * s
+    markers_only = spec.get("style") == "markers"
+    fbig = ImageFont.truetype(FONT_B, int(14 * s))
     for c in spec["callouts"]:
         bx, by, bw, bh = c["box"]; bx -= ox; by -= oy
         x0, y0, x1, y1 = P(bx) - P(4) + pad, P(by) - P(4) + pad, P(bx + bw) + P(4) + pad, P(by + bh) + P(4) + pad
         # highlight ring
         glow = Image.new("RGBA", im.size, (0, 0, 0, 0)); gd = ImageDraw.Draw(glow)
-        gd.rounded_rectangle((x0 - P(3), y0 - P(3), x1 + P(3), y1 + P(3)), radius=P(9), outline=ACCENT + (90,), width=int(P(6)))
+        gd.rounded_rectangle((x0 - P(3), y0 - P(3), x1 + P(3), y1 + P(3)), radius=P(9), outline=ACCENT + (70 if markers_only else 90,), width=int(P(5)))
         im.alpha_composite(glow.filter(ImageFilter.GaussianBlur(P(3))))
         d = ImageDraw.Draw(im)
         rrect(d, (x0, y0, x1, y1), P(7), outline=ACCENT, width=int(P(2.5)))
+        if markers_only:
+            # numbered badge only; the explanation is a numbered list next to the image
+            pos = c.get("badge", "tl")
+            bxc = {"l": x0, "r": x1, "c": (x0 + x1) / 2}[pos[1] if len(pos) > 1 else "l"] if pos not in ("l", "r") else {"l": x0, "r": x1}[pos]
+            byc = {"t": y0, "b": y1, "m": (y0 + y1) / 2}[pos[0]] if pos not in ("l", "r") else (y0 + y1) / 2
+            bxc += P(c.get("bdx", 0)); byc += P(c.get("bdy", 0))
+            br = P(13)
+            shadow(im, (bxc - br, byc - br, bxc + br, byc + br), br, blur=P(3), alpha=90, offset=(0, P(2))); d = ImageDraw.Draw(im)
+            d.ellipse((bxc - br, byc - br, bxc + br, byc + br), fill=ACCENT, outline="white", width=int(P(2.5)))
+            d.text((bxc, byc), str(c["n"]), fill="white", font=fbig, anchor="mm")
+            continue
         # label card
         width = P(c.get("width", 250))
         lines = []

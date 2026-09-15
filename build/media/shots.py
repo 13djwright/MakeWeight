@@ -9,7 +9,7 @@ SHOTS = {
         boxes={"budget": "#budget", "cfg": ".cfgbar", "best": ".hdr .stat:nth-child(1)", "over": ".hdr .stat:nth-child(3)",
                "add": "table.sheet input[placeholder^='Add to Drive']", "fix": "button:has-text('Fix weight')", "lib": "table.sheet tbody tr:has-text('MR63') .pill.cfg.lib, table.sheet tbody tr:has-text('MR63') .lib"},
         callouts=[
-            ("budget", 1, "Always-on budget bar\nMeasured (dark) and estimated (light) mass against the class limit and your safety margin.", "bottom", dict(dx=-10, dy=34, width=300)),
+            ("budget", 1, "Always-on budget bar\nMeasured (dark) and estimated (light) mass against the class limit and your safety margin.", "bottom", dict(badge="l", bdx=-14)),
             ("cfg", 2, "Configurations\nLoadouts like “Standard” and “vs horizontal spinner”. A line can belong to some or all of them; every configuration must make weight.", "bottom", dict(dx=330, dy=130, width=330)),
             ("best", 3, "Best known\nYour scale wins where you have weighed something; everything else uses its estimate.", "bottom", dict(dx=0, dy=14, width=260)),
             ("add", 4, "Type to add a line\nThe component library autocompletes as you type; a fastener brings its weight, price and link along.", "bottom", dict(dx=60, dy=10, width=320)),
@@ -74,7 +74,8 @@ def run(name):
     r = subprocess.run(["node", "rig.js", "shot", sp["route"], raw, json.dumps(opts)], env=ENV, capture_output=True, text=True)
     print(name, r.stdout.strip()[-200:], r.stderr.strip()[-300:])
     boxes = json.load(open(raw.replace(".png", ".boxes.json")))
-    spec = {"scale": 2, "callouts": [], "downscale": sp.get("downscale", 1.0)}
+    spec = {"scale": 2, "callouts": [], "downscale": sp.get("downscale", 1.0), "style": "markers"}
+    legend = []
     if sp.get("crop_to"):
         key, dx, dy, w, hh = sp["crop_to"]
         b = boxes.get(key)
@@ -83,19 +84,22 @@ def run(name):
             spec["crop"] = [x0, max(0, int(b["y"] - dy)), w, hh]
     if sp.get("crop"):
         spec["crop"] = sp["crop"]
-    for key, n, text, at, extra in sp["callouts"]:
+    for co in sp["callouts"]:
+        key, n, text, at, extra = co[:5]
         b = boxes.get(key)
         if not b:
             print("  missing box", key); continue
         spec["callouts"].append({"n": n, "box": [b["x"], b["y"], b["width"], b["height"]], "text": text, "at": at, **extra})
+        title, _, body = text.partition("\n")
+        legend.append((n, title, body))
+    legend.sort()
+    md = "\n".join(f"{n}. **{t}** — {b}" for n, t, b in legend)
+    open(f"{OUT}/{name}.legend.md", "w").write(md + "\n")
     json.dump(spec, open(f"raw/{name}.spec.json", "w"))
     subprocess.run(["python3", "annotate.py", raw, f"{OUT}/{name}-annotated.png", f"raw/{name}.spec.json"], check=True)
-    # plain (unannotated) copy too
     from PIL import Image
-    im = Image.open(raw)
-    if spec.get("crop"):
-        x, y, w, hh = spec["crop"]; im = im.crop((x * 2, y * 2, (x + w) * 2, (y + hh) * 2))
-    im.convert("RGB").save(f"{OUT}/{name}.png", optimize=True)
+    im = Image.open(f"{OUT}/{name}-annotated.png").convert("RGB")
+    im.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE).save(f"{OUT}/{name}-annotated.png", optimize=True)
 
 
 if __name__ == "__main__":

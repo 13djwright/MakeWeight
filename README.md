@@ -73,7 +73,9 @@ Each robot has its own weight sheet, printed parts, optimizer runs and competiti
 component library are shared. The cards on the home page show at a glance whether each configuration of each robot
 makes weight.
 
-<img src="docs/media/home-annotated.png" width="900" alt="Robots page">
+<img src="docs/media/home-annotated.png" width="900" alt="Robots page, numbered">
+
+1. **One card per robot** — A budget bar for every configuration, how much of the mass is measured, the printed-part budget, last weigh-in and optimizer run.
 
 ### The weight sheet
 
@@ -83,10 +85,21 @@ budget bar at the top never leaves the screen.
 
 <img src="docs/media/sheet-annotated.png" width="900" alt="Weight sheet, annotated">
 
+1. **Always-on budget bar** — Measured (dark) and estimated (light) mass against the class limit and your safety margin.
+2. **Configurations** — Loadouts like “Standard” and “vs horizontal spinner”. A line can belong to some or all of them; every configuration must make weight.
+3. **Best known** — Your scale wins where you have weighed something; everything else uses its estimate.
+4. **Type to add a line** — The component library autocompletes as you type; a fastener brings its weight, price and link along.
+5. **Over the limit?** — “Fix weight” hands the sheet to the optimizer.
+
 Printed parts on the sheet are not typed in — they are sliced. Configurations let one sheet describe several loadouts
 (forks for most fights, a wedge against horizontal spinners) with every one of them checked against the limit.
 
 <img src="docs/media/sheet-printed-annotated.png" width="900" alt="Printed parts on the weight sheet, annotated">
+
+1. **Sliced for real** — The estimate is Bambu Studio’s own figure for this mesh, profile and filament — re-sliced whenever any of them change.
+2. **Weigh-ins** — Enter what the scale says after printing; it replaces the estimate and teaches the filament a correction factor.
+3. **Supports and pairs are part of the line** — Outer Forks print with tree supports; Wheel Mounting Pods are a mirrored left/right pair on one line.
+4. **Only in one configuration** — The TPU wedge is greyed out here because the Standard loadout does not carry it.
 
 Type into the empty row at the bottom of any section to add a line. The component library autocompletes as you type, and
 picking a library part links the line to it, so a weigh-in of that part on any robot updates every sheet that uses it.
@@ -102,6 +115,11 @@ settings along.
 
 <img src="docs/media/parts-annotated.png" width="900" alt="Printed parts table, annotated">
 
+1. **Drop your CAD exports here** — STL, OBJ, PLY or a Bambu / Prusa 3MF — one file per part or the whole robot in one. A dialog matches each body to a new or existing part.
+2. **Supports, mirroring and pairs travel with the part** — Tree supports with a Support-for-PLA interface here; the exported project carries them per object.
+3. **Real slicer grams** — “× corr.” applies the correction each filament learns from your weigh-ins.
+4. **Timestamps** — When each mesh last changed, and when the current weight was sliced.
+
 ### Part detail
 
 One page per part: orientation and a 3D preview, a layer view for sanity-checking, the filament and profile, print-prep
@@ -109,6 +127,12 @@ options that travel into the exported project, and a table of every slice ever r
 profiles side by side.
 
 <img src="docs/media/part-annotated.png" width="900" alt="Part detail page, annotated">
+
+1. **Orientation** — Presets, 90° turns, or pick a face and lay it on the bed. Every change re-slices the part.
+2. **Layer view** — Walls, shells and infill layer by layer — a quick sanity check that the orientation makes sense before you print.
+3. **Filament and profile** — Current slice, corrected weight, print time and cost update as you change them.
+4. **Every row is a real slice** — Compare profiles side by side, apply one to the part, and see when each result was sliced and whether it is for the current mesh.
+5. **Print prep** — Supports (with a dedicated interface material), mirrored parts and left/right pairs — written into the exported 3MF.
 
 Replacing a mesh keeps the old one. **Mesh history** lists every version with its date, volume, size and the weight the
 slicer gave it, and **Compare** overlays two versions — older in orange, newer in blue, where orange shows through material
@@ -126,6 +150,11 @@ and then re-slices every plan it shows for real. Robots with several configurati
 
 <img src="docs/media/optimizer-annotated.png" width="900" alt="Optimizer results, annotated">
 
+1. **Plans, not guesses** — Each plan is re-sliced for real before it appears — “confirmed” means the grams came from the slicer, not from a model.
+2. **One click to adopt** — “Apply to parts” writes the plan’s profiles onto the sheet.
+3. **Per part, per configuration** — Parts shared by every configuration get one profile; configuration-specific parts may differ. The totals must fit everywhere.
+4. **Model vs. reality** — The fitted model predicted 226.8 g; the confirming slices came back at 227.6 g.
+
 Every plan card states the heaviest configuration, the slack, the settings per role and whether the grams are confirmed.
 **Apply to parts** writes the plan's profiles onto the sheet; lines you had already weighed are flagged for a re-weigh
 because the print changed.
@@ -141,6 +170,10 @@ Measured weights in the library propagate to every robot that uses the part, and
 carry it and how many.
 
 <img src="docs/media/library-annotated.png" width="900" alt="Component library, fasteners tab, annotated">
+
+1. **Fasteners with real specs** — Thread, length, head, drive, material — McMaster-style. The label and a weight estimate come from the specs; duplicate one to make the next length.
+2. **Shared across robots** — Measure a component once; every sheet that uses it updates.
+3. **Where it is used** — Which robots carry the component and how many, straight from their sheets.
 
 ### Weigh-ins, calibration and the competition log
 
