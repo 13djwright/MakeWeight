@@ -26,11 +26,33 @@ Write-Host "${App}: unpacking into $target ..."
 Expand-Archive -Path $zip -DestinationPath $Dest -Force
 Remove-Item $zip -Force
 Get-ChildItem -Path $target -Recurse -File | Unblock-File
-$shortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "${App}.lnk"
-try {
-  $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut($shortcut)
-  $sc.TargetPath = Join-Path $target "${App}.bat"; $sc.WorkingDirectory = $target; $sc.Description = "${App} - ${Tagline}"; $sc.Save()
-  Write-Host "${App}: desktop shortcut created."
-} catch { Write-Host "${App}: (could not create a desktop shortcut: $_)" }
+# A launcher in the install root that always starts the newest version folder (self-updates unpack next to the
+# previous version); shortcuts point here so they keep working after an update. The app rewrites it on start.
+$rootBat = Join-Path $Dest "${App}.bat"
+@"
+@echo off
+rem ${App} - starts the newest installed version (each update unpacks next to the previous one).
+setlocal
+set "ROOT=%~dp0"
+set "DIR="
+if exist "%ROOT%current.txt" set /p DIR=<"%ROOT%current.txt"
+if not "%DIR%"=="" if exist "%ROOT%%DIR%\${App}.bat" goto run
+for /f "delims=" %%d in ('dir /b /ad /o-d "%ROOT%${App}-*" 2^>nul') do (
+  if exist "%ROOT%%%d\${App}.bat" ( set "DIR=%%d" & goto run )
+)
+echo No ${App} version found next to this launcher. Reinstall from the GitHub page.
+pause
+exit /b 1
+:run
+call "%ROOT%%DIR%\${App}.bat" %*
+"@ -replace "`r?`n", "`r`n" | Set-Content -Path $rootBat -Encoding ASCII -NoNewline
+Set-Content -Path (Join-Path $Dest "current.txt") -Value $Name -Encoding ASCII -NoNewline
+foreach ($dir in @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))) {
+  try {
+    $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut((Join-Path $dir "${App}.lnk"))
+    $sc.TargetPath = $rootBat; $sc.WorkingDirectory = $Dest; $sc.Description = "${App} - ${Tagline}"; $sc.Save()
+  } catch { Write-Host "${App}: (could not create a shortcut in ${dir}: $_)" }
+}
+Write-Host "${App}: desktop and Start menu shortcuts created."
 Write-Host "${App}: installed. Starting ..."
-Start-Process -FilePath (Join-Path $target "${App}.bat") -WorkingDirectory $target
+Start-Process -FilePath $rootBat -WorkingDirectory $Dest

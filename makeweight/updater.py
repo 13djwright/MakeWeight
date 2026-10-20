@@ -43,6 +43,87 @@ def target() -> str:
     return "linux-x86_64"
 
 
+# ---------------------------------------------------------------- installed versions next to this one
+_VER_DIR = re.compile(rf"^{re.escape(APP)}-(\d+(?:\.\d+)*)-")
+
+
+def installed_versions() -> list[tuple[tuple, Path]]:
+    """(version, folder) for every unpacked version of this app next to the running one, newest first."""
+    here = paths.install_dir()
+    out = []
+    try:
+        for sib in here.parent.iterdir():
+            m = _VER_DIR.match(sib.name)
+            if m and sib.is_dir() and Updater._launcher(sib):
+                out.append((vtuple(m.group(1)), sib))
+    except OSError:
+        pass
+    return sorted(out, key=lambda t: t[0], reverse=True)
+
+
+def newer_installed() -> Path | None:
+    """The launcher of a newer version that is already unpacked next to this one (a self-update that an old shortcut
+    bypassed), or None."""
+    if paths.is_portable() or not _VER_DIR.match(paths.install_dir().name):
+        return None
+    mine = vtuple(current_version())
+    for v, d in installed_versions():
+        if v > mine:
+            return Updater._launcher(d)
+    return None
+
+
+ROOT_LAUNCHER_BAT = "\r\n".join([
+    "@echo off",
+    f"rem {APP} - starts the newest installed version (each update unpacks next to the previous one).",
+    "setlocal",
+    "set \"ROOT=%~dp0\"",
+    "set \"DIR=\"",
+    "if exist \"%ROOT%current.txt\" set /p DIR=<\"%ROOT%current.txt\"",
+    f"if not \"%DIR%\"==\"\" if exist \"%ROOT%%DIR%\\{APP}.bat\" goto run",
+    f"for /f \"delims=\" %%d in ('dir /b /ad /o-d \"%ROOT%{APP}-*\" 2^>nul') do (",
+    f"  if exist \"%ROOT%%%d\\{APP}.bat\" ( set \"DIR=%%d\" & goto run )",
+    ")",
+    f"echo No {APP} version found next to this launcher. Reinstall from the GitHub page.",
+    "pause",
+    "exit /b 1",
+    ":run",
+    f"call \"%ROOT%%DIR%\\{APP}.bat\" %*",
+    "",
+])
+
+
+def register_install(install: Path | None = None):
+    """Make the install root point at `install` (this version or a freshly unpacked one): current.txt + a root
+    launcher that always starts the newest version, and on Windows repoint the installer's shortcuts at that root
+    launcher — a shortcut into a versioned folder would keep starting the old copy after every self-update."""
+    install = install or paths.install_dir()
+    if paths.is_portable() or not _VER_DIR.match(install.name):
+        return
+    root = install.parent
+    try:
+        (root / "current.txt").write_text(install.name, encoding="utf-8")
+    except OSError as e:
+        log.warning("install root: could not write current.txt: %s", e)
+    if platform.system() != "Windows":
+        return                              # macOS / Linux use the `current` symlink the installer made
+    bat = root / f"{APP}.bat"
+    try:
+        if not bat.exists() or bat.read_text(encoding="utf-8", errors="replace") != ROOT_LAUNCHER_BAT:
+            bat.write_text(ROOT_LAUNCHER_BAT, encoding="utf-8")
+    except OSError as e:
+        log.warning("install root: could not write %s: %s", bat, e)
+        return
+    ps = (f"$ws = New-Object -ComObject WScript.Shell; foreach ($p in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {{ "
+         f"$lnk = Join-Path $p '{APP}.lnk'; if (Test-Path $lnk) {{ $s = $ws.CreateShortcut($lnk); if ($s.TargetPath -ne '{bat}') {{ $s.TargetPath = '{bat}'; $s.WorkingDirectory = '{root}'; $s.Save() }} }} }}")
+    try:
+        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:  # noqa
+        log.warning("install root: could not repoint shortcuts: %s", e)
+
+
 def current_version() -> str:
     try:
         return json.loads((Path(__file__).parent / "version.json").read_text())["version"]
@@ -200,6 +281,7 @@ class Updater:
             launcher = self._launcher(dest)
             if launcher is None:
                 raise RuntimeError(f"Unpacked to {dest} but found no launcher inside")
+            register_install(dest)       # root launcher + shortcuts now start the new version, whichever way it is opened
             log.info("update: unpacked to %s; handing over to %s", dest, launcher)
             self.launch_path = launcher
             # tell the new version how we were running so it comes back on the same address without opening a second tab

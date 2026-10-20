@@ -1867,6 +1867,7 @@
     left.append(plansEl, paretoEl);
     if (res.why) right.append(h('div', { class: 'card' }, h('h3', null, 'Why not lighter?'), ...res.why.map((w, i) => h('div', { class: 'step' }, h('span', { class: 'n' }, i + 1), h('div', null, h('b', null, w.title), ' ', w.text)))));
     if (res.model_report) right.append(h('div', { class: 'card' }, h('h3', null, 'Model check'), h('p', { class: 'hint', style: { margin: 0 } }, res.model_report)));
+    if (res.slice_errors && res.slice_errors.length) right.append(h('div', { class: 'callout bad' }, h('b', null, `${res.slice_errors.length} slice${res.slice_errors.length > 1 ? 's' : ''} failed during this run. `), 'The optimizer worked around the holes; fix the cause and run again for exact numbers. ', h('details', null, h('summary', null, 'What failed'), h('ul', { style: { margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px' } }, ...res.slice_errors.map(e => h('li', null, e))))));
     right.append(howCard);
     // live refresh while running
     if (run.status === 'running') S.pollRun = run.id; else S.pollRun = null;

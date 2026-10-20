@@ -18,6 +18,7 @@ import numpy as np
 
 from . import estimator, meshio, orient, profiles
 from .db import loads, now
+from .log import log
 
 DEFAULT_RANGES = {"walls": [2, 5], "top": [3, 5], "bottom": [3, 5], "infill": [8, 40]}
 ROLE_WEIGHT = {"weapon": 1.0, "armor": 1.0, "structure": 0.8, "internal": 0.5, "cosmetic": 0.2}
@@ -130,7 +131,12 @@ class GridModel:
     def predict(self, W, T, B, d) -> float:
         pts = sorted(self.points.get((W, T, B), []))
         if not pts:
-            raise KeyError((W, T, B))
+            # a grid cell whose slices all failed: use the nearest cell that did slice (same walls first, then the
+            # closest shell counts) rather than crashing the whole run — the confirm step re-slices the plan anyway
+            if not self.points:
+                raise KeyError((W, T, B))
+            key = min(self.points, key=lambda k: (abs(k[0] - W) * 10 + abs(k[1] - T) + abs(k[2] - B)))
+            pts = sorted(self.points[key])
         if len(pts) == 1:
             return pts[0][1]
         xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
@@ -299,10 +305,17 @@ class Optimization:
                 job = self.slice(pm, pm.params_for(*c), "anchor", 4)
                 job_map[job["id"]] = (pm, c)
         rows = self.wait_jobs(list(job_map.keys()), "anchor slices")
+        failed: list[str] = []
         for jid, (pm, c) in job_map.items():
             r = rows.get(jid)
             if r and r["status"] == "done" and r["grams"] is not None:
                 pm.anchors[c] = r["grams"]
+            else:
+                failed.append(f"{pm.item['description']} {c[0]}W/{c[1]}S/{c[2]:g}%: {(r or {}).get('error') or (r or {}).get('status') or 'no result'}")
+        if failed:
+            # keep going with what sliced; say so on the run (Jobs & setup has the full slicer output)
+            self.res["slice_errors"] = failed[:20]
+            log.warning("optimizer run %s: %d anchor slice(s) failed — %s", self.run_id, len(failed), failed[0])
         # ---- stage 2: models
         self.save("fitting models")
         reports = []
@@ -327,6 +340,8 @@ class Optimization:
                 fm.fit(anchors)
                 pm.model = fm
                 reports.append(f"{pm.item['description']}: {len(anchors)} anchors, fit rms {fm.rms_err * 100:.1f}%, coef {np.round(fm.coef, 2).tolist()}")
+        if failed:
+            reports.append(f"{len(failed)} slice{'s' if len(failed) != 1 else ''} failed and were skipped (first: {failed[0]})")
         self.res["model_report"] = "; ".join(reports)
 
         # ---- stage 3 + 4: search, confirm, refine

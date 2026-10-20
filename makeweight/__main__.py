@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--root", default=None, help="folder holding data/ and slicer/ (default: app folder)")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--no-forward", action="store_true", help="start this version even if a newer one is installed next to it")
     args = ap.parse_args()
     if args.root:
         os.environ["MAKEWEIGHT_HOME"] = str(Path(args.root).resolve())
@@ -45,6 +46,21 @@ def main():
     root = paths.data_root()
     from . import log as applog
     applog.setup(local)
+    # an old shortcut can start a superseded copy after a self-update: hand over to the newest installed version
+    from . import updater as upd
+    if not args.no_forward and not os.environ.get("MAKEWEIGHT_NO_FORWARD"):
+        newer = upd.newer_installed()
+        if newer:
+            applog.log.info("a newer version is installed at %s — starting that instead", newer.parent)
+            try:
+                upd.Updater.launch(newer, [a for a in sys.argv[1:]])
+                return
+            except Exception:  # noqa
+                applog.log.exception("could not start the newer version; continuing with this one")
+    try:
+        upd.register_install()          # current.txt + root launcher, so shortcuts keep finding the newest version
+    except Exception:  # noqa
+        applog.log.exception("install root bookkeeping failed")
     if paths.is_shared() and not root.exists():
         applog.log.warning("shared data folder %s is not reachable — falling back to this computer's own data until it is", root)
         os.environ["MAKEWEIGHT_SHARED_UNREACHABLE"] = str(root)

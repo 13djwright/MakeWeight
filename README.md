@@ -60,7 +60,9 @@ anywhere and start `MakeWeight.command` / `MakeWeight.bat` / `makeweight.sh` —
 (System Settings → Privacy & Security → Open Anyway).
 
 To update: **Jobs & setup → Check for updates → Update now**. The app downloads the new version itself, starts it and
-hands over; your data stays in your user data folder (`~/Library/Application Support/MakeWeight`,
+hands over. Each version unpacks into its own folder next to the previous one; the shortcuts and the launcher in the
+install folder always start the newest, and an older copy that gets started by hand steps aside for it. Your data stays
+in your user data folder (`~/Library/Application Support/MakeWeight`,
 `%LOCALAPPDATA%\MakeWeight`, `~/.local/share/makeweight`) and is untouched. Older version folders are listed on that
 page and are safe to delete.
 </details>
